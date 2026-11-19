@@ -23434,6 +23434,45 @@ describe("course-support release heartbeat persistence", () => {
     expect(prismaMocks.queryRaw).not.toHaveBeenCalled();
   });
 
+  it("records the release heartbeat after a definite writer refusal without repeating its transition", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(ownedBatch());
+    prismaMocks.batchFindMany.mockResolvedValue([]);
+    prismaMocks.queryRaw.mockResolvedValue([{ now }]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValueOnce({ acquired: false });
+    await expect(heartbeatCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1",
+      ownerThreadId: "owner-thread", status: "VERIFYING", now })).resolves.toMatchObject({ outcome: "ready", heartbeatRecorded: true });
+    expect(leaseMocks.withPostgresAdvisoryTextLease).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.batchFindFirst).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a release heartbeat whose admitted ownership check fails", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(ownedBatch()).mockResolvedValueOnce(null);
+    prismaMocks.queryRaw.mockResolvedValue([{ now }]);
+    leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValueOnce({ acquired: false });
+    await expect(heartbeatCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1",
+      ownerThreadId: "owner-thread", status: "VERIFYING", now })).resolves.toMatchObject({ outcome: "recovery_required", heartbeatRecorded: false });
+    expect(leaseMocks.withPostgresAdvisoryTextLease).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("reports sustained release-heartbeat writer refusal without calling it ownership loss", async () => {
+    vi.useFakeTimers();
+    try {
+      prismaMocks.batchFindFirst.mockResolvedValue(ownedBatch());
+      leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValue({ acquired: false });
+      const result = heartbeatCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1",
+        ownerThreadId: "owner-thread", status: "VERIFYING", now });
+      await vi.runAllTimersAsync();
+      await expect(result).resolves.toMatchObject({ outcome: "writer_busy", heartbeatRecorded: false,
+        stateChanged: false, leaseExpiresAt: null });
+      expect(prismaMocks.batchFindFirst).toHaveBeenCalledTimes(1);
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.queryRaw).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("records a bounded owner failure checkpoint without closing the batch", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue({
       ...ownedBatch(),

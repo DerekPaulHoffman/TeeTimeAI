@@ -7,7 +7,7 @@ import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 import { isSquarePublicServiceCatalogUrl } from "./square-public-read-policy";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-document-scoped-evidence-v41";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-document-scoped-evidence-v42";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -425,7 +425,7 @@ function isHistoricalBrowserCallbackFailure(route: Partial<SimulatorResearchBloc
     route.requestId && route.observedAt && Number.isFinite(Date.parse(route.observedAt)) &&
     Date.parse(route.observedAt) <= now.getTime() && !route.accessControls?.length &&
     route.researchImplementationVersion === "public-calendar-document-scoped-evidence-v40" &&
-    getSimulatorResearchImplementationVersion(route.url) === "public-calendar-document-scoped-evidence-v41" &&
+    getSimulatorResearchImplementationVersion(route.url) === SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION &&
     route.failure?.stage === "PUBLIC_READ" && route.failure.category === "UNKNOWN" &&
     route.failure.code === "UNCLASSIFIED_FAILURE" && route.failure.researchPhase === "BROWSER_DOCUMENT" &&
     route.failure.sourceLocation === "src/lib/automation/simulator-interactive-browser.ts:318");
@@ -454,6 +454,35 @@ export function repairedBrowserCallbackReceipt(input: { state: SimulatorResearch
       !(isHistoricalCatalogControllerFailure(route, now) && previous.some(entry =>
         (entry.source === "official" || entry.source === "booking") && routeIdentity(entry.requestedUrl) === routeIdentity(route.url) &&
         Date.parse(entry.observedAt) > Date.parse(route.observedAt!))))) return null;
+  return { sourceUrl: latest.sourceUrl, requestId: latest.requestId! };
+}
+
+/** v41 reached Square's public week strip but did not expose its date buttons.
+ * The shared strict inspector is now wired into this bridge; this permits only
+ * a new investigation, never rental/configuration/availability activation. */
+export function repairedSquareDateReceipt(input: { state: SimulatorResearchState;
+  priorFailedRoutes: readonly SimulatorResearchBlockedRoute[]; now: Date }) {
+  const { state, now } = input, latest = state.history.at(-1);
+  const catalog = /^https:\/\/book\.squareup\.com\/appointments\/[a-z0-9]{1,64}\/location\/[A-Z0-9]{13}\/services$/u;
+  const availability = /^https:\/\/book\.squareup\.com\/appointments\/[a-z0-9]{1,64}\/location\/[A-Z0-9]{13}\/availability$/u;
+  if (!latest || state.inFlight || state.readCount < 2 || state.readCount >= SIMULATOR_RESEARCH_MAX_READS ||
+      state.history.length !== state.readCount || !latest.rendered || latest.failure || latest.outcome !== "READ" ||
+      !catalog.test(latest.requestedUrl) || !availability.test(latest.sourceUrl) ||
+      latest.requestedUrl.replace(/\/services$/u, "") !== latest.sourceUrl.replace(/\/availability$/u, "") ||
+      getSimulatorResearchImplementationVersion(latest.sourceUrl) !== SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION ||
+      latest.publicReadEvidence?.method !== "BROWSER" || latest.publicReadEvidence.renderComplete !== false ||
+      !latest.renderWarning?.startsWith("SECONDARY_") || latest.configurationDiagnostic?.reason === "PUBLIC_PROVIDER_CONFIG_REJECTED" ||
+      !Number.isFinite(now.getTime()) || state.history.some(entry => entry.outcome !== "READ" || entry.failure || !entry.requestId ||
+        entry.httpStatus < 200 || entry.httpStatus >= 300 || entry.sourceFingerprint !== state.sourceFingerprint ||
+        entry.researchImplementationVersion !== "public-calendar-document-scoped-evidence-v41" ||
+        entry.publicReadEvidence?.sourceFingerprint !== state.sourceFingerprint || !entry.publicReadEvidence.accessControlsObserved ||
+        entry.publicReadEvidence.accessControls.length || !Number.isFinite(Date.parse(entry.observedAt)) || Date.parse(entry.observedAt) > now.getTime())) return null;
+  if (!state.history.some(entry => !entry.rendered && entry.publicReadEvidence?.method === "HTTP" &&
+      entry.requestedUrl === latest.requestedUrl && Date.parse(entry.observedAt) < Date.parse(latest.observedAt))) return null;
+  if (input.priorFailedRoutes.some(route => isProtectedSimulatorResearchDenial(route) || route.failure &&
+      !((isHistoricalCatalogControllerFailure(route, now) || isHistoricalBrowserCallbackFailure(route, now)) &&
+        state.history.some(entry => !entry.rendered && entry.publicReadEvidence?.method === "HTTP" &&
+          routeIdentity(entry.requestedUrl) === routeIdentity(route.url) && Date.parse(entry.observedAt) > Date.parse(route.observedAt!))))) return null;
   return { sourceUrl: latest.sourceUrl, requestId: latest.requestId! };
 }
 
@@ -527,7 +556,7 @@ export function hasDifferentPublicReadAfterCatalogRepair(input: {
   state: SimulatorResearchState; priorFailedRoutes: readonly SimulatorResearchBlockedRoute[];
   officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null; now: Date;
 }) {
-  if (repairedBrowserCallbackReceipt(input)) {
+  if (repairedBrowserCallbackReceipt(input) || repairedSquareDateReceipt(input)) {
     const prospective = getSimulatorResearchGuide({ ...input, state: readSimulatorResearchState(undefined, input.state.sourceFingerprint),
       priorFailedRoutes: [...input.priorFailedRoutes] });
     return prospective.suggestedReads.some(route => !route.rendered && (route.source === "official" || route.source === "booking"));

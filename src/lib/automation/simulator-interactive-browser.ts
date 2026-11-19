@@ -12,6 +12,7 @@ import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost } from "./mind
 import { isRexNamespace, isRexPublicReadPost } from "./rex-public-read-policy";
 import { isSquareAppointmentsNamespace, isSquarePublicAvailabilityPost, isSquarePublicCatalogRedirect } from "./square-public-read-policy";
 import { observedSquarePublicServiceControl, type SquarePublicServiceChoice, type SquarePublicServiceControl } from "./square-public-service-controls";
+import { inspectSquarePublicDateElement } from "@/lib/course-discovery/square-public-date-control";
 import { projectPassfactoryCalendarEvidence, type PassfactoryCalendarEvidence } from "./passfactory-calendar-evidence";
 import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
@@ -389,7 +390,10 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
         sensitiveForm: Boolean(composed.closest(e, "form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')),
         insideForm: Boolean(composed.closest(e, "form")), publicHeading: headings.length === 1 ? composed.text(headings[0]).trim().slice(0, 201) : "", selectionSummary };
       });
-      return { ...item, squareServiceSelection: observedSquarePublicServiceControl(page!.url(), item, squareChoice) };
+      const squareDate = item.tag === "button" ? await locator.evaluate(inspectSquarePublicDateElement) : undefined;
+      const observed = { ...item, ...(squareDate ? { calendar: true, name: `Date ${squareDate.date}`, label: `Date ${squareDate.date}`,
+        calendarDate: squareDate.date, calendarDateSelected: squareDate.alreadySelected === true } : {}) };
+      return { ...observed, squareServiceSelection: observedSquarePublicServiceControl(page!.url(), observed, squareChoice) };
     };
     const captureSnapshot = async (message?: string) => atPhase("BROWSER_DOCUMENT", async () => {
       for (let attempt = 0; ; attempt++) {
@@ -414,6 +418,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           controls = new Map();
           const visible = [];
           selectedCalendarFilters = [];
+          const selectedDates: string[] = [];
           const locators = await page!.locator('a[href],button,select,input,[role=combobox],[role=button][aria-haspopup="listbox"],[role=option],[role=gridcell]').all();
           for (const locator of locators.slice(0, 300)) {
             budget(10_000);
@@ -427,7 +432,9 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
               ...(item.tag === "select" ? { options: await locator.locator("option").allTextContents() } : {}) });
             if (kind === "filter") selectedCalendarFilters.push({ label: sanitizeResponderText(item.label).slice(0, 200),
               value: sanitizeResponderText(item.selectedValue ?? "").replace(/[\u200b-\u200d\ufeff]/gu, "").trim().slice(0, 160) });
+            if (item.calendarDate && item.calendarDateSelected) selectedDates.push(item.calendarDate);
           }
+          if (selectedDates.length === 1) selectedCalendarFilters.push({ label: "Date", value: selectedDates[0] });
           const image = (await page!.screenshot({ type: "png", animations: "disabled", timeout: budget(20_000) })).toString("base64");
           if (image.length > 3_000_000) throw new Error("BROWSER_SCREENSHOT_LIMIT");
           const text = sanitizeResponderText(await page!.locator("body").innerText()).slice(0, 12_000);

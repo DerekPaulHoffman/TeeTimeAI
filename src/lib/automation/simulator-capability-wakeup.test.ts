@@ -72,6 +72,28 @@ describe("simulator capability wakeup receipt", () => {
     delete last.publicReadEvidence; delete last.renderWarning;
     return f;
   }
+  function dateFixture() {
+    const f = slottedFixture(), state = f.audit.simulatorResearch!;
+    for (const entry of state.history) entry.researchImplementationVersion = "public-calendar-document-scoped-evidence-v41";
+    state.history[2].sourceUrl = slottedCatalog.replace(/\/services$/u, "/availability");
+    return f;
+  }
+  it("offers one new investigation of an old public calendar after the date-control bridge correction", () => {
+    const f = dateFixture(), before = JSON.stringify(f);
+    expect(simulatorCapabilityWakeupReceipt(f)).toEqual({ sourceUrl: slottedCatalog.replace(/\/services$/u, "/availability"),
+      requestId: "33333333-3333-4333-8333-333333333333" });
+    expect(JSON.stringify(f)).toBe(before);
+  });
+  it.each(["current collector", "different location", "missing public proof", "denied access", "no fresh catalog", "unknown old failure"])("does not wake the repaired calendar with %s", scenario => {
+    const f = dateFixture(), state = f.audit.simulatorResearch!, last = state.history[2];
+    if (scenario === "current collector") last.researchImplementationVersion = SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+    if (scenario === "different location") last.sourceUrl = last.sourceUrl.replace("AAAAAAAAAAAAA", "CCCCCCCCCCCCC");
+    if (scenario === "missing public proof") delete last.publicReadEvidence;
+    if (scenario === "denied access") last.publicReadEvidence!.accessControls = ["ACCOUNT_REQUIRED"];
+    if (scenario === "no fresh catalog") state.history[1].requestedUrl = "https://official.example.test/";
+    if (scenario === "unknown old failure") (f.audit as unknown as {simulatorResearchPriorFailures: {routes: {failure: {code: string}}[]}}).simulatorResearchPriorFailures.routes[0].failure.code = "OTHER_UNKNOWN";
+    expect(simulatorCapabilityWakeupReceipt(f)).toBeNull();
+  });
   it("wakes the precisely reproduced old production-loader failure with all original evidence retained", () => {
     const f = callbackFixture(), before = JSON.stringify(f);
     expect(simulatorCapabilityWakeupReceipt(f)).toEqual({ sourceUrl: slottedCatalog, requestId: "33333333-3333-4333-8333-333333333333" });

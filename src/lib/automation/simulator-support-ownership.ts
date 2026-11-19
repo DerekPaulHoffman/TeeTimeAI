@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { runWithCourseSupportWriterTransitionLease, withCourseSupportWriteConflictRetry, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES, isRuntimeBearingCourseSupportPath } from "./course-support-batches";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
+import { SIMULATOR_IMPLEMENTATION_BUSY } from "./simulator-support-path-admission";
 import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { assertSimulatorSupportDeployment, createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, SIMULATOR_SUPPORT_LEASE_MS, SIMULATOR_SUPPORT_SOURCE_SELECT, validateSimulatorSupportPath, type SimulatorSupportClaim } from "./simulator-support-policy";
@@ -624,7 +625,7 @@ export function claimSimulatorSupportPath(input: Owner & { path: string }) {
     const dispatch = await import("./course-support-course-dispatch");
     const batches = await tx.courseSupportBatch.findMany({ where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } }, select: { status: true, summary: true } });
     if (batches.some(batch => { const summary = batch.summary as Record<string, unknown> | null; return batch.status === "IMPLEMENTING" || (Array.isArray(summary?.plannedPaths) && summary.plannedPaths.length > 0) || (summary?.remediationDirective as Record<string, unknown> | undefined)?.requiresImplementationPath === true; }) ||
-        await dispatch.hasSimulatorSupportImplementationOwnership(tx, input.assignmentRef)) throw new Error("Another course-support worker owns implementation authority.");
+        await dispatch.hasSimulatorSupportImplementationOwnership(tx, input.assignmentRef)) throw new Error(SIMULATOR_IMPLEMENTATION_BUSY);
     const previousAudit = row.audit as CourseDispatchAudit & { simulatorRepairPending?: Record<string, unknown> | null };
     if (previousAudit.simulatorRepairPending && previousAudit.simulatorRepairPending.releaseSha !== row.claim.releaseSha) {
       throw new Error("Original simulator repair release lineage changed.");

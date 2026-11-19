@@ -8298,7 +8298,7 @@ export async function heartbeatCourseSupportBatch(
     summary: batch.summary,
   });
   const persisted = initialWouldOwnCheckout
-    ? await runWithCourseSupportWriterTransitionLease(() =>
+    ? await retryCourseSupportWriterAdmission(timeout => runWithCourseSupportWriterTransitionLease(() =>
         runCourseSupportTransactionWithRetry(async (transaction) => {
           const databaseNow = await getCourseSupportDatabaseNow(transaction);
           const current = await transaction.courseSupportBatch.findFirst({
@@ -8347,7 +8347,7 @@ export async function heartbeatCourseSupportBatch(
             true,
           );
         }),
-      )
+        { timeout }), { budgetMs: 25_000 })
     : {
         acquired: true as const,
         value: await runCourseSupportTransactionWithRetry((transaction) =>
@@ -8361,7 +8361,13 @@ export async function heartbeatCourseSupportBatch(
           ),
         ),
       };
-  const heartbeat = persisted.acquired ? persisted.value : null;
+  if (!persisted.acquired) {
+    return { outcome: "writer_busy" as const, heartbeatRecorded: false, stateChanged: false as const,
+      status: initialPlan.status, releaseSha: null, releaseAdvanced: false, leaseExpiresAt: null,
+      threadDisposition: "KEEP_VISIBLE" as const,
+      archiveReason: "The release heartbeat did not enter its writer transition; preserve the candidate and inspect current ownership before another permitted action." };
+  }
+  const heartbeat = persisted.value;
   return {
     outcome: heartbeat ? ("ready" as const) : ("recovery_required" as const),
     heartbeatRecorded: heartbeat !== null,
