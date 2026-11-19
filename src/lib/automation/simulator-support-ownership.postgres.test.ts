@@ -6,7 +6,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "./simulator-support-policy";
-import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, getSimulatorResearchImplementationVersion } from "./simulator-support-research-policy";
+import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, getSimulatorResearchImplementationVersion, readSimulatorResearchState } from "./simulator-support-research-policy";
 import { publicSimulatorFixture, type PublicSimulatorFixtureKind } from "./simulator-public-api.test-fixtures";
 import { collectSimulatorSupportResearch } from "./simulator-support-research";
 
@@ -96,6 +96,101 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     return { course, offering, peer, search, incident, run, owner: { assignmentRef, ownerThreadId: child, token: claimed.value.token, revision: claimed.value.revision }, fingerprint };
   }
   beforeEach(() => { Object.values(coreMocks).forEach(mock => mock.mockReset()); });
+
+  it("retains deferred implementation across retry and lease expiry without extra provider reads or a granted path", async () => {
+    const f = await fixture(), path = "src/lib/simulators/providers/deferred-reader.ts";
+    const originalResearch = readSimulatorResearchState(undefined, f.fingerprint);
+    originalResearch.readCount = 1;
+    originalResearch.history.push({ source: "official", requestedUrl: f.course.website!, sourceUrl: f.course.website!,
+      observedAt: new Date().toISOString(), httpStatus: 200, rendered: false, outcome: "READ", sourceFingerprint: f.fingerprint });
+    const seeded = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit;
+    seeded.simulatorResearch = originalResearch;
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: seeded as unknown as Prisma.InputJsonValue } });
+    const waited = await lane.deferSimulatorSupportImplementation({ ...f.owner, path });
+    if (!waited.acquired) throw new Error("Deferred fixture writer was busy.");
+    const owner = { ...f.owner, revision: waited.value.revision };
+    const before = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = before.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(audit.simulatorClaim).toMatchObject({ phase: "WAITING_IMPLEMENTATION", plannedPaths: [], releaseSha: null,
+      pendingImplementation: { path, sourceFingerprint: f.fingerprint } });
+    expect(await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 })).toMatchObject({ acquired: true,
+      value: { outcome: "implementation_waiting", stopWorker: true, pathGranted: false } });
+    const fetch = vi.fn();
+    await expect(lane.readSimulatorSupportSource({ ...owner, source: "official" }, { fetch })).rejects.toThrow("IMPLEMENTATION_WAITING");
+    expect(fetch).not.toHaveBeenCalled();
+    const after = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(after.status).toBe("RUNNING");
+    expect(after.audit).toEqual(before.audit);
+    await expect(lane.claimSimulatorSupportPath({ ...owner, path: "src/lib/simulators/providers/different.ts" }))
+      .rejects.toThrow("original deferred");
+    const now = new Date(Date.now() + 20 * 60_000);
+    audit.simulatorClaim!.leaseExpiresAt = new Date(now.getTime() - 1000).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const entries = [{ id: f.run.id, status: "RUNNING", parsed: audit }];
+    await client.$transaction(tx => lane.reconcileExpiredSimulatorResearchExecutions(tx, now, entries));
+    expect(entries[0].status).toBe("RUNNING");
+    const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, now));
+    expect(context).toMatchObject({ providerReadInFlight: false, implementationWaiting: true, implementationCapacityBusy: false,
+      checkpoint: { kind: "EXPIRED_OWNED_STAGE", claimLeaseExpired: true, allowedResearchRouteCount: 0,
+        ownedStage: { phase: "WAITING_IMPLEMENTATION", plannedPaths: [], pendingImplementation: { path } } } });
+    const { assessCourseSupportContinuationCheckpoint } = await import("./course-support-continuation");
+    expect(assessCourseSupportContinuationCheckpoint({ checkpoint: { ...context.checkpoint!, providerReadInFlight: false },
+      currentMainSha: baseSha, now })).toMatchObject({ eligible: true, scope: "RESUME_ORIGINAL_OWNED_STAGE" });
+    // Recover uses database time, so expire only the lease without inventing a new source or intent.
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const recovered = await lane.recoverSimulatorSupport(owner);
+    if (!recovered.acquired) throw new Error("Recovery fixture writer was busy.");
+    const granted = await lane.claimSimulatorSupportPath({ ...owner, revision: recovered.value.revision, path });
+    expect(granted).toMatchObject({ acquired: true, value: { phase: "IMPLEMENTING" } });
+    const final = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(final.simulatorClaim).toMatchObject({ phase: "IMPLEMENTING", pendingImplementation: null, plannedPaths: [path] });
+    expect(final.simulatorResearch).toEqual(originalResearch);
+  });
+
+  it("parks deferred implementation while a different original worker owns code capacity", async () => {
+    const f = await fixture(), blocker = await fixture();
+    const blocking = await lane.claimSimulatorSupportPath({ ...blocker.owner, path: "src/lib/simulators/providers/blocker.ts" });
+    if (!blocking.acquired) throw new Error("Blocking fixture writer was busy.");
+    const deferred = await lane.deferSimulatorSupportImplementation({ ...f.owner, path: "src/lib/simulators/providers/waiting.ts" });
+    if (!deferred.acquired) throw new Error("Deferred fixture writer was busy.");
+    const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit;
+    const now = new Date(Date.now() + 20 * 60_000);
+    audit.simulatorClaim!.leaseExpiresAt = new Date(now.getTime() - 1).toISOString();
+    const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, now));
+    expect(context).toMatchObject({ implementationWaiting: true, implementationCapacityBusy: true, checkpoint: null });
+    const blockedAudit = (await client.automationRun.findUniqueOrThrow({ where: { id: blocker.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(blockedAudit.simulatorClaim).toMatchObject({ phase: "IMPLEMENTING", token: blocker.owner.token,
+      plannedPaths: ["src/lib/simulators/providers/blocker.ts"] });
+  });
+
+  it.each(["CANCELLED", "SOURCE_REVISION"])("never resumes deferred implementation after %s", async change => {
+    const f = await fixture();
+    const deferred = await lane.deferSimulatorSupportImplementation({ ...f.owner, path: "src/lib/simulators/providers/waiting.ts" });
+    if (!deferred.acquired) throw new Error("Deferred fixture writer was busy.");
+    const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit;
+    if (change === "CANCELLED") await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED", alertGeneration: { increment: 1 } } });
+    else await client.courseOffering.update({ where: { id: f.offering.id }, data: { monitoringRevision: { increment: 1 } } });
+    await expect(client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date())))
+      .rejects.toThrow(/source.*changed/u);
+    await expect(lane.claimSimulatorSupportPath({ ...f.owner, revision: deferred.value.revision, path: "src/lib/simulators/providers/waiting.ts" }))
+      .rejects.toThrow(/source.*changed/u);
+    const now = new Date(Date.now() + 20 * 60_000);
+    audit.simulatorClaim!.leaseExpiresAt = new Date(now.getTime() - 1).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const entries = [{ id: f.run.id, status: "RUNNING", parsed: audit }];
+    await client.$transaction(tx => lane.reconcileExpiredSimulatorResearchExecutions(tx, now, entries));
+    expect(entries[0].status).toBe("COMPLETED");
+    const closed = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(closed.outcome).toBe(change === "CANCELLED" ? "simulator_source_withdrawn" : "simulator_source_changed");
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled();
+    expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
 
   async function engineeringFixture(boundOnly = false, bookingUrl?: string) {
     const f = await fixture(15, false, bookingUrl, undefined, true);

@@ -123,6 +123,23 @@ function fixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe("deterministic original-worker continuation", () => {
+  it.each([true, false].flatMap(trusted => ["WAITING_IMPLEMENTATION", "CLAIMED"].map(phase => ({ trusted, phase }))))
+    ("keeps ungranted $phase work on published ancestry (trusted=$trusted)", ({ trusted, phase }) => {
+    const f = validationFixture();
+    f.input.item.plannedPaths = [];
+    Object.assign(f.input.item.checkpoint.ownedStage, { phase, plannedPaths: [],
+      ...(phase === "WAITING_IMPLEMENTATION" ? { pendingImplementation: { version: 1, path: f.path, sourceFingerprint: f.input.item.sourceFingerprint } }
+        : { fullRepair: { version: 1, kind: "FAILED_LEARNER_FULL_REPAIR" } }) });
+    const originalGit = f.dependencies.git.getMockImplementation()!;
+    f.dependencies.git.mockImplementation((cwd, args) => {
+      if (cwd === f.worker && args.join(" ") === "status --porcelain -z --untracked-files=all") return "";
+      if (cwd === f.worker && args.join(" ") === `merge-base ${f.workerHead} ${f.mainSha}`)
+        return trusted ? f.workerHead : "a".repeat(40);
+      return originalGit(cwd, args);
+    });
+    if (trusted) expect(validateOriginalWorkerContinuation(f.input, f.dependencies)).toMatchObject({ worker: f.worker });
+    else expect(() => validateOriginalWorkerContinuation(f.input, f.dependencies)).toThrow("UNPUBLISHED_DEFERRED");
+  });
   it("rejects missing selected CLI readiness before any native continuation", () => {
     const f = validationFixture();
     unlinkSync(join(f.selected, "node_modules", "vercel", "dist", "vc.js"));

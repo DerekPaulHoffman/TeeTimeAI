@@ -31,7 +31,7 @@ export function publicSimulatorFixture(kind: PublicSimulatorFixtureKind) {
       : kind === "ACUITY" ? `<script>var BUSINESS = ${JSON.stringify(acuityBusiness)};</script>` : "Public simulator calendar");
     if (kind === "ACUITY" && url.origin === "https://app.acuityscheduling.com" && url.pathname === "/api/scheduling/v1/availability/times" &&
         url.searchParams.get("owner") === "a66e63ac" && url.searchParams.get("appointmentTypeId") === "73234482" &&
-        url.searchParams.get("calendarId") === "11388341" && url.searchParams.get("maxDays") === "4" && url.searchParams.get("timezone") === "UTC") {
+        url.searchParams.get("calendarId") === "11388341" && url.searchParams.get("maxDays") === "1" && url.searchParams.get("timezone") === "UTC") {
       const date = url.searchParams.get("startDate");
       if (!date || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) throw new Error("Fixture requires its exact public date.");
       return response({ [date]: [{ time: `${date}T10:00:00+0000`, slotsAvailable: 2 }] });

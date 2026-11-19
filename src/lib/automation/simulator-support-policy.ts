@@ -39,7 +39,7 @@ export function isValidSimulatorEngineeringAuthority(value: unknown): value is S
 export type SimulatorSupportClaim = {
   token: string;
   revision: number;
-  phase: "CLAIMED" | "IMPLEMENTING" | "VERIFYING";
+  phase: "CLAIMED" | "WAITING_IMPLEMENTATION" | "IMPLEMENTING" | "VERIFYING";
   claimedAt: string;
   leaseExpiresAt: string;
   sourceFingerprint: string;
@@ -51,6 +51,7 @@ export type SimulatorSupportClaim = {
   deployment: GitDeploymentProof | null;
   recheckQueuedAt: string | null;
   verificationCycle: number;
+  pendingImplementation?: { version: 1; path: string; requestedAt: string; sourceFingerprint: string; offeringRevision: number } | null;
 };
 
 export function createSimulatorSupportIntentDigest(search: SimulatorSupportSource) {
@@ -88,7 +89,7 @@ export function isValidSimulatorSupportClaim(value: unknown): value is Simulator
   const claim = value as SimulatorSupportClaim;
   return typeof claim.token === "string" && claim.token.length > 0 &&
     Number.isSafeInteger(claim.revision) && claim.revision >= 1 &&
-    ["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(claim.phase) &&
+    ["CLAIMED", "WAITING_IMPLEMENTATION", "IMPLEMENTING", "VERIFYING"].includes(claim.phase) &&
     Number.isFinite(Date.parse(claim.claimedAt)) && Number.isFinite(Date.parse(claim.leaseExpiresAt)) &&
     /^[a-f0-9]{64}$/i.test(claim.sourceFingerprint) && /^[a-f0-9]{64}$/i.test(claim.originalSourceFingerprint) &&
     Number.isSafeInteger(claim.offeringRevision) && claim.offeringRevision >= 0 &&
@@ -96,7 +97,25 @@ export function isValidSimulatorSupportClaim(value: unknown): value is Simulator
     typeof claim.branch === "string" && claim.branch !== "main" && claim.branch.length > 0 &&
     (claim.releaseSha === null || /^[a-f0-9]{40}$/i.test(claim.releaseSha)) &&
     Number.isSafeInteger(claim.verificationCycle) && claim.verificationCycle >= 0 && claim.verificationCycle <= 2 &&
-    (claim.recheckQueuedAt === null || Number.isFinite(Date.parse(claim.recheckQueuedAt)));
+    (claim.recheckQueuedAt === null || Number.isFinite(Date.parse(claim.recheckQueuedAt))) &&
+    (claim.phase === "WAITING_IMPLEMENTATION" ? isValidSimulatorImplementationWait(claim) : claim.pendingImplementation == null);
+}
+
+/** A deferred request preserves intent, never grants a code path or provider read. */
+export function isValidSimulatorImplementationWait(claim: Pick<SimulatorSupportClaim,
+  "phase" | "pendingImplementation" | "sourceFingerprint" | "offeringRevision" | "plannedPaths" |
+  "releaseSha" | "deployment" | "recheckQueuedAt" | "verificationCycle" | "claimedAt" | "leaseExpiresAt">) {
+  const pending = claim.pendingImplementation;
+  if (claim.phase !== "WAITING_IMPLEMENTATION" || !pending || typeof pending !== "object" || Array.isArray(pending) ||
+      Object.keys(pending).length !== 5 || pending.version !== 1 || pending.sourceFingerprint !== claim.sourceFingerprint ||
+      !/^[a-f0-9]{64}$/u.test(claim.sourceFingerprint) || !Number.isSafeInteger(claim.offeringRevision) || claim.offeringRevision < 0 ||
+      !Number.isFinite(Date.parse(claim.claimedAt)) || !Number.isFinite(Date.parse(claim.leaseExpiresAt)) ||
+      pending.offeringRevision !== claim.offeringRevision || !Array.isArray(claim.plannedPaths) || claim.plannedPaths.length || claim.releaseSha !== null ||
+      claim.deployment !== null || claim.recheckQueuedAt !== null || claim.verificationCycle !== 0 ||
+      !Number.isFinite(Date.parse(pending.requestedAt)) || Date.parse(pending.requestedAt) < Date.parse(claim.claimedAt) ||
+      Date.parse(pending.requestedAt) > Date.parse(claim.leaseExpiresAt)) return false;
+  try { return typeof pending.path === "string" && pending.path === validateSimulatorSupportPath(pending.path); }
+  catch { return false; }
 }
 
 export function validateSimulatorSupportPath(path: string) {

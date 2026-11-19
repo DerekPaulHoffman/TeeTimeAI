@@ -36,6 +36,65 @@ function input() {
       toolingReleaseSha: releaseSha },
   };
 }
+
+describe("full simulator repair checkpoint", () => {
+  function fullRepair(): CourseSupportContinuationCheckpoint {
+    return { kind: "EXPIRED_OWNED_STAGE", observedAt: "2026-10-07T07:50:00.000Z", readCount: 6,
+      requestId: null, failure: null, allowedResearchRouteCount: 0, providerReadInFlight: false, claimLeaseExpired: true,
+      ownedStage: { phase: "CLAIMED", claimedAt: "2026-10-07T07:30:00.000Z", plannedPaths: [],
+        releaseSha: null, deployment: null, recheckQueuedAt: null, verificationCycle: 0, sourceFingerprint: "b".repeat(64),
+        originalSourceFingerprint: "b".repeat(64), offeringRevision: 0, branch: "automation/course-support-fixture",
+        leaseExpiresAt: "2026-10-07T08:00:00.000Z", fullRepair: { version: 1, kind: "FAILED_LEARNER_FULL_REPAIR",
+          failedJobId: "failed-learner", incidentId: "offering-incident", learningSourceFingerprint: "c".repeat(64),
+          offeringSourceFingerprint: "b".repeat(64) } } };
+  }
+  it("continues the same repair with exhausted reads without granting another read or code path", () => {
+    expect(assessCourseSupportContinuationCheckpoint({ checkpoint: fullRepair(), currentMainSha: releaseSha, now }))
+      .toMatchObject({ eligible: true, scope: "RESUME_ORIGINAL_OWNED_STAGE" });
+  });
+  it.each(["legacy", "source", "granted-path", "published", "live-lease", "active-read", "missing-lease"])("rejects invalid %s full repair continuation", change => {
+    const value = fullRepair(), stage = value.ownedStage!;
+    if (change === "legacy") delete stage.fullRepair;
+    if (change === "source") stage.fullRepair!.offeringSourceFingerprint = "a".repeat(64);
+    if (change === "granted-path") stage.plannedPaths = ["src/lib/simulators/providers/reader.ts"];
+    if (change === "published") stage.releaseSha = releaseSha;
+    if (change === "live-lease") value.claimLeaseExpired = false;
+    if (change === "active-read") value.providerReadInFlight = true;
+    if (change === "missing-lease") delete stage.leaseExpiresAt;
+    expect(assessCourseSupportContinuationCheckpoint({ checkpoint: value, currentMainSha: releaseSha, now }).eligible).toBe(false);
+  });
+});
+
+describe("deferred simulator implementation checkpoint", () => {
+  function waiting(): CourseSupportContinuationCheckpoint {
+    return { kind: "EXPIRED_OWNED_STAGE", observedAt: "2026-10-07T07:50:00.000Z", readCount: 2,
+      requestId: null, failure: null, allowedResearchRouteCount: 0, providerReadInFlight: false, claimLeaseExpired: true,
+      ownedStage: { phase: "WAITING_IMPLEMENTATION", claimedAt: "2026-10-07T07:30:00.000Z", plannedPaths: [],
+        releaseSha: null, deployment: null, recheckQueuedAt: null, verificationCycle: 0, sourceFingerprint: "b".repeat(64),
+        originalSourceFingerprint: "b".repeat(64), offeringRevision: 0, branch: "automation/course-support-fixture",
+        leaseExpiresAt: "2026-10-07T08:00:00.000Z", pendingImplementation: { version: 1,
+          path: "src/lib/simulators/providers/reader.ts", requestedAt: "2026-10-07T07:50:00.000Z",
+          sourceFingerprint: "b".repeat(64), offeringRevision: 0 } } };
+  }
+  it("can resume the same ungranted repair with no remaining research routes", () => {
+    expect(assessCourseSupportContinuationCheckpoint({ checkpoint: waiting(), currentMainSha: releaseSha, now }))
+      .toMatchObject({ eligible: true, scope: "RESUME_ORIGINAL_OWNED_STAGE" });
+  });
+  it.each(["source", "path", "timestamp", "revision", "granted-path", "published", "active-read", "live-lease", "missing-intent"])
+    ("rejects a deferred checkpoint with invalid %s", change => {
+      const value = waiting(), stage = value.ownedStage!;
+      if (change === "source") stage.pendingImplementation!.sourceFingerprint = "c".repeat(64);
+      if (change === "path") stage.pendingImplementation!.path = "../foreign.ts";
+      if (change === "timestamp") stage.pendingImplementation!.requestedAt = "2026-10-07T09:00:00.000Z";
+      if (change === "revision") stage.pendingImplementation!.offeringRevision++;
+      if (change === "granted-path") stage.plannedPaths = ["src/lib/simulators/providers/reader.ts"];
+      if (change === "published") stage.releaseSha = releaseSha;
+      if (change === "active-read") value.providerReadInFlight = true;
+      if (change === "live-lease") value.claimLeaseExpired = false;
+      if (change === "missing-intent") stage.pendingImplementation = null;
+      expect(assessCourseSupportContinuationCheckpoint({ checkpoint: value, currentMainSha: releaseSha, now }).eligible).toBe(false);
+    });
+});
 function reserved(value: Parameters<typeof reserveCourseSupportContinuationReceipt>[0] = input()) {
   const result = reserveCourseSupportContinuationReceipt(value);
   expect(result.reserved).toBe(true);

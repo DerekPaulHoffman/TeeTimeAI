@@ -9,6 +9,7 @@ import { readDispatchGitState } from "./course-support-dispatch";
 import { adoptSimulatorSupportSource, claimSimulatorSupportAssignment, claimSimulatorSupportPath, completeSimulatorSupport, heartbeatSimulatorSupport, queueSimulatorSupportRechecks, readSimulatorSupportClaim, readSimulatorSupportConfigurationCandidate, readSimulatorSupportProgress, recordSimulatorSupportDeployment, registerSimulatorSupportRelease, retrySimulatorSupport, recoverSimulatorSupport, retireSimulatorSupport, configureSimulatorSupportOffering, classifySimulatorSupportOffering, readSimulatorSupportSource } from "@/lib/automation/simulator-support-ownership";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { waitForSimulatorSupportPath } from "@/lib/automation/simulator-support-path-admission";
+import { deferSimulatorSupportImplementation } from "@/lib/automation/simulator-support-ownership";
 import { SIMULATOR_RESEARCH_SOURCE_NAMES, type SimulatorResearchSource } from "@/lib/automation/simulator-support-research-policy";
 import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type SimulatorSupportFailure, type SimulatorSupportFailureStage } from "@/lib/automation/simulator-support-failure";
 import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
@@ -172,7 +173,7 @@ async function main() {
     }
   } else if (input.command === "classify") result = await classifySimulatorSupportOffering({ ...owner, evidence: JSON.parse(await readFile(resolve(input.manifestPath!), "utf8")), apply: input.apply });
   else if (input.command === "path") result = await waitForSimulatorSupportPath({ ...owner, path: input.path! }, {
-    claim: claimSimulatorSupportPath, heartbeat: heartbeatSimulatorSupport });
+    claim: claimSimulatorSupportPath, heartbeat: heartbeatSimulatorSupport, defer: deferSimulatorSupportImplementation });
   else if (input.command === "adopt-source") {
     const claim = await readSimulatorSupportClaim(owner);
     const offering = await prisma.courseOffering.findUniqueOrThrow({ where: { id: claim.offeringId } });

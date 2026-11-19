@@ -46,6 +46,7 @@ import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnaps
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
 import type { PostgresAdvisoryLeaseContext } from "./lease";
+import { readSimulatorFullRepair, type SimulatorFullRepair } from "./simulator-full-repair";
 
 export const COURSE_DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const RESERVATION_MS = 10 * 60 * 1000;
@@ -94,6 +95,7 @@ export type CourseDispatchAudit = {
     searchRefs: CourseDispatchSourceRef[];
     trafficClass: "REAL" | "SYNTHETIC";
     engineeringAuthority?: SimulatorEngineeringAuthority;
+    fullRepair?: SimulatorFullRepair;
   };
 };
 
@@ -149,6 +151,11 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
       (audit.target.mode !== "SIMULATOR" || audit.target.trafficClass !== "SYNTHETIC" ||
        !isValidSimulatorEngineeringAuthority(audit.target.engineeringAuthority) ||
        audit.target.engineeringAuthority.sourceFingerprint !== audit.target.offeringSourceFingerprint)) return null;
+  if (audit.target.fullRepair !== undefined) {
+    const repair = readSimulatorFullRepair(audit.target.fullRepair);
+    if (!repair || audit.target.mode !== "SIMULATOR" || audit.controlledRetryOf ||
+        repair.incidentId !== audit.target.incidentId || repair.offeringSourceFingerprint !== audit.target.offeringSourceFingerprint) return null;
+  }
   if (audit.simulatorContinuation !== undefined) {
     try { readCourseSupportContinuationLedger(audit.simulatorContinuation); } catch { return null; }
     if (audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") return null;
@@ -597,6 +604,7 @@ export async function planCourseSupportCourseDispatch(input: {
               mode: "SIMULATOR" as const, offeringId: candidate.offeringId,
               offeringSourceFingerprint: candidate.offeringSourceFingerprint,
               ...(candidate.engineeringAuthority ? { engineeringAuthority: candidate.engineeringAuthority } : {}),
+              ...(candidate.fullRepair ? { fullRepair: candidate.fullRepair } : {}),
             } : {}),
             incidentId: candidate.incidentId,
             courseId: candidate.courseId,
