@@ -10,7 +10,7 @@ import { projectSourceDiagnostic } from "./stagehand/source-diagnostic.mjs";
 import { isOfficialAdapterJob, inspectOfficialAdapter } from "./course-discovery-official-adapter.mjs";
 
 const defaultSourceDiscover = async args => (await import("./stagehand/source-discovery.mjs")).sourceDiscover(args);
-export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"]);
+export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"]);
 export const PUBLIC_ROUTING_FALLBACK_CODES = Object.freeze(["FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED"]);
 /** Readiness only; the supervisor performs this before claiming cold demand. */
 export async function prepareCourseDiscoveryStagehandWorker({ cwd, prepareSourceDiscovery } = {}) {
@@ -138,7 +138,7 @@ export async function runCourseDiscoveryStagehandWorker({
         // An identity rejection may be a stale route or the wrong public
         // facility. Let Sol investigate again, but never escape that typed
         // identity/scope rejection through generic DOM or JSON extraction.
-        ...(["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "SOURCE_PUBLIC_SIMULATOR_LINK_REJECTED"].includes(trigger) ? { recipeEngineConstraint: "EXISTING_ADAPTER" } : {}),
+        ...(["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "SOURCE_PUBLIC_SIMULATOR_LINK_REJECTED"].includes(trigger) ? { recipeEngineConstraint: "EXISTING_ADAPTER" } : {}),
         beforeActivate: async () => { check(); await beforeActivate(); },
         afterActivate: async ({ metrics: genericMetrics } = {}) => {
           activationAcknowledged = true; metrics.genericFallback.worker = genericMetrics; await afterActivate({ metrics });
@@ -232,7 +232,7 @@ export async function runCourseDiscoveryStagehandWorker({
     if (routing.kind === "ROOT_PUBLIC_WIDGET") return await runGenericFromFreshRoot("ROOT_PUBLIC_WIDGET");
     const priorInspection = reference?.attempt === 1 && job.attempts === 2 && failureEvidence?.entries.find(entry =>
       entry.attempt === 1 && entry.phase === "FIXED_INSPECTION" && entry.cleanup.inspectionBrowserClosed === true &&
-      ["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"].includes(entry.code));
+      ["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED"].includes(entry.code));
     if (priorInspection) {
       const configurationGate = priorInspection.fixedInspectionDiagnostic?.officialSourceDiagnostic?.uscheduleConfigurationGate;
       return await runGenericFromFreshRoot(priorInspection.code, {

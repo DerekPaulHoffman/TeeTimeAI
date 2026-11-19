@@ -432,7 +432,7 @@ describe("regular Stagehand source worker", () => {
     expect(genericWorker).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
 
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
     const t = setup(), before = structuredClone(t.f.job);
     const request = t.request.getMockImplementation()!;
     t.request.mockImplementation(async action => {
@@ -443,7 +443,7 @@ describe("regular Stagehand source worker", () => {
     const genericWorker = vi.fn(async options => {
       expect(t.close).toHaveBeenCalledOnce(); expect(options.job).toBe(t.f.job);
       expect(options.job).toEqual(before); expect(options.freshOfficialStart).toBe(true);
-      const typedOnly = ["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"].includes(code);
+      const typedOnly = ["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED"].includes(code);
       expect(options.recipeEngineConstraint).toBe(typedOnly ? "EXISTING_ADAPTER" : undefined);
       expect(options.workDeadlineAt).toBe(new Date(first + 720000).toISOString());
       expect(options.checkpointProvenance.stagehandSource.jobId).toBe(t.f.job.id);
@@ -452,7 +452,7 @@ describe("regular Stagehand source worker", () => {
       expect(initialFailure?.entries.at(-1)).toMatchObject({ phase: "FIXED_INSPECTION", code,
         cleanup: { inspectionBrowserClosed: true } });
       const activation = await verifyDiscoveryCandidate({ client: options.client, job: options.job,
-        recipe: { engine: ["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"].includes(code) ? "EXISTING_ADAPTER" : "BROWSER_DOM" },
+        recipe: { engine: typedOnly ? "EXISTING_ADAPTER" : "BROWSER_DOM" },
         sourceEvidence: { officialUrl: official, observedBookingUrl: booking }, executeRecipe: t.executeRecipe,
         beforeActivate: options.beforeActivate, afterActivate: () => options.afterActivate({ metrics: genericMetrics }) });
       genericMetrics.tokenUsage.totalTokens = 10;
@@ -471,7 +471,7 @@ describe("regular Stagehand source worker", () => {
     t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error(code), { code }); return request(action); });
     await expect(t.run({ genericWorker })).rejects.toMatchObject({ code }); expect(genericWorker).not.toHaveBeenCalled();
   });
-  it.each(["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"])("keeps a ForeUP %s denial inside typed-only repair with no unverified activation", async code => {
+  it.each(["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED"])("keeps a ForeUP %s denial inside typed-only repair with no unverified activation", async code => {
     const t = setup(), genericWorker = vi.fn(), foreup = "https://foreupsoftware.com/index.php/booking/123/456";
     t.f.report.adapterSourceProposal.bookingUrl = foreup;
     t.f.report.visitedUrls = [official, foreup];
@@ -491,7 +491,7 @@ describe("regular Stagehand source worker", () => {
     await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
     expect(genericWorker).toHaveBeenCalledOnce(); expect(t.client.candidate).not.toHaveBeenCalled();
   });
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"])("does not generic-fall back when %s inspection cleanup failed or work expired", async code => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"])("does not generic-fall back when %s inspection cleanup failed or work expired", async code => {
     for (const mode of ["cleanup", "deadline"] as const) {
       const t = setup(), request = t.request.getMockImplementation()!, genericWorker = vi.fn();
       t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error("fixed inspection failed"), { code }); return request(action); });
@@ -499,12 +499,25 @@ describe("regular Stagehand source worker", () => {
       await expect(t.run({ genericWorker })).rejects.toBeDefined(); expect(genericWorker).not.toHaveBeenCalled();
     }
   });
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"])("does not treat %s from source or opening a path as fixed-metadata fallback", async code => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"])("does not treat %s from source or opening a path as fixed-metadata fallback", async code => {
     for (const origin of ["source", "open"] as const) {
       const t = setup(), genericWorker = vi.fn(), failure = Object.assign(Error("outside fixed metadata"), { code });
       if (origin === "source") t.sourceDiscover.mockRejectedValue(failure); else t.request.mockRejectedValue(failure);
       await expect(t.run({ genericWorker })).rejects.toBe(failure); expect(genericWorker).not.toHaveBeenCalled();
     }
+  });
+  it("does not use physical-contact fallback after an observed access denial or accept an unverified activation label", async () => {
+    const denied = setup(), request = denied.request.getMockImplementation()!, genericWorker = vi.fn();
+    denied.request.mockImplementation(async action => ({ ...await request(action), accessRequirementObserved: action.action === "inspect_adapter" }));
+    await expect(denied.run({ genericWorker })).rejects.toMatchObject({ code: "FRAMEWORK_INSPECTION_SOURCE_UNREADABLE" });
+    expect(genericWorker).not.toHaveBeenCalled(); expect(denied.client.activate).not.toHaveBeenCalled();
+    const t = setup(), original = t.request.getMockImplementation()!;
+    t.request.mockImplementation(async action => {
+      if (action.action === "inspect_adapter") throw Object.assign(Error("Physical identity unverified"), { code: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED" });
+      return original(action);
+    });
+    await expect(t.run({ genericWorker: async () => ({ outcome: "activated", metrics: {} }) })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.client.verification).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
   it("never writes another Stagehand checkpoint after generic activation retires the lease", async () => {
     const t = setup(), request = t.request.getMockImplementation()!;
@@ -943,7 +956,7 @@ describe("regular Stagehand source worker", () => {
     expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
 
-  it.each(["OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"])("persists only bounded %s failure gates before fresh-root investigation", async code => {
+  it.each(["OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"])("persists only bounded %s failure gates before fresh-root investigation", async code => {
     const t = setup(), original = t.request.getMockImplementation()!;
     const keys = ["noTerminalFailure", "sessionOpen", "noAccessRequirement", "noNativeFatal", "status200", "snapshotNative",
       "capturedPagePresent", "captureUrlMatches", "captureFreshWithin5s", "capturedNative", "capturedTimeOriginMatches",
@@ -1292,7 +1305,7 @@ describe("regular Stagehand source worker", () => {
     expect(t.client.verification).toHaveBeenCalledTimes(2); expect(t.client.activate).toHaveBeenCalledOnce();
   });
 
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"])(
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED"])(
     "uses the closed %s inspection to choose a different approach on retry", async code => {
       const t = setup();
       const request = t.request.getMockImplementation()!;
@@ -1315,6 +1328,8 @@ describe("regular Stagehand source worker", () => {
         ...(code === "UNSUPPORTED_ADAPTER_SOURCE" ? {} : { recipeEngineConstraint: "EXISTING_ADAPTER" }),
       }));
       expect(t.client.candidate).not.toHaveBeenCalled();
+      expect(t.client.activate).not.toHaveBeenCalled();
+      expect([t.f.job.firstPickedUpAt, t.f.job.deadlineAt]).toEqual([new Date(first).toISOString(), new Date(first + 900000).toISOString()]);
     },
   );
 
