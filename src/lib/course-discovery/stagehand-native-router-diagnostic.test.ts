@@ -2,6 +2,25 @@ import { expect, it } from "vitest";
 import { createStagehandNativeRouterFailureCapture, projectStagehandNativeRouterFailure, stagehandNativeRouterBooleanKeys, stagehandNativeRouterCodes, stagehandSourceRequestGuards, recordStagehandSourceNavigationFailure, stagehandRedirectRejections, classifyNativeRouterError, nativeRouterOperations, nativeRouterErrorNames, nativeRouterErrorCategories, createStagehandHostGuardFailureCapture, stagehandHostGuardReasons } from "./stagehand-native-router-diagnostic";
 import { stagehandSourceDomGuardReason, stagehandNativeFrameDocumentUrl } from "./stagehand-source-browser";
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
+import { safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
+it("retains closed preflight correlation facts through capture, helper and source checkpoints", () => {
+  const facts = { phase: "LOADER_IDENTITY_WAIT", method: "OPTIONS", requestedPreflightMethod: "GET", preflightSourceMethod: "HEAD",
+    preflightRegistrationGate: "SOURCE_METHOD_OR_BODY", preflightRequestedHeadersCategory: "ORDINARY",
+    preflightOriginPresent: true, preflightOriginSafe: false, preflightCandidatePresent: true, preflightCandidateInvalid: true,
+    preflightSourceKnown: true, preflightSourceCurrentGeneration: true, preflightSourceFailed: false,
+    preflightSourceBodyPresent: true, preflightSourceRootFrame: true, preflightSourceLoaderKnown: true, preflightSourceUrlMatches: false,
+    preflightGateGenerationCurrent: true, preflightGateRootFrame: true, preflightGateParentKnown: true,
+    preflightGateParentCurrentGeneration: true, preflightGateParentLoaderCurrent: true, preflightGateParentFailed: false };
+  const expected = { code: "NATIVE_REDIRECT_LOADER_TIMEOUT", ...facts };
+  const capture = createStagehandNativeRouterFailureCapture();
+  capture.record(expected.code, { ...facts, url: "https://private.example/?token=PRIVATE", headers: { secret: "PRIVATE" } });
+  expect(capture.snapshot()).toEqual(expected);
+  expect(safeBrowserFailureDiagnostics({ nativeFirstFatal: capture.snapshot() }).nativeFirstFatal).toMatchObject(expected);
+  expect(sourceFailureDiagnostic({ phase: "EVIDENCE", nativeRouterFailure: capture.snapshot() }).nativeRouterFailure).toEqual(expected);
+  expect(projectStagehandNativeRouterFailure(expected.code, { requestedPreflightMethod: "PRIVATE", preflightSourceMethod: ["GET"],
+    preflightCandidatePresent: "PRIVATE", preflightRequestedHeadersCategory: "PRIVATE", preflightRegistrationGate: "PRIVATE" })).toEqual({ code: expected.code });
+  expect(projectStagehandNativeRouterFailure(expected.code, {})).not.toHaveProperty("preflightSourceKnown");
+});
 it("captures only the first actual closed host guard separately from native failures", () => {
   for (const [stage, reasons] of Object.entries(stagehandHostGuardReasons)) for (const reason of reasons) {
     const capture = createStagehandHostGuardFailureCapture();

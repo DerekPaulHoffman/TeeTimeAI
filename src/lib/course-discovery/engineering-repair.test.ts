@@ -278,6 +278,17 @@ describe("private failure evidence", () => {
       expect(JSON.stringify(result)).not.toContain("PRIVATE");
     }
   });
+  it("keeps bounded preflight failure evidence in the original-owner repair diagnosis", () => {
+    const nativeFirstFatal = { code: "NATIVE_REDIRECT_LOADER_TIMEOUT", method: "OPTIONS", requestedPreflightMethod: "GET",
+      preflightRegistrationGate: "SOURCE_NOT_PUBLISHED", preflightCandidatePresent: false, preflightSourceKnown: false,
+      preflightOriginSafe: true, preflightRequestedHeadersCategory: "ORDINARY" };
+    const result = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
+      genericGuard: { code: "DISCOVERY_NATIVE_TRANSPORT_FATAL", nativeFirstFatal: { ...nativeFirstFatal, headers: "PRIVATE", url: "PRIVATE" } },
+    } });
+    const { code: failureCode, ...facts } = nativeFirstFatal;
+    expect(result).toMatchObject({ nativeTransportDiagnostic: { failureCode, ...facts }, evidenceAuthority: false });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+  });
   it("does not traverse malformed or unbounded checkpoint histories", () => {
     for (const entries of [null, "PRIVATE", [{ attempt: 2, phase: "PRIVATE invalid", code: "PRIVATE invalid" }],
       Array.from({ length: 3 }, (_, i) => ({ attempt: i + 1, code: "BROWSER_UNAVAILABLE", phase: "REPLAY" }))]) {

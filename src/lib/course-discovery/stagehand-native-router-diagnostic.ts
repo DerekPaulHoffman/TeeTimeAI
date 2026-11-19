@@ -13,8 +13,17 @@ const phases = ["RESPONSE_WAIT", "CONTINUE_REQUEST_ACK", "CONTINUE_RESPONSE_ACK"
 export const stagehandSourceRequestGuards = ["STATE", "TRANSACTION_URL", "FRAME_OWNERSHIP", "URL_POLICY", "HEADER_POLICY", "NAVIGATION_PROVENANCE", "METHOD_POLICY", "REQUEST_BUDGET", "LEASE", "NATIVE_RESPONSE"] as const;
 export type StagehandSourceRequestGuard = typeof stagehandSourceRequestGuards[number];
 const methods = ["GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"] as const;
+const preflightMethods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"] as const;
+const preflightHeaders = ["NONE", "ORDINARY", "SENSITIVE", "MALFORMED", "DUPLICATE"] as const;
+const preflightRegistrationGates = ["NOT_SEEN", "UNRECORDED_CAP", "REGISTERED", "SOURCE_NOT_PUBLISHED", "SOURCE_FAILED",
+  "SOURCE_ALREADY_USED", "SOURCE_FRAME_OR_URL", "SOURCE_LOADER", "SOURCE_METHOD_OR_BODY", "SOURCE_REPLACED",
+  "PENDING_INVALID", "PENDING_EXPIRED", "RETIRED_GENERATION", "BOUNDARY_PENDING", "AWAITING_DOCUMENT", "NONROOT_FRAME",
+  "TYPE_METHOD_INVALID", "INITIATOR_MISSING_OR_SELF", "DUPLICATE"] as const;
 const kinds = ["document", "stylesheet", "script", "image", "media", "font", "xhr", "fetch", "preflight", "other", "ping", "websocket", "eventsource"] as const;
 export const stagehandNativeRouterBooleanKeys = ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent",
+  "preflightOriginPresent", "preflightOriginSafe", "preflightCandidatePresent", "preflightCandidateInvalid", "preflightSourceKnown",
+  "preflightSourceCurrentGeneration", "preflightSourceFailed", "preflightSourceBodyPresent", "preflightSourceRootFrame", "preflightSourceLoaderKnown", "preflightSourceUrlMatches",
+  "preflightGateGenerationCurrent", "preflightGateRootFrame", "preflightGateParentKnown", "preflightGateParentCurrentGeneration", "preflightGateParentLoaderCurrent", "preflightGateParentFailed",
   "missingNetworkClosed", "missingNetworkAborted", "missingNetworkGenerationRetired", "missingNetworkBoundaryPending", "missingNetworkAwaitingDocument",
   "uncorrelatedPostCallerInvoked", "uncorrelatedPostCallerDenied",
   "officialRenderDataLimit",
@@ -82,6 +91,8 @@ export function classifyNativeRouterError(error: unknown): Required<Pick<Stageha
 }
 export type StagehandNativeRouterFailure = { code: typeof stagehandNativeRouterCodes[number]; phase?: typeof phases[number]; method?: typeof methods[number]; resourceType?: typeof kinds[number]; limitKind?: typeof limitKinds[number]; limitOrigin?: "NATIVE_ROUTER" | "BROWSER_SESSION"; officialRenderGate?: StagehandOfficialRenderGate; sourceRequestGuard?: StagehandSourceRequestGuard; redirectRejection?: StagehandRedirectRejection; uncorrelatedPostDenialReason?: typeof uncorrelatedPostDenialReasons[number]; responseFailureBranch?: typeof nativeResponseFailureBranches[number] } &
   { operation?: typeof nativeRouterOperations[number]; errorName?: typeof nativeRouterErrorNames[number]; errorCategory?: typeof nativeRouterErrorCategories[number]; requestUrlSha256?: string } &
+  { requestedPreflightMethod?: typeof preflightMethods[number]; preflightSourceMethod?: typeof preflightMethods[number];
+    preflightRequestedHeadersCategory?: typeof preflightHeaders[number]; preflightRegistrationGate?: typeof preflightRegistrationGates[number] } &
   Partial<Record<typeof byteKeys[number], number>> &
   Partial<Record<typeof stagehandNativeRouterBooleanKeys[number], boolean>>;
 const allowed = <T extends readonly string[]>(values: T, raw: unknown): T[number] | undefined => typeof raw === "string" && values.includes(raw) ? raw : undefined;
@@ -91,6 +102,12 @@ export function projectStagehandNativeRouterFailure(code: unknown, facts: unknow
   const value: StagehandNativeRouterFailure = { code: allowed(stagehandNativeRouterCodes, code) ?? "UNKNOWN" };
   const phase = allowed(phases, source.phase), method = allowed(methods, source.method), resourceType = allowed(kinds, source.resourceType);
   if (phase) value.phase = phase; if (method) value.method = method; if (resourceType) value.resourceType = resourceType;
+  for (const key of ["requestedPreflightMethod", "preflightSourceMethod"] as const) {
+    const selected = allowed(preflightMethods, source[key]); if (selected) value[key] = selected;
+  }
+  const requestedHeaders = allowed(preflightHeaders, source.preflightRequestedHeadersCategory), registrationGate = allowed(preflightRegistrationGates, source.preflightRegistrationGate);
+  if (requestedHeaders) value.preflightRequestedHeadersCategory = requestedHeaders;
+  if (registrationGate) value.preflightRegistrationGate = registrationGate;
   const operation = allowed(nativeRouterOperations, source.operation), errorName = allowed(nativeRouterErrorNames, source.errorName), errorCategory = allowed(nativeRouterErrorCategories, source.errorCategory);
   if (operation) value.operation = operation; if (errorName) value.errorName = errorName; if (errorCategory) value.errorCategory = errorCategory;
   const responseFailureBranch = allowed(nativeResponseFailureBranches, source.responseFailureBranch);

@@ -813,6 +813,8 @@ function safeNativeRequestDiagnostic(value) {
     if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= maximum) result[key] = value[key];
   for (const key of ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent",
     "preflightOriginPresent", "preflightOriginSafe", "preflightGateGenerationCurrent", "preflightGateRootFrame", "preflightGateParentKnown",
+    "preflightCandidatePresent", "preflightCandidateInvalid", "preflightSourceKnown", "preflightSourceCurrentGeneration", "preflightSourceFailed",
+    "preflightSourceBodyPresent", "preflightSourceRootFrame", "preflightSourceLoaderKnown", "preflightSourceUrlMatches",
     "preflightGateParentCurrentGeneration", "preflightGateParentLoaderCurrent", "preflightGateParentFailed",
     "missingNetworkClosed", "missingNetworkAborted", "missingNetworkGenerationRetired", "missingNetworkBoundaryPending", "missingNetworkAwaitingDocument",
     "uncorrelatedPostCallerInvoked", "uncorrelatedPostCallerDenied",
@@ -824,6 +826,8 @@ function safeNativeRequestDiagnostic(value) {
     if (typeof value[key] === "boolean") result[key] = value[key];
   if (["NONE", "ORDINARY", "SENSITIVE", "MALFORMED", "DUPLICATE"].includes(value.preflightRequestedHeadersCategory))
     result.preflightRequestedHeadersCategory = value.preflightRequestedHeadersCategory;
+  for (const key of ["requestedPreflightMethod", "preflightSourceMethod"])
+    if (["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"].includes(value[key])) result[key] = value[key];
   if (["NOT_SEEN", "UNRECORDED_CAP", "REGISTERED", "SOURCE_NOT_PUBLISHED", "SOURCE_FAILED",
     "SOURCE_ALREADY_USED", "SOURCE_FRAME_OR_URL", "SOURCE_LOADER", "SOURCE_METHOD_OR_BODY", "SOURCE_REPLACED",
     "PENDING_INVALID", "PENDING_EXPIRED", "RETIRED_GENERATION", "BOUNDARY_PENDING", "AWAITING_DOCUMENT", "NONROOT_FRAME",
