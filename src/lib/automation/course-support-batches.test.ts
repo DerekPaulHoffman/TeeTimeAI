@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fullRepairReadProgressMatchesClaim } from "./course-support-full-repair";
 
 const prismaMocks = vi.hoisted(() => ({
   batchFindFirst: vi.fn(),
@@ -22593,6 +22595,37 @@ describe("course-support follow-up releases", () => {
         ],
       }),
     ]);
+  });
+
+  it("keeps the original repair's deployment window after more than twenty candidate releases", () => {
+    const stamp = (minute: number) => new Date(Date.UTC(2026, 6, 15, 20, minute));
+    const sha = (revision: number) => revision.toString(16).padStart(40, "0");
+    const baseSha = sha(0);
+    let summary: Prisma.JsonValue = {
+      remediation: { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        strategyAction: "DISCOVER_WITH_HTTP", playbookStage: null },
+    };
+    for (let revision = 0; revision < 22; revision++) {
+      summary = buildCourseSupportReleaseHistory({ summary, baseSha, previousReleaseSha: sha(revision),
+        previousDeployedAt: revision === 0 ? stamp(0) : null, previousRecheckDispatchKey: null,
+        previousRecheckDispatchStartedAt: null, previousRecheckDispatchedAt: null, previousIncidentVerifications: [],
+        nextReleaseSha: sha(revision + 1), advancedAt: stamp(2 + revision) }) as Prisma.JsonObject;
+    }
+    const saved = summary as Prisma.JsonObject;
+    expect(saved.releaseHistory).toHaveLength(20);
+    expect(saved.olderReleaseWindows).toEqual([
+      { releaseSha: baseSha, deployedAt: stamp(0).toISOString(), supersededAt: stamp(2).toISOString(), supersededBy: sha(1) },
+      { releaseSha: sha(1), deployedAt: null, supersededAt: stamp(3).toISOString(), supersededBy: sha(2) },
+    ]);
+    const read = { observedAt: stamp(1).toISOString(), runtimeVersion: baseSha, transition: "COMPLETED" };
+    const gate = { fullRepair: true, claimedEventCount: 0, runtimeVersion: sha(22), batchCreatedAt: stamp(0), now: stamp(24),
+      events: [read], releaseHistory: saved.releaseHistory };
+    expect(fullRepairReadProgressMatchesClaim(gate)).toBe(false);
+    expect(fullRepairReadProgressMatchesClaim({ ...gate, olderReleaseWindows: saved.olderReleaseWindows })).toBe(true);
+    const [first, second] = saved.olderReleaseWindows as Prisma.JsonObject[];
+    expect(fullRepairReadProgressMatchesClaim({ ...gate, olderReleaseWindows: [first, { ...second, supersededBy: sha(40) }] })).toBe(false);
+    expect(fullRepairReadProgressMatchesClaim({ ...gate, olderReleaseWindows: saved.olderReleaseWindows,
+      events: [{ ...read, runtimeVersion: sha(1) }] })).toBe(false);
   });
 });
 

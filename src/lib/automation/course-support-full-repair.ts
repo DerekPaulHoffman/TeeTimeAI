@@ -41,6 +41,7 @@ export function fullRepairReadProgressMatchesClaim(input: {
   fullRepair: boolean; claimedEventCount: number; runtimeVersion: string | null;
   batchCreatedAt: Date; now: Date;
   releaseHistory?: unknown;
+  olderReleaseWindows?: unknown;
   events: readonly { observedAt: string; runtimeVersion: string; transition: string;
     factualDisposition?: unknown; technicalReason?: unknown }[];
 }) {
@@ -65,14 +66,41 @@ export function fullRepairReadProgressMatchesClaim(input: {
  * Only a complete registered chain ending at the current release can explain
  * earlier non-final reads; undeployed entries supply no read window.
  * It grants no new read or implementation authority. */
-function fullRepairPreviousRuntimeWindows(input: { runtimeVersion: string | null; releaseHistory?: unknown; now: Date }) {
+const releaseWindowLimit = 100;
+
+/** Keep only provenance needed to validate old reads when the detailed
+ * verification history rolls over. Do not reinterpret any of those results. */
+export function retainOlderFullRepairReleaseWindows(olderWindows: unknown, evicted: readonly unknown[]) {
+  if (olderWindows !== undefined && !Array.isArray(olderWindows)) {
+    throw new Error("The earlier repair release history is malformed.");
+  }
+  const windows = [...(olderWindows ?? []), ...evicted.map(raw => {
+    const entry = raw as Record<string, unknown> | null;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+        typeof entry.releaseSha !== "string" || typeof entry.supersededBy !== "string" ||
+        typeof entry.supersededAt !== "string" || (entry.deployedAt !== null && typeof entry.deployedAt !== "string")) {
+      throw new Error("The repair release cannot be archived without its provenance.");
+    }
+    return { releaseSha: entry.releaseSha, deployedAt: entry.deployedAt,
+      supersededAt: entry.supersededAt, supersededBy: entry.supersededBy };
+  })];
+  if (windows.length > releaseWindowLimit) {
+    throw new Error("The earlier repair release history is full. No release proof was discarded.");
+  }
+  return windows;
+}
+
+function fullRepairPreviousRuntimeWindows(input: { runtimeVersion: string | null; releaseHistory?: unknown; olderReleaseWindows?: unknown; now: Date }) {
   const windows = new Map<string, { deployedAt: Date; supersededAt: Date }>();
   const registered = new Set<string>();
-  if (!Array.isArray(input.releaseHistory) || input.releaseHistory.length === 0 || input.releaseHistory.length > 100) return windows;
+  const older = input.olderReleaseWindows === undefined ? [] : input.olderReleaseWindows;
+  if (!Array.isArray(input.releaseHistory) || input.releaseHistory.length === 0 || input.releaseHistory.length > releaseWindowLimit ||
+      !Array.isArray(older) || older.length > releaseWindowLimit) return windows;
+  const history = [...older, ...input.releaseHistory];
   let priorSupersededAt: Date | null = null;
-  for (let index = 0; index < input.releaseHistory.length; index++) {
-    const entry = input.releaseHistory[index];
-    const next = input.releaseHistory[index + 1];
+  for (let index = 0; index < history.length; index++) {
+    const entry = history[index];
+    const next = history[index + 1];
     if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
         !/^[a-f0-9]{40}$/u.test(entry.releaseSha ?? "") || registered.has(entry.releaseSha) ||
         entry.releaseSha === input.runtimeVersion || entry.supersededBy !== (next?.releaseSha ?? input.runtimeVersion) ||

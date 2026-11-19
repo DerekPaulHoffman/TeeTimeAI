@@ -467,6 +467,7 @@ export function buildOwnedCourseSupportResearchContext(
     claimedEventCount: claim.playbookEventCountAtClaim, events: currentPlaybookEvents,
     runtimeVersion: batch.releaseSha ?? batch.baseSha, batchCreatedAt: batch.createdAt, now,
     releaseHistory: record(batch.summary).releaseHistory,
+    olderReleaseWindows: record(batch.summary).olderReleaseWindows,
   }));
   // Playbook observations have diagnostic fingerprints (PLAYBOOK:...), not
   // incident fingerprints. Reconcile only the exact same owned read; prefix
@@ -754,7 +755,9 @@ export function buildOwnedCourseSupportResearchContext(
     batchReference: batch.reference,
     batchStatus: batch.status,
     batchCreatedAt: batch.createdAt.toISOString(),
-    registeredReleaseHistoryDigest: digest(record(batch.summary).releaseHistory ?? null),
+    registeredReleaseHistoryDigest: record(batch.summary).olderReleaseWindows === undefined
+      ? digest(record(batch.summary).releaseHistory ?? null)
+      : digest({ recent: record(batch.summary).releaseHistory ?? null, older: record(batch.summary).olderReleaseWindows }),
     batchFailureFingerprint: batch.failureFingerprint,
     orderedMembers: ordered.map((member) => ({
       batchEntryId: member.id,

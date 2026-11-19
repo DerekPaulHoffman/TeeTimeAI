@@ -3100,6 +3100,7 @@ function hasOwnedFullRepairFirstBrowserRetry(input: DetachedEligibilityInput, no
     fullRepairReadProgressMatchesClaim({ fullRepair: true, claimedEventCount: claim.playbookEventCountAtClaim,
       runtimeVersion: input.releaseSha, batchCreatedAt: input.batchCreatedAt, now,
       releaseHistory: summary.releaseHistory,
+      olderReleaseWindows: summary.olderReleaseWindows,
       events: ledger.events.filter(event => event.cycle === input.incident.cycle) }));
 }
 

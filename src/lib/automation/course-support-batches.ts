@@ -3,7 +3,7 @@ import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-excl
 import { isGeneralDiscoveryEnabled } from "@/lib/course-discovery/config";
 
 import { Prisma } from "@prisma/client";
-import { fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair } from "./course-support-full-repair";
+import { fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair, retainOlderFullRepairReleaseWindows } from "./course-support-full-repair";
 import type {
   AutomationReason,
   BookingMethod,
@@ -3652,6 +3652,11 @@ export function buildCourseSupportReleaseHistory(input: {
   const existingHistory = Array.isArray(summary.releaseHistory)
     ? summary.releaseHistory
     : [];
+  const evictedHistory = existingHistory.slice(0, Math.max(0, existingHistory.length - 19));
+  const olderReleaseWindows = evictedHistory.length > 0 &&
+    readCourseSupportRemediationDirective(input.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF"
+    ? retainOlderFullRepairReleaseWindows(summary.olderReleaseWindows, evictedHistory)
+    : undefined;
   const executionEver = buildCourseSupportExecutionEverSummary({
     summary: input.summary,
     baseSha: input.baseSha,
@@ -3671,6 +3676,7 @@ export function buildCourseSupportReleaseHistory(input: {
   return {
     ...summary,
     executionEver,
+    ...(olderReleaseWindows ? { olderReleaseWindows } : {}),
     releaseHistory: [
       ...existingHistory,
       {
@@ -6757,7 +6763,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           claim.approach.playbookStage === remediationDirective?.playbookStage && events &&
           fullRepairReadProgressMatchesClaim({ fullRepair: true, claimedEventCount: claim.playbookEventCountAtClaim,
             runtimeVersion: batch.releaseSha, batchCreatedAt: batch.createdAt, now: databaseNow,
-            releaseHistory: summary.releaseHistory, events }),
+            releaseHistory: summary.releaseHistory, olderReleaseWindows: summary.olderReleaseWindows, events }),
         );
         const stageAssessment = playbook.stages.find(
           (assessment) => assessment.stage === stage,
