@@ -341,6 +341,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
+  // Cold imports and isolated Postgres work can exceed Vitest's five-second
+  // default on hosted runners; this does not change the reserved read's clock.
   it("cannot release engineering ownership during its existing provider reservation", async () => {
     const f = await readyEngineeringFixture();
     const { runSimulatorEngineeringVerification } = await import("./simulator-support-engineering-verification");
@@ -358,7 +360,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     } finally { release(); }
     await checking;
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
-  });
+  }, 30_000);
 
   it("does no provider work and does not advance the claim when the actual writer lease is busy", async () => {
     const f = await readyEngineeringFixture();
@@ -1212,6 +1214,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
+  // Include Chromium startup and passive activation in the test harness budget.
+  // The collector's production deadline and every no-send/demand assertion stay intact.
   it.each([0, 24])("persists a source-bound passive render after %i same-site scripts without changing demand", async localScriptCount => {
     const target = "https://official.example.test/booking", asset = "https://assets.example.test/public-widget.js";
     const f = await fixture(15, false, target);
@@ -1238,7 +1242,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).toHaveBeenCalledTimes(localScriptCount + 2);
     expect(fetch).toHaveBeenCalledWith(asset, expect.objectContaining({ credentials: "omit" }));
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it.each(["DOM", "MODULE", "PRELOAD"])("records a public %s script under the original owner without changing demand", async mode => {
     const target = "https://official.example.test/booking", asset = "https://assets.example.test/late-widget.js", entry = "https://assets.example.test/main.js";
