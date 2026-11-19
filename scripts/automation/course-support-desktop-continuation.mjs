@@ -13,8 +13,14 @@ const SHA = /^[a-f0-9]{40}$/u;
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const same = (a, b) => typeof a === "string" && typeof b === "string" &&
   (process.platform === "win32" ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b));
-const git = (cwd, args) => execFileSync("git", args, { cwd, encoding: "utf8", windowsHide: true,
-  timeout: 40000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }).trim();
+const git = (cwd, args) => {
+  const value = execFileSync("git", args, { cwd, encoding: "utf8", windowsHide: true,
+    timeout: 40000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+  return args[0] === "diff" ? value : value.trim();
+};
+const validPaths = paths => Array.isArray(paths) && paths.length > 0 && paths.length <= 32 &&
+  paths.every(path => typeof path === "string" && path && path.length <= 300 &&
+    !/[\\\x00-\x1f:]/u.test(path) && !path.startsWith("/") && !path.split("/").some(part => !part || part === "." || part === ".."));
 const readJson = file => { if (!isAbsolute(file)) fail("ABSOLUTE_PRIVATE_INPUT_REQUIRED"); return JSON.parse(readFileSync(file, "utf8")); };
 
 /** Observe the actual canonical aliases once. No waiter loop, environment
@@ -75,10 +81,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     fail("DATA_ONLY_SOURCE_RECONCILIATION_REQUIRED");
   }
   if (![undefined, "DATA_ONLY", "PUBLISHED_IMPLEMENTATION", "CLAIMED_IMPLEMENTATION"].includes(item?.continuationMode)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
-  if (claimedImplementation && (item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" ||
-      !Array.isArray(item.plannedPaths) || item.plannedPaths.length === 0 || item.plannedPaths.length > 32 ||
-      item.plannedPaths.some(path => typeof path !== "string" || !path || path.length > 300 ||
-        /[\\\x00-\x1f:]/u.test(path) || path.startsWith("/") || path.split("/").some(part => !part || part === "." || part === "..")))) fail("ORIGINAL_CLAIMED_PATHS_REQUIRED");
+  if (claimedImplementation && (item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths))) fail("ORIGINAL_CLAIMED_PATHS_REQUIRED");
   if (![undefined, "UNFINISHED_FULL_REPAIR"].includes(item?.continuationTrigger)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
   if (item?.kind !== "OWNED_OUTDOOR_FULL_REPAIR" || !UUID.test(item.threadId ?? "") || item.threadId === environment.CODEX_THREAD_ID ||
       !/^course-assignment-[a-f0-9-]{36}$/u.test(item.assignmentRef ?? "") || !/^[A-Za-z0-9_-]{1,200}$/u.test(item.batchReference ?? "") ||
@@ -102,6 +105,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     return { outcome: "unchanged_runtime", messageRequired: false };
   }
   const originalWorkerHead = publishedImplementation ? item.releaseSha : item.baseSha;
+  let localCandidate = null;
   if (publishedImplementation) {
     // A database deployment timestamp alone is insufficient. Require this
     // exact owner's registered release to be in the tested current main.
@@ -113,18 +117,28 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     // own clean branch. Retain that exact request as provenance; never adopt
     // arbitrary clean commits or an unrelated worker's checkout.
     const priorPath = join(selected, ".codex-artifacts", `desktop-repair-continuation-${item.assignmentRef}-${workerHead}.private.json`);
-    if (!existsSync(priorPath)) fail("ORIGINAL_DATA_ONLY_BASE_CHANGED");
-    const prior = readJson(priorPath);
-    if (prior.schemaVersion !== 1 || prior.kind !== "OWNED_DESKTOP_CONTINUATION_REQUESTED" ||
+    if (!existsSync(priorPath)) {
+      if (!publishedImplementation || item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths)) fail("ORIGINAL_DATA_ONLY_BASE_CHANGED");
+      const sharedBase = execute(selected, ["merge-base", "--all", workerHead, currentSha]);
+      if (!SHA.test(sharedBase) || sharedBase === workerHead) fail("ORIGINAL_CANDIDATE_ANCESTRY_REQUIRED");
+      execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, sharedBase]);
+      const raw = execute(worker, ["diff", "--name-only", "--no-renames", "-z", `${sharedBase}..${workerHead}`]);
+      const paths = typeof raw === "string" && raw.endsWith("\0") ? raw.slice(0, -1).split("\0") : [];
+      if (!validPaths(paths) || paths.some(path => !item.plannedPaths.includes(path))) fail("ORIGINAL_CANDIDATE_PATHS_REQUIRED");
+      localCandidate = { headSha: workerHead, sharedBaseSha: sharedBase, paths };
+    } else {
+      const prior = readJson(priorPath);
+      if (prior.schemaVersion !== 1 || prior.kind !== "OWNED_DESKTOP_CONTINUATION_REQUESTED" ||
         prior.status !== "REQUESTED_NOT_ACKNOWLEDGED" || prior.childThreadId !== item.threadId ||
         prior.assignmentRef !== item.assignmentRef || prior.batchReference !== item.batchReference ||
         prior.runtimeSha !== workerHead || !UUID.test(prior.priorTurnId ?? "")) fail("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
+    }
   }
   // A detached or primary/unrelated repository must never become an owner.
   const common = realpathSync(resolve(worker, execute(worker, ["rev-parse", "--git-common-dir"])));
   const parentCommon = realpathSync(resolve(selected, execute(selected, ["rev-parse", "--git-common-dir"])));
   if (!same(common, parentCommon) || same(common, realpathSync(execute(worker, ["rev-parse", "--absolute-git-dir"])))) fail("ORIGINAL_LINKED_WORKER_REQUIRED");
-  execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
+  if (!localCandidate) execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
   const progress = readFailedLearningProgress(item, now);
   const primaryMarker = join(selected, ".codex-artifacts", `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
   let marker = primaryMarker, prior = null;
@@ -188,13 +202,15 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     const purpose = sourceReconciliationOnly
       ? "SOURCE_RECONCILIATION_ONLY. The source snapshot changed after this data-only claim. Read your same owned packet and use only the existing qualified original-owner recovery/requeue path when eligible. Do not investigate or implement against the changed snapshot, request provider reads, change claim fingerprints, or repeat verification. Stop after the typed recovery result; the scheduler owns subsequent admission. A rejected recovery stays visible."
       : `finish the unresolved diagnosis under the existing action plan; a newer release is not required. Do not rerun unchanged verification or an exhausted read. Obtain and validate fresh research context, distinguish tooling-repair permission from provider-contract permission, and diagnose the actual missing evidence/transport/extraction tool within the returned scope.${phaseInstruction}${releaseInstruction}`;
-    const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${claimedImplementation ? "CLAIMED_IMPLEMENTATION" : publishedImplementation ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nExact tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
+    const candidateInstruction = localCandidate ? `\nPreserved unregistered local candidate: ${localCandidate.headSha}. Its exact unpublished delta is confined to your already claimed paths. Follow the guide's candidate-preserving merge; do not reset it or treat it as registered/published.` : "";
+    const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${claimedImplementation ? "CLAIMED_IMPLEMENTATION" : publishedImplementation ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha}${candidateInstruction}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nExact tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
     privateWrite(marker, { schemaVersion: 1, kind: "OWNED_DESKTOP_CONTINUATION_REQUESTED", status: "REQUESTED_NOT_ACKNOWLEDGED",
       parentThreadId: environment.CODEX_THREAD_ID, childThreadId: item.threadId, assignmentRef: item.assignmentRef,
       batchReference: item.batchReference, priorTurnId: turn.id, priorTurnStatus: turn.status, priorTurnError: turn.error,
       runtimeSha: currentSha, continuationTrigger: item.continuationTrigger ?? null,
       continuationMode: item.continuationMode ?? "DATA_ONLY", plannedPathCount: claimedImplementation ? item.plannedPaths.length : 0,
       ...(sourceReconciliationOnly ? { sourceReconciliationOnly: true } : {}),
+      ...(localCandidate ? { localCandidate } : {}),
       observedFailureFingerprint: progress?.fingerprint ?? null,
       ...(prior ? { parentReceiptPath: primaryMarker, failedLearningProgress: progress } : {}),
       unchangedRuntime, preparedAt: new Date(now).toISOString(), monitoringVerified: false }, true);

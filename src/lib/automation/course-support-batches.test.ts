@@ -16881,6 +16881,26 @@ describe("course-support recovery", () => {
       expect(assessCourseSupportRecovery(input).action).toBe(scenario === "owned" ? "RECOVER" : "BLOCK");
     });
 
+  it.each(["owned", "foreign-owner", "unpublished-runtime", "unmerged-runtime", "unplanned-path", "no-paths", "dirty", "wrong-branch", "live-lease"])(
+    "preserves an original unregistered candidate after shared runtime import: %s", scenario => {
+      const input = { leaseExpiresAt: new Date(now.getTime() - 1), ownerThreadId: "original-owner", requestingThreadId: "original-owner",
+        baseSha: "a".repeat(40), releaseSha: "b".repeat(40), expectedBranch: "automation/course-support-original",
+        currentBranch: "automation/course-support-original", currentHeadSha: "d".repeat(40), plannedPaths: ["src/lib/adapters/original.ts"],
+        dirtyPaths: [] as string[], baseIsAncestor: true, releaseIsAncestor: true,
+        releaseCommittedPaths: ["src/lib/automation/shared-runtime.ts", "src/lib/adapters/original.ts"],
+        unpublishedCandidate: { publishedMainSha: "c".repeat(40), containsRelease: true, isAncestorOfHead: true,
+          paths: ["src/lib/adapters/original.ts"] }, now };
+      if (scenario === "foreign-owner") input.requestingThreadId = "other-owner";
+      if (scenario === "unpublished-runtime") input.unpublishedCandidate.containsRelease = false;
+      if (scenario === "unmerged-runtime") input.unpublishedCandidate.isAncestorOfHead = false;
+      if (scenario === "unplanned-path") input.unpublishedCandidate.paths.push("src/lib/unrelated.ts");
+      if (scenario === "no-paths") input.unpublishedCandidate.paths = [];
+      if (scenario === "dirty") input.dirtyPaths.push(input.plannedPaths[0]);
+      if (scenario === "wrong-branch") input.currentBranch = "automation/other";
+      if (scenario === "live-lease") input.leaseExpiresAt = new Date(now.getTime() + 1);
+      expect(assessCourseSupportRecovery(input).action).toBe(scenario === "owned" ? "RECOVER" : "BLOCK");
+    });
+
   it("allows a clean expired batch to move to a new task", () => {
     expect(
       assessCourseSupportRecovery({
