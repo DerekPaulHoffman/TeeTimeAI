@@ -399,6 +399,29 @@ describe("clean native root widget handoff", () => {
 });
 
 describe("regular Stagehand source worker", () => {
+  it("hands the closed physical identity diagnostic to fresh generic investigation on both attempts", async () => {
+    const t = setup(), original = t.request.getMockImplementation()!;
+    const evidence = { schemaVersion: 1 as const, observedAt: new Date(t.f.clock).toISOString(),
+      canonicalStreet: { before: "", street: "old turnpike", type: "rd", after: "" },
+      providerStreet: { before: "", street: "turnpike", type: "rd", after: "" } };
+    const delegation = { ...createDelegationDiagnostic("PROVIDER_BIND"), physicalBindingEvidence: evidence };
+    t.request.mockImplementation(async action => {
+      if (action.action === "inspect_adapter") throw Object.assign(Error("physical mismatch"), {
+        code: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", details: { browserDiagnostics: { teeItUpDelegation: delegation } } });
+      return original(action);
+    });
+    const genericWorker = vi.fn(async options => {
+      expect(options.freshOfficialStart).toBe(true); expect(options.recipeEngineConstraint).toBe("EXISTING_ADAPTER");
+      expect(options.inspectionFeedback).toMatchObject({ attempt: 1, code: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED",
+        cleanup: { inspectionBrowserClosed: true }, fixedInspectionDiagnostic: { teeItUpDelegation: delegation } });
+      throw Object.assign(Error("no new proof"), { code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    });
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    t.f.job.checkpoint = t.client.checkpoint.mock.calls.at(-1)![2]; t.f.job.attempts = 2; t.f.clock = first + 260_000;
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    expect(genericWorker).toHaveBeenCalledTimes(2); expect(t.browserFactory).toHaveBeenCalledOnce();
+    expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
   it("retains the initial fixed-reader rejection when a later generic budget stop replaces controller feedback", async () => {
     const t = setup(), request = t.request.getMockImplementation()!;
     t.request.mockImplementation(async action => {

@@ -13,6 +13,7 @@ export type DelegatedDiagnosticGate = typeof delegatedDiagnosticGates[number];
 // Optional extension: older job-bound checkpoints retain their exact shape.
 // These are failure observations only, never facility or read authority.
 export const delegatedFacilityBindingDiagnosticGates = ["directoryNameMatch", "directoryNameTimeZoneMatch", "directoryIdentityMatch", "directoryIdentityUnique",
+  "directoryIntentionalConfigurationAvailable", "directoryIntentionalSoleFacilityBound", "directoryIntentionalDelegationVerified",
   "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch",
   "directoryPhysicalSchemaValid", "directoryPhysicalCountryValid", "directoryPhysicalOutdoorValid", "directoryPhysicalPhoneFieldValid", "directoryPhysicalIdsUnique",
   "directoryPhysicalAddressParseValid", "directoryPhysicalPostalRestorationUsed", "directoryPhysicalNumberMatch", "directoryPhysicalStreetNameMatch", "directoryPhysicalRegionMatch", "directoryPhysicalPostalMatch", "directoryPhysicalUnitMatch",

@@ -130,10 +130,16 @@ export async function runCourseDiscoveryStagehandWorker({
     metrics.genericFallback = { trigger, startedAt: now(), workDeadlineAt: new Date(deadline).toISOString(), freshOfficialStart: true,
       ...(retryPlan ? { skippedPriorInspection: true } : {}) };
     const provenance = packStagehandCheckpoint({ reference, failure: failureEvidence, progress: { phase: "GENERIC_FALLBACK" } });
+    // readStagehandFailure/createStagehandFailureCheckpoint already bind these
+    // closed observations to this job, source, request and immutable clocks.
+    // Pass the rejection as diagnostic context, never as source/replay proof.
+    const inspectionFeedback = failureEvidence?.entries.find(entry => entry.code === trigger && entry.phase === "FIXED_INSPECTION" &&
+      entry.cleanup.inspectionBrowserClosed === true && entry.attempt === (retryPlan ? 1 : job.attempts));
     const fallbackStarted = now();
     try {
       const outcome = await genericWorker({ job, workDeadlineAt: new Date(deadline).toISOString(), client, cwd, signal, model,
         freshOfficialStart: true, checkpointProvenance: provenance,
+        ...(inspectionFeedback ? { inspectionFeedback } : {}),
         ...(retryPlan ? { retryPlan } : {}),
         // An identity rejection may be a stale route or the wrong public
         // facility. Let Sol investigate again, but never escape that typed

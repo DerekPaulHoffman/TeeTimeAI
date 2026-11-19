@@ -1,11 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics, safeFixedInspectionSourceDiagnostic, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { describePublicUrlRejection, safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
-import { safePhysicalBindingFailureEvidence, safeTeeItUpDelegationDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { safeGenericInspectionFeedback, safePhysicalBindingFailureEvidence, safeTeeItUpDelegationDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { physicalBindingFailureEvidenceSchema } from "./physical-binding-failure-evidence";
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 
 describe("durable discovery browser diagnostics", () => {
+  it("gives discovery the actual bounded street rejection without granting identity or navigation authority", () => {
+    const evidence = { schemaVersion: 1, observedAt: "2030-01-01T12:01:00.000Z",
+      canonicalStreet: { before: "", street: "old turnpike", type: "rd", after: "" },
+      providerStreet: { before: "", street: "turnpike", type: "rd", after: "" } };
+    const entry = { code: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", phase: "FIXED_INSPECTION", attempt: 1,
+      observedAt: "2030-01-01T12:01:01.000Z", cleanup: { inspectionBrowserClosed: true },
+      fixedInspectionDiagnostic: { teeItUpDelegation: { ...createDelegationDiagnostic("PROVIDER_BIND"), physicalBindingEvidence: evidence,
+        hopEvidence: { url: "PRIVATE" }, url: "PRIVATE" } }, body: "PRIVATE" };
+    const job = { attempts: 2, firstPickedUpAt: "2030-01-01T12:00:00.000Z", deadlineAt: "2030-01-01T12:15:00.000Z" };
+    const now = Date.parse("2030-01-01T12:02:00.000Z"), feedback = safeGenericInspectionFeedback(entry, job, now);
+    expect(feedback).toMatchObject({ code: entry.code, attempt: 1, evidenceAuthority: false,
+      teeItUpDelegation: { stage: "PROVIDER_BIND", physicalBindingEvidence: evidence } });
+    expect(JSON.stringify(feedback)).not.toMatch(/PRIVATE|hopEvidence|body|url/u);
+    for (const value of [{ ...entry, code: "ADAPTER_IDENTITY_MISMATCH" }, { ...entry, attempt: 3 },
+      { ...entry, cleanup: { inspectionBrowserClosed: false } }, { ...entry, observedAt: "2030-01-01T12:00:30.000Z" },
+      { ...entry, observedAt: "2030-01-01T12:03:00.000Z" }]) expect(safeGenericInspectionFeedback(value, job, now)).toBeUndefined();
+    expect(safeGenericInspectionFeedback(entry, { ...job, firstPickedUpAt: "2030-01-01T12:01:02.000Z" }, now)).toBeUndefined();
+  });
   it("retains the exact bounded private street comparison through worker validation", () => {
     const evidence = { schemaVersion: 1 as const, observedAt: "2030-01-01T12:11:00.000Z",
       canonicalStreet: { before: "", street: "oakridge", type: "rd", after: "" }, providerStreet: { before: "", street: "oak ridge", type: "rd", after: "" } };
