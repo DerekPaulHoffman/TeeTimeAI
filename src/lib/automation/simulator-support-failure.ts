@@ -17,6 +17,7 @@ export type SimulatorSupportFailure = {
 type Classification = Pick<SimulatorSupportFailure, "category" | "code"> & { stage?: SimulatorSupportFailureStage };
 
 const researchCodes: Record<string, Classification> = {
+  BROWSER_UNSAFE_REDIRECT: { category: "ACCESS", code: "PUBLIC_REDIRECT_NOT_ELIGIBLE" },
   SIMULATOR_RESEARCH_UNSAFE_URL: { category: "ACCESS", code: "UNSAFE_PUBLIC_URL" },
   SIMULATOR_RESEARCH_DESTINATION_CHANGED: { category: "ACCESS", code: "PUBLIC_DESTINATION_CHANGED" },
   SIMULATOR_RESEARCH_PROVIDER_BUSY: { category: "CAPACITY", code: "PROVIDER_CAPACITY_BUSY" },

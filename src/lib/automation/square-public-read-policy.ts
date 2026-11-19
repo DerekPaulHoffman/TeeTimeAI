@@ -50,6 +50,23 @@ export function isSquarePublicServiceCatalogUrl(value: string) {
   return url.href === value && publicSquareQuery(url, false);
 }
 
+/** Square's older public Book Now links redirect to its current catalog host.
+ * Bind the location (and merchant when present) across that one-way handoff.
+ * No service, date, customer, slot or checkout parameters are admitted here. */
+export function isSquarePublicCatalogRedirect(source: string, destination: string) {
+  try {
+    if (source.length > 2048 || destination.length > 2048) return false;
+    const from = new URL(source), to = new URL(destination);
+    if (from.href !== source || to.href !== destination || from.origin !== "https://app.squareup.com" ||
+        to.origin !== "https://book.squareup.com" || from.username || from.password || from.hash || to.hash ||
+        !publicSquareQuery(from, false) || !isSquarePublicServiceCatalogUrl(destination)) return false;
+    const legacy = /^\/appointments\/book\/(?:(?<merchant>[a-z0-9]{1,64})\/)?(?<location>[A-Z0-9]{13})\/start$/u.exec(from.pathname);
+    const current = /^\/appointments\/(?<merchant>[a-z0-9]{1,64})\/location\/(?<location>[A-Z0-9]{13})\/services$/u.exec(to.pathname);
+    return !!legacy?.groups && !!current?.groups && legacy.groups.location === current.groups.location &&
+      (!legacy.groups.merchant || legacy.groups.merchant === current.groups.merchant);
+  } catch { return false; }
+}
+
 /** Anonymous inventory only. A caller must supply its current guarded document
  * or the independently bound recipe entry; this does not grant navigation,
  * credential headers, slot selection, customer details or booking permission. */

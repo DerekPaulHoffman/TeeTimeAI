@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { isAnonymousBrowserReadPost } from "./simulator-interactive-browser";
-import { isSquarePublicAvailabilityPost, isSquarePublicServiceCatalogUrl, squarePublicAvailabilityCoversDate } from "./square-public-read-policy";
+import { isSquarePublicAvailabilityPost, isSquarePublicCatalogRedirect, isSquarePublicServiceCatalogUrl, squarePublicAvailabilityCoversDate } from "./square-public-read-policy";
 
 describe("public Square calendar entry destinations", () => {
   const catalog = "https://book.squareup.com/appointments/example12345678/location/LOC1234567890/services";
+  it("binds only the old public gateway to the same location and merchant catalog", () => {
+    const legacy = "https://app.squareup.com/appointments/book/example12345678/LOC1234567890/start";
+    expect(isSquarePublicCatalogRedirect(legacy, catalog)).toBe(true);
+    expect(isSquarePublicCatalogRedirect(legacy.replace("example12345678/", ""), catalog)).toBe(true);
+    expect(isSquarePublicCatalogRedirect(legacy + "?color=ffffff", catalog + "?locale=en")).toBe(true);
+    for (const destination of [catalog.replace("LOC1234567890", "OTH1234567890"), catalog.replace("example12345678", "anothermerchant"),
+      catalog.replace("book.squareup.com", "foreign.example"), catalog.replace("services", "checkout"), catalog + "?slot_id=selected",
+      catalog + "?service_id=" + "A".repeat(24), catalog + "#calendar", catalog + "/" + "A".repeat(24)])
+      expect(isSquarePublicCatalogRedirect(legacy, destination), destination).toBe(false);
+    for (const source of [legacy + "?token=private", legacy.replace("https://", "https://user@"), legacy.replace("app.squareup.com", "book.squareup.com"),
+      legacy.replace("/start", "/%73tart"), legacy.replace("https://", "http://"), legacy + "?locale=en&locale=en"])
+      expect(isSquarePublicCatalogRedirect(source, catalog), source).toBe(false);
+    expect(isSquarePublicCatalogRedirect(catalog, legacy)).toBe(false);
+  });
   it("accepts only an exact undated catalog with existing presentation query fields", () => {
     expect(isSquarePublicServiceCatalogUrl(catalog)).toBe(true);
     expect(isSquarePublicServiceCatalogUrl("https://app.squareup.com/appointments/book/LOC1234567890/start?color=ffffff&locale=en&referrer=so")).toBe(true);

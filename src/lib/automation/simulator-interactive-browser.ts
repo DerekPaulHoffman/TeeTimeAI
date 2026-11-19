@@ -10,7 +10,7 @@ import { createSimulatorBrowserRequestQueue } from "./simulator-browser-request-
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest } from "./passfactory-public-read-policy";
 import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost } from "./mindbody-public-read-policy";
 import { isRexNamespace, isRexPublicReadPost } from "./rex-public-read-policy";
-import { isSquareAppointmentsNamespace, isSquarePublicAvailabilityPost } from "./square-public-read-policy";
+import { isSquareAppointmentsNamespace, isSquarePublicAvailabilityPost, isSquarePublicCatalogRedirect } from "./square-public-read-policy";
 import { observedSquarePublicServiceControl, type SquarePublicServiceChoice, type SquarePublicServiceControl } from "./square-public-service-controls";
 import { projectPassfactoryCalendarEvidence, type PassfactoryCalendarEvidence } from "./passfactory-calendar-evidence";
 import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
@@ -258,10 +258,24 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             const type = response.headers.get("content-type") ?? "";
             const responseHeaders: Record<string, string> = { "content-type": type };
             const location = response.headers.get("location");
+            let guardedDocumentRedirect = false;
             if (location) {
               const next = getSafeCustomerBookingUrl(new URL(location, safe).href);
-              if (!next || method === "POST" || ++navigations > 6 || new URL(next).hostname.replace(/^www\./u, "") !== new URL(safe).hostname.replace(/^www\./u, "")) throw new Error("BROWSER_UNSAFE_REDIRECT");
-              origins.add(new URL(next).origin); responseHeaders.location = next;
+              if (++navigations > 6) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
+              const publicCatalogHandoff = next && method === "GET" && kind === "document" && request.isNavigationRequest() &&
+                request.frame() === page?.mainFrame() && [301, 302, 303, 307, 308].includes(response.status) &&
+                isSquarePublicCatalogRedirect(safe, next);
+              if (!next || method === "POST" || !publicCatalogHandoff &&
+                  new URL(next).hostname.replace(/^www\./u, "") !== new URL(safe).hostname.replace(/^www\./u, "")) throw new Error("BROWSER_UNSAFE_REDIRECT");
+              origins.add(new URL(next).origin);
+              // Playwright does not intercept later HTTP redirect hops. Turn
+              // this admitted document handoff into a fresh browser navigation
+              // so the destination is fetched by this same pinned, leased
+              // transport instead of escaping the route handler.
+              guardedDocumentRedirect = kind === "document" && request.isNavigationRequest() && request.frame() === page?.mainFrame() &&
+                [301, 302, 303, 307, 308].includes(response.status);
+              if (guardedDocumentRedirect) responseHeaders.refresh = `0;url=${next}`;
+              else responseHeaders.location = next;
             }
             if (document === documentEpoch && request.isNavigationRequest() && request.frame() === page?.mainFrame()) status = response.status;
             if (response.status >= 200 && response.status < 300 && kind === "script" && request.frame() === page?.mainFrame() && /(?:javascript|ecmascript)/iu.test(type)) {
@@ -286,7 +300,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             }
             const cors = response.headers.get("access-control-allow-origin");
             if (cors === "*" || cors && origins.has(cors)) responseHeaders["access-control-allow-origin"] = cors;
-            await route.fulfill({ status: response.status, headers: responseHeaders, body: buffer });
+            await route.fulfill({ status: guardedDocumentRedirect ? 200 : response.status, headers: responseHeaders,
+              body: guardedDocumentRedirect ? Buffer.alloc(0) : buffer });
           });
         } catch (error) { failure ??= tagSimulatorResearchFailure(error, "BROWSER_REQUEST"); await route.abort().catch(() => {}); }
         finally { if (trackedPublicRead) pendingPublicReads--; }

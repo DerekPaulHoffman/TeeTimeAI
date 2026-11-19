@@ -11,6 +11,13 @@ afterEach(() => {
 });
 
 describe("simulator support failure receipts", () => {
+  it("preserves a rejected redirect as a closed access failure rather than unknown", () => {
+    const failure = tagSimulatorResearchFailure(new Error("BROWSER_UNSAFE_REDIRECT"), "BROWSER_REQUEST");
+    expect(classifySimulatorSupportFailure(failure, "PUBLIC_READ")).toMatchObject({
+      stage: "PUBLIC_READ", category: "ACCESS", code: "PUBLIC_REDIRECT_NOT_ELIGIBLE", researchPhase: "BROWSER_REQUEST",
+    });
+    expect(readSafeSimulatorSupportFailure(classifySimulatorSupportFailure(failure, "PUBLIC_READ"))).toMatchObject({ code: "PUBLIC_REDIRECT_NOT_ELIGIBLE" });
+  });
   it("records only trusted bounded research phases without changing unknown or known classifications", () => {
     const secret = "private-user@example.test?token=hidden";
     const unrecognized = Object.seal(new Error(`Browser broke at https://example.test/${secret}`));
