@@ -9,9 +9,11 @@ original owner and separate contract; this does not authorize a takeover.
 
 After the required learner health check and protected cleanup, handle actual
 `fullRepairContinuationItems` before new launches. These are source-checked
-data-only outdoor full repairs that still belong to their original Desktop
-owner after negative verification. They are not a new claim or an ownership
-transfer. Do not create a worktree or invoke the simulator continuation runner
+outdoor full repairs that still belong to their original Desktop owner. The
+plan can include data-only, claimed implementation, published implementation,
+or an interrupted registered implementation awaiting deployment proof. Pass
+the exact returned item to the helper whenever it appears. Do not create a
+worktree or invoke the simulator continuation runner
 for them. Save the actual preflight context and each exact item with exclusive
 private UTF-8 writes below selectedCheckout's ignored `.codex-artifacts`, then
 run the selected checkout's sealed helper once:
@@ -28,7 +30,9 @@ Save the actual acknowledgement privately. Never replay a failed/ambiguous send
 or change the recipient. The helper reads native thread/read and terminal
 turns/list with itemsView:notLoaded; it never resumes a CLI turn, changes the
 original launcher receipt or claims completion/identity evidence it did not
-observe. One exclusive marker per assignment/new runtime prevents duplicates.
+observe. One exclusive marker per assignment/runtime prevents duplicate
+continuation. For a registered release awaiting proof, its exact registered
+commit is the key, so a later shared runtime cannot repeat that intent.
 Only the original worker can update its own clean branch, read/recover its same
 packet under existing fences, and continue or safely requeue the superseded
 runtime. Read the current full-repair continuation guide for that scope.

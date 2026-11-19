@@ -75,18 +75,19 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (!SHA.test(currentSha) || currentSha !== execute(selected, ["rev-parse", "origin/main"]) || execute(selected, ["status", "--porcelain"])) fail("SELECTED_CHECKOUT_CHANGED");
   const publishedImplementation = item?.continuationMode === "PUBLISHED_IMPLEMENTATION";
   const claimedImplementation = item?.continuationMode === "CLAIMED_IMPLEMENTATION";
+  const registeredImplementation = item?.continuationMode === "REGISTERED_IMPLEMENTATION";
   const sourceReconciliationOnly = item?.sourceReconciliationOnly === true;
   if (item?.sourceReconciliationOnly !== undefined &&
       (!sourceReconciliationOnly || item.continuationMode !== "DATA_ONLY" || item.continuationTrigger !== "UNFINISHED_FULL_REPAIR")) {
     fail("DATA_ONLY_SOURCE_RECONCILIATION_REQUIRED");
   }
-  if (![undefined, "DATA_ONLY", "PUBLISHED_IMPLEMENTATION", "CLAIMED_IMPLEMENTATION"].includes(item?.continuationMode)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
-  if (claimedImplementation && (item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths))) fail("ORIGINAL_CLAIMED_PATHS_REQUIRED");
+  if (![undefined, "DATA_ONLY", "PUBLISHED_IMPLEMENTATION", "CLAIMED_IMPLEMENTATION", "REGISTERED_IMPLEMENTATION"].includes(item?.continuationMode)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
+  if ((claimedImplementation || registeredImplementation) && (item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths))) fail("ORIGINAL_CLAIMED_PATHS_REQUIRED");
   if (![undefined, "UNFINISHED_FULL_REPAIR"].includes(item?.continuationTrigger)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
   if (item?.kind !== "OWNED_OUTDOOR_FULL_REPAIR" || !UUID.test(item.threadId ?? "") || item.threadId === environment.CODEX_THREAD_ID ||
       !/^course-assignment-[a-f0-9-]{36}$/u.test(item.assignmentRef ?? "") || !/^[A-Za-z0-9_-]{1,200}$/u.test(item.batchReference ?? "") ||
       !SHA.test(item.baseSha ?? "") || !SHA.test(item.releaseSha ?? "") ||
-      (publishedImplementation ? item.releaseSha === item.baseSha : item.releaseSha !== item.baseSha) ||
+      (publishedImplementation || registeredImplementation ? item.releaseSha === item.baseSha : item.releaseSha !== item.baseSha) ||
       !isAbsolute(item.launcherReceiptPath ?? "")) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
   const launcher = readJson(item.launcherReceiptPath);
   if (launcher.schemaVersion !== 1 || launcher.status !== "DESKTOP_REQUESTED" || launcher.executionMode !== "DESKTOP" ||
@@ -104,13 +105,26 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (unchangedRuntime && item.continuationTrigger !== "UNFINISHED_FULL_REPAIR") {
     return { outcome: "unchanged_runtime", messageRequired: false };
   }
-  const originalWorkerHead = publishedImplementation ? item.releaseSha : item.baseSha;
+  const originalWorkerHead = publishedImplementation || registeredImplementation ? item.releaseSha : item.baseSha;
   let localCandidate = null;
   if (publishedImplementation) {
     // A database deployment timestamp alone is insufficient. Require this
     // exact owner's registered release to be in the tested current main.
     execute(selected, ["merge-base", "--is-ancestor", item.baseSha, item.releaseSha]);
     execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, currentSha]);
+  }
+  if (registeredImplementation) {
+    if (workerHead !== item.releaseSha) fail("ORIGINAL_REGISTERED_CANDIDATE_CHANGED");
+    execute(selected, ["merge-base", "--is-ancestor", item.baseSha, item.releaseSha]);
+    const sharedBase = execute(selected, ["merge-base", "--all", workerHead, currentSha]);
+    if (!SHA.test(sharedBase)) fail("ORIGINAL_CANDIDATE_ANCESTRY_REQUIRED");
+    if (sharedBase !== workerHead) {
+      execute(selected, ["merge-base", "--is-ancestor", item.baseSha, sharedBase]);
+      const raw = execute(worker, ["diff", "--name-only", "--no-renames", "-z", `${sharedBase}..${workerHead}`]);
+      const paths = typeof raw === "string" && raw.endsWith("\0") ? raw.slice(0, -1).split("\0") : [];
+      if (!validPaths(paths) || paths.some(path => !item.plannedPaths.includes(path))) fail("ORIGINAL_CANDIDATE_PATHS_REQUIRED");
+      localCandidate = { headSha: workerHead, sharedBaseSha: sharedBase, paths };
+    }
   }
   if (workerHead !== originalWorkerHead) {
     // A previous automatic continuation let this same owner fast-forward its
@@ -140,7 +154,9 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (!same(common, parentCommon) || same(common, realpathSync(execute(worker, ["rev-parse", "--absolute-git-dir"])))) fail("ORIGINAL_LINKED_WORKER_REQUIRED");
   if (!localCandidate) execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
   const progress = readFailedLearningProgress(item, now);
-  const primaryMarker = join(selected, ".codex-artifacts", `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
+  const primaryMarker = join(selected, ".codex-artifacts", registeredImplementation
+    ? `desktop-repair-registered-${item.assignmentRef}-${item.releaseSha}.private.json`
+    : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
   let marker = primaryMarker, prior = null;
   if (existsSync(primaryMarker)) {
     if (!progress) return { outcome: "already_requested", messageRequired: false };
@@ -161,7 +177,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const cli = (dependencies.inspectCli ?? inspectPinnedWorkerCli)(selected);
   const runtime = (dependencies.resolveRuntime ?? resolveCourseSupportWorkerRuntime)();
   if (cli.status !== "current" || runtime.status !== "available" || !isAbsolute(runtime.nodePath ?? "")) fail("PARENT_RUNTIME_UNAVAILABLE");
-  if (sourceReconciliationOnly) {
+  if (sourceReconciliationOnly || registeredImplementation) {
     let proof;
     try { proof = await (dependencies.readProductionProof ?? readDesktopContinuationProduction)({ selected, nodePath: runtime.nodePath, currentSha }); }
     catch { return { outcome: "production_qualification_unavailable", messageRequired: false, monitoringVerified: false }; }
@@ -199,11 +215,13 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     const releaseInstruction = publishedImplementation || claimedImplementation
       ? " The operator's standing full-repair release authorization includes normal promotion of your same exact registered Ready Git artifact after fresh current-main, complete required CI, project and original owner/source/lease checks. An automatic alias-check failure alone does not require a new permission request. Preserve the failed evidence; do not create a new CLI production build, remap arbitrary aliases, change configuration, roll back or bypass a failed gate."
       : "";
-    const purpose = sourceReconciliationOnly
+    const purpose = registeredImplementation
+      ? "REGISTERED_RELEASE_RECONCILIATION. Your exact clean registered candidate is retained and its owner-bound deployment proof is absent. Reconcile the stopped release stage using the continuation guide. Do not infer a venue failure, start another provider read or use learner admission before release, ownership and deployment proof are established."
+      : sourceReconciliationOnly
       ? "SOURCE_RECONCILIATION_ONLY. The source snapshot changed after this data-only claim. Read your same owned packet and use only the existing qualified original-owner recovery/requeue path when eligible. Do not investigate or implement against the changed snapshot, request provider reads, change claim fingerprints, or repeat verification. Stop after the typed recovery result; the scheduler owns subsequent admission. A rejected recovery stays visible."
       : `finish the unresolved diagnosis under the existing action plan; a newer release is not required. Do not rerun unchanged verification or an exhausted read. Obtain and validate fresh research context, distinguish tooling-repair permission from provider-contract permission, and diagnose the actual missing evidence/transport/extraction tool within the returned scope.${phaseInstruction}${releaseInstruction}`;
-    const candidateInstruction = localCandidate ? `\nPreserved unregistered local candidate: ${localCandidate.headSha}. Its exact unpublished delta is confined to your already claimed paths. Follow the guide's candidate-preserving merge; do not reset it or treat it as registered/published.` : "";
-    const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${claimedImplementation ? "CLAIMED_IMPLEMENTATION" : publishedImplementation ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha}${candidateInstruction}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nExact tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
+    const candidateInstruction = localCandidate && !registeredImplementation ? `\nPreserved unregistered local candidate: ${localCandidate.headSha}. Its exact unpublished delta is confined to your already claimed paths. Follow the guide's candidate-preserving merge; do not reset it or treat it as registered/published.` : "";
+    const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${item.continuationMode ?? "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha}${candidateInstruction}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nExact tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
     privateWrite(marker, { schemaVersion: 1, kind: "OWNED_DESKTOP_CONTINUATION_REQUESTED", status: "REQUESTED_NOT_ACKNOWLEDGED",
       parentThreadId: environment.CODEX_THREAD_ID, childThreadId: item.threadId, assignmentRef: item.assignmentRef,
       batchReference: item.batchReference, priorTurnId: turn.id, priorTurnStatus: turn.status, priorTurnError: turn.error,

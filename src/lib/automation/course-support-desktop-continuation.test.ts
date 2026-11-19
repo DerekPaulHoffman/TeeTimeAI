@@ -86,6 +86,35 @@ describe("source reconciliation observes current canonical deployments", () => {
 });
 
 describe("original Desktop full-repair continuation", () => {
+  it("defers a stopped registered release until current main is Ready and asks its original owner only once", async () => {
+    const f = fixture();
+    const registered = "c".repeat(40), path = "src/lib/course-discovery/public-calendar.ts";
+    const item = { ...f.item, releaseSha: registered, continuationMode: "REGISTERED_IMPLEMENTATION",
+      continuationTrigger: "UNFINISHED_FULL_REPAIR", plannedPaths: [path] };
+    const priorGit = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => {
+      if (args[0] === "merge-base" && args[1] === "--all") return BEFORE;
+      if (args[0] === "diff") return `${path}\0`;
+      if (args[0] === "rev-parse" && args[1] === "HEAD" && cwd === f.worker) return registered;
+      return priorGit(cwd, args);
+    });
+    const ready = f.deps.readProductionProof();
+    f.deps.readProductionProof.mockReturnValue({ ...ready, state: "BUILDING" });
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "production_not_ready", messageRequired: false });
+    expect(f.deps.clientFactory).not.toHaveBeenCalled();
+    f.deps.readProductionProof.mockReturnValue(ready);
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "desktop_continuation_message_required", threadId: CHILD,
+        monitoringVerified: false, prompt: expect.stringContaining("REGISTERED_RELEASE_RECONCILIATION") });
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
+    f.deps.git.mockImplementation((cwd, args) => args[0] === "rev-parse" && args[1] === "HEAD" && cwd === f.worker
+      ? "d".repeat(40) : priorGit(cwd, args));
+    await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).rejects.toThrow("ORIGINAL_REGISTERED_CANDIDATE_CHANGED");
+  });
+
   it.each(["building", "wrong-sha", "missing-alias", "cli-source", "unavailable"])("defers source reconciliation before consuming its intent when production is %s", async scenario => {
     const f = fixture();
     const item = { ...f.item, continuationMode: "DATA_ONLY", continuationTrigger: "UNFINISHED_FULL_REPAIR", sourceReconciliationOnly: true };

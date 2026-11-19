@@ -3,7 +3,7 @@ import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-excl
 import { isGeneralDiscoveryEnabled } from "@/lib/course-discovery/config";
 
 import { Prisma } from "@prisma/client";
-import { fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair } from "./course-support-full-repair";
+import { fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair, readLegacyFullRepairBaseVerification, retainOlderFullRepairReleaseWindows } from "./course-support-full-repair";
 import type {
   AutomationReason,
   BookingMethod,
@@ -3652,6 +3652,11 @@ export function buildCourseSupportReleaseHistory(input: {
   const existingHistory = Array.isArray(summary.releaseHistory)
     ? summary.releaseHistory
     : [];
+  const evictedHistory = existingHistory.slice(0, Math.max(0, existingHistory.length - 19));
+  const olderReleaseWindows = evictedHistory.length > 0 &&
+    readCourseSupportRemediationDirective(input.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF"
+    ? retainOlderFullRepairReleaseWindows(summary.olderReleaseWindows, evictedHistory)
+    : undefined;
   const executionEver = buildCourseSupportExecutionEverSummary({
     summary: input.summary,
     baseSha: input.baseSha,
@@ -3671,6 +3676,7 @@ export function buildCourseSupportReleaseHistory(input: {
   return {
     ...summary,
     executionEver,
+    ...(olderReleaseWindows ? { olderReleaseWindows } : {}),
     releaseHistory: [
       ...existingHistory,
       {
@@ -6656,6 +6662,8 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           leaseExpiresAt: true,
           summary: true,
           createdAt: true,
+          reference: true,
+          baseSha: true,
           releaseSha: true,
           deployedAt: true,
           recheckDispatchStartedAt: true,
@@ -6725,7 +6733,18 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         };
       }
 
-      const targets = batch.incidents.flatMap((entry) => {
+      const entries = await Promise.all(batch.incidents.map(async entry => {
+        if (!fullRepair || batch.incidents.length !== 1 || !Array.isArray(summary.releaseHistory) || summary.releaseHistory.length !== 20) return { entry, legacyBaseVerification: null };
+        const claim = readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 });
+        const legacyBaseVerification = claim && await readLegacyFullRepairBaseVerification(transaction, {
+          batchId: input.batchId, batchReference: batch.reference, entryId: entry.id, courseId: entry.courseId,
+          incidentId: entry.incident.id, baseSha: batch.baseSha, runtimeVersion: batch.releaseSha,
+          providerSnapshotFingerprint: claim.providerSnapshotFingerprint, batchCreatedAt: batch.createdAt, now: databaseNow,
+          releaseHistory: summary.releaseHistory, olderReleaseWindows: summary.olderReleaseWindows,
+        });
+        return { entry, legacyBaseVerification };
+      }));
+      const targets = entries.flatMap(({ entry, legacyBaseVerification }) => {
         const playbook = assessAutomationPlaybook(
           entry.incident.attemptLedger,
           entry.incident.cycle,
@@ -6757,7 +6776,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           claim.approach.playbookStage === remediationDirective?.playbookStage && events &&
           fullRepairReadProgressMatchesClaim({ fullRepair: true, claimedEventCount: claim.playbookEventCountAtClaim,
             runtimeVersion: batch.releaseSha, batchCreatedAt: batch.createdAt, now: databaseNow,
-            releaseHistory: summary.releaseHistory, events }),
+            releaseHistory: summary.releaseHistory, olderReleaseWindows: summary.olderReleaseWindows, legacyBaseVerification, events }),
         );
         const stageAssessment = playbook.stages.find(
           (assessment) => assessment.stage === stage,

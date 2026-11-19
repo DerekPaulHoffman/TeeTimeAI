@@ -1,5 +1,50 @@
-import { describe, expect, it } from "vitest";
-import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+import type { Prisma } from "@prisma/client";
+import { describe, expect, it, vi } from "vitest";
+import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, readLegacyFullRepairBaseVerification, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+
+describe("older repair with an evicted base release", () => {
+  const sha = (sequence: number) => sequence.toString(16).padStart(40, "0");
+  const stamp = (seconds: number) => new Date(Date.UTC(2026, 6, 15, 20, 0, seconds));
+  const baseSha = sha(1), fingerprint = "a".repeat(64);
+  const input = { batchId: "batch-id", batchReference: "batch-ref", entryId: "entry-id", courseId: "course-id",
+    incidentId: "incident-id", baseSha, runtimeVersion: sha(22), providerSnapshotFingerprint: fingerprint,
+    batchCreatedAt: stamp(1), now: stamp(100), releaseHistory: Array.from({ length: 20 }, (_, index) => ({
+      releaseSha: sha(index + 2), deployedAt: index === 0 ? stamp(19).toISOString() : null,
+      supersededAt: stamp(index + 20).toISOString(), supersededBy: sha(index + 3),
+    })) };
+  const deployment = { courseId: input.courseId, incidentId: input.incidentId, source: "DEPLOYMENT", eventType: "DEPLOYMENT_VERIFIED",
+    deploymentSha: baseSha, runtimeVersion: baseSha, occurredAt: stamp(0), audit: { batchRef: input.batchReference } };
+  const verification = { courseId: input.courseId, status: "STALE", lastError: "active_demand", outcome: "FETCH_FAILED", runtimeVersion: baseSha,
+    createdAt: stamp(3), startedAt: stamp(4), completedAt: stamp(7), deadlineAt: stamp(18), providerSnapshotFingerprint: fingerprint,
+    evidence: { schemaVersion: 1, kind: "PROVIDER_VERIFICATION", outcome: "FETCH_FAILED", releaseSha: baseSha,
+      runtimeVersion: baseSha, observedAt: stamp(5).toISOString(), providerSnapshotFingerprint: fingerprint } };
+
+  it("uses only the exact old execution window when the release history no longer contains the base", async () => {
+    const findEvent = vi.fn().mockResolvedValue(deployment), findVerification = vi.fn().mockResolvedValue(verification);
+    const db = { courseMonitoringEvent: { findUnique: findEvent }, courseSupportVerificationRequest: { findUnique: findVerification } } as unknown as Prisma.TransactionClient;
+    const legacyBaseVerification = await readLegacyFullRepairBaseVerification(db, input);
+    expect(legacyBaseVerification).toEqual({ releaseSha: baseSha, startedAt: stamp(4), completedAt: stamp(7) });
+    expect(findEvent).toHaveBeenCalledWith(expect.objectContaining({ where: { idempotencyKey: `course-support-deployment:batch-id:entry-id:${baseSha}` } }));
+    expect(findVerification).toHaveBeenCalledWith(expect.objectContaining({ where: { batchIncidentId_releaseSha: { batchIncidentId: "entry-id", releaseSha: baseSha } } }));
+    const gate = { ...input, fullRepair: true, claimedEventCount: 0, legacyBaseVerification };
+    const event = { observedAt: stamp(6).toISOString(), transition: "COMPLETED", runtimeVersion: baseSha };
+    expect(fullRepairReadProgressMatchesClaim({ ...gate, events: [event] })).toBe(true);
+    for (const changed of [{ observedAt: stamp(3).toISOString() }, { observedAt: stamp(8).toISOString() },
+      { runtimeVersion: sha(24) }, { transition: "FAILED_FINAL" }, { technicalReason: "ACCOUNT_REQUIRED" }]) {
+      expect(fullRepairReadProgressMatchesClaim({ ...gate, events: [{ ...event, ...changed }] })).toBe(false);
+    }
+    for (const changed of [{ courseId: "other" }, { runtimeVersion: sha(3) }, { startedAt: null },
+      { lastError: "batch_release_changed" }, { completedAt: stamp(21) }, { evidence: null }]) {
+      findVerification.mockResolvedValueOnce({ ...verification, ...changed });
+      expect(await readLegacyFullRepairBaseVerification(db, input)).toBeNull();
+    }
+    findEvent.mockResolvedValueOnce(null);
+    expect(await readLegacyFullRepairBaseVerification(db, input)).toBeNull();
+    findEvent.mockResolvedValueOnce({ ...deployment, audit: { batchRef: "other" } });
+    expect(await readLegacyFullRepairBaseVerification(db, input)).toBeNull();
+    expect(await readLegacyFullRepairBaseVerification(db, { ...input, releaseHistory: input.releaseHistory.slice(1) })).toBeNull();
+  });
+});
 
 describe("changed-source reconciliation for an unfinished data-only mission", () => {
   const input = { mode: "DATA_ONLY" as const, result: "STALE_EVIDENCE", claimedFingerprint: "a".repeat(64), currentFingerprint: "b".repeat(64) };
