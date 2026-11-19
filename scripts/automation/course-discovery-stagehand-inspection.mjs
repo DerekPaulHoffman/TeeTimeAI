@@ -13,6 +13,20 @@ const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_S
 const INSPECTION_ACTION_LIMIT = 6;
 const inspectionFailures = new WeakMap();
 const publicRoutingRecoveries = new WeakMap();
+// Diagnostics only: never copy arbitrary helper codes, messages or stacks.
+const executionFailureCodes = ["UNKNOWN", "BROWSER_ACTION_FAILED", "BROWSER_ACTION_SCHEMA_INVALID", "BROWSER_EVALUATION_FAILED",
+  "BROWSER_NAVIGATION_FAILED", "BROWSER_UNAVAILABLE", "DISCOVERY_PROCESS_REQUEST_FAILED", "DISCOVERY_PROCESS_OUTPUT_LIMIT",
+  "DISCOVERY_PROCESS_PROTOCOL_INVALID", "DISCOVERY_PROCESS_FAILED", "DISCOVERY_PROCESS_CLOSED", "DISCOVERY_PROCESS_INPUT_FAILED",
+  "DISCOVERY_PROCESS_TIMEOUT", "DISCOVERY_TOOL_FAILED", "DISCOVERY_CANCELLED", "PROVIDER_COORDINATION_UNAVAILABLE",
+  "FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID", "FIXED_INSPECTION_FRAME_SCOPE_INVALID"];
+const executionSchema = z.object({ boundary: z.enum(["PREPARATION", "BROWSER_CREATE", "SOURCE_ROUTING", "BROWSER_REQUEST", "SNAPSHOT_VALIDATION", "RECIPE_VALIDATION", "SOURCE_BINDING", "CLEANUP"]),
+  action: z.enum(["open", "observe", "inspect_adapter", "click"]).nullable(), actionIndex: z.number().int().min(0).max(6),
+  snapshotReturned: z.boolean(), browserCreated: z.boolean(), browserClosed: z.boolean(), failureCode: z.enum(executionFailureCodes),
+}).strict().refine(row => (row.actionIndex === 0) === (row.action === null) && (!row.snapshotReturned || row.actionIndex > 0) && (!row.browserClosed || row.browserCreated));
+export function safeInspectionExecutionDiagnostic(value) {
+  const parsed = executionSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
 // Closed diagnostic mirror only; these values cannot admit a request or document.
 const nativeFatalCodes = ["NATIVE_REDIRECT_ABORT_TIMEOUT", "NATIVE_REDIRECT_BODY_TIMEOUT", "NATIVE_REDIRECT_CANCELLED", "NATIVE_REDIRECT_CONTINUE_REJECTED",
   "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", "NATIVE_REDIRECT_DRAIN_FAILED", "NATIVE_REDIRECT_DRAIN_TIMEOUT", "NATIVE_REDIRECT_DUPLICATE_FETCH_ID",
@@ -106,12 +120,14 @@ export function currentStagehandInspectionDiagnostic(error, job, startedAt, now)
     const landing = safeInspectionLandingDiagnostic(value.landing);
     const nativeRouterFailure = safeNativeRouterFailure(value.nativeRouterFailure);
     const fixedSource = safeFixedInspectionSourceDiagnostic(value);
-    return teeItUpDelegation || adapterRead || readability || landing || nativeRouterFailure || fixedSource ? {
+    const execution = safeInspectionExecutionDiagnostic(value.execution);
+    return teeItUpDelegation || adapterRead || readability || landing || nativeRouterFailure || fixedSource || execution ? {
       ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
       ...(readability ? { readability } : {}),
       ...(landing ? { landing } : {}),
       ...(nativeRouterFailure ? { nativeRouterFailure } : {}),
       ...(fixedSource ?? {}),
+      ...(execution ? { execution } : {}),
     } : undefined;
   } catch { return undefined; }
 }
@@ -359,6 +375,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     startedAt: new Date(startedAt).toISOString(), actionLimit: INSPECTION_ACTION_LIMIT, actions: [],
     modelCalls: 0, browserClosed: false, outcome: 'INCOMPLETE' };
   let browser, primary, result, lastPublicRoutingRead;
+  let executionBoundary = 'PREPARATION', failedBoundary;
   let browserClosedClean = false;
   const check = () => {
     if (signal?.aborted) throw fail('FRAMEWORK_INSPECTION_CANCELLED');
@@ -379,6 +396,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         environment.COURSE_DISCOVERY_JOB_ID !== job.id || environment.COURSE_DISCOVERY_JOB_KIND !== 'discovery' ||
         environment.COURSE_DISCOVERY_LEASE_TOKEN !== job.leaseToken) throw fail('FRAMEWORK_INSPECTION_SCOPE_INVALID');
     const inspectionSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(Math.max(1, deadline - now()))]);
+    executionBoundary = 'BROWSER_CREATE';
     browser = await worker.createDiscoveryBrowser({ cwd, deadlineAt: new Date(deadline).toISOString(),
       fixedInspection: true, ...(frameWitness ? { fixedInspectionFrameWitness: frameWitness } : {}),
       ...(earlyCpsContext ? { fixedCpsSourceDocumentUrl: recipe.source.bookingUrl } : {}),
@@ -387,6 +405,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       ...(job.request.trustedContext!==undefined?{trustedContext:job.request.trustedContext}:{}),
       venueName: job.request.identity.name, venueAddress: job.request.identity.address,
       venueOfficialUrl: job.request.identity.officialUrl, helperEnvironment: environment, signal: inspectionSignal });
+    executionBoundary = 'SOURCE_ROUTING';
     const nativeContexts = new WeakMap();
     let currentNativeContext;
     const nativeContextMatches = (snapshot, expectedUrl, documentBinding) => {
@@ -404,7 +423,10 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       receipt.actions.push(step);
       try {
         const previousContext = currentNativeContext;
-        const snapshot = await browser.request(action === 'observe' ? { action } : action === 'click' ? { action, target } : { action, url }); check();
+        executionBoundary = 'BROWSER_REQUEST';
+        const snapshot = await browser.request(action === 'observe' ? { action } : action === 'click' ? { action, target } : { action, url });
+        step.snapshotReturned = true;
+        executionBoundary = 'SNAPSHOT_VALIDATION'; check();
         // Record before the unchanged guard: an unreadable snapshot must remain diagnosable.
         try { step.readability = inspectionReadability(snapshot, action, receipt.actions.length, job.request.identity.officialUrl, recipe.source.bookingUrl); }
         catch { /* Optional diagnostic capture cannot replace the original guard. */ }
@@ -474,6 +496,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
           if (readability && readability[0].failedPredicates.length === 0)
             lastPublicRoutingRead = { step, lastAction: action, readability, observedAt: projected.observedAt };
         }
+        executionBoundary = 'SOURCE_ROUTING';
         return snapshot;
       } catch (error) {
         step.error = inspectionErrorCode(error);
@@ -648,8 +671,10 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         throw fail('FRAMEWORK_INSPECTION_PROOF_NOT_BOUND');
       receipt.adoptedSourceSha256 = hash(actualRecipe.source.bookingUrl);
     }
+    executionBoundary = 'RECIPE_VALIDATION';
     const validation = await worker.validateDiscoveryRecipe({ cwd, recipe: actualRecipe, signal: inspectionSignal }); check();
     if (validation.valid !== true) throw fail('FRAMEWORK_INSPECTION_METADATA_INVALID');
+    executionBoundary = 'SOURCE_BINDING';
     // CPS postal proof adoption requires the actual current booking document.
     // Never relabel the official-parent context or reuse its inspected proof.
     if (inspected.adapter.family === 'CPS' && inspected.adapter.officialPostalConflictProof &&
@@ -673,8 +698,10 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
           throw fail('FRAMEWORK_INSPECTION_PROOF_NOT_BOUND');
         actualRecipe = { ...recipe,
           source: { ...recipe.source, ...(sourceOnly ? { providerFamily: inspected.adapter.family } : {}) }, adapter: inspected.adapter };
+        executionBoundary = 'RECIPE_VALIDATION';
         const secondValidation = await worker.validateDiscoveryRecipe({ cwd, recipe: actualRecipe, signal: inspectionSignal }); check();
         if (secondValidation.valid !== true) throw fail('FRAMEWORK_INSPECTION_METADATA_INVALID');
+        executionBoundary = 'SOURCE_BINDING';
         receipt.sourceContextReinspection.completed = true;
       } finally { receipt.sourceContextReinspection.elapsedMs = Math.max(0, now() - started); }
     }
@@ -688,12 +715,12 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     receipt.controllerFilledKnownMetadata = sourceOnly;
     receipt.metadataAuthority = 'FRESH_FIXED_INSPECTOR';
     result = { recipe: bound, sourceEvidence };
-  } catch (error) { primary = error; }
+  } catch (error) { primary = error; failedBoundary = executionBoundary; }
   finally {
     if (browser) {
       const closeStartedAt = now();
       try { await browser.close(); receipt.browserClosed = true; browserClosedClean = true; }
-      catch (error) { receipt.cleanupError = inspectionErrorCode(error); primary ??= fail('FRAMEWORK_INSPECTION_CLOSE_FAILED'); }
+      catch (error) { receipt.cleanupError = inspectionErrorCode(error); if (!primary) failedBoundary = 'CLEANUP'; primary ??= fail('FRAMEWORK_INSPECTION_CLOSE_FAILED'); }
       receipt.cleanupElapsedMs = Math.max(0, now() - closeStartedAt);
     }
     receipt.elapsedMs = Math.max(0, now() - startedAt);
@@ -724,6 +751,22 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
           adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead), ...(readability ? { readability } : {}), ...(landing ? { landing } : {}),
           nativeRouterFailure: safeNativeRouterFailure(failedAction.nativeRouterFailure),
           ...(safeFixedInspectionSourceDiagnostic(failedAction) ?? {}) });
+      } catch { /* Optional diagnostics cannot replace the primary failure. */ }
+    }
+    // Missing failure diagnostics are themselves a tooling limitation. Preserve
+    // the invocation's structural boundary and any preceding readable actions,
+    // including helper failures that returned no snapshot. Existing richer
+    // diagnostics retain their exact legacy shape and authority stays unchanged.
+    if (primary && typeof primary === 'object' && !inspectionFailures.has(primary)) {
+      try {
+        const execution = safeInspectionExecutionDiagnostic({ boundary: failedBoundary ?? executionBoundary,
+          action: failedAction?.action ?? null, actionIndex: receipt.actions.length, snapshotReturned: failedAction?.snapshotReturned === true,
+          browserCreated: Boolean(browser), browserClosed: receipt.browserClosed === true,
+          failureCode: executionFailureCodes.includes(primary.code) ? primary.code : 'UNKNOWN' });
+        const precedingReadability = safeInspectionReadability(receipt.actions.map(row => row.readability).filter(Boolean));
+        if (execution) inspectionFailures.set(primary, { job, attempt: job.attempts, requestSha256: hash(canonical(job.request)),
+          sourceFingerprint: job.sourceFingerprint, firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,
+          execution, ...(precedingReadability ? { readability: precedingReadability } : {}) });
       } catch { /* Optional diagnostics cannot replace the primary failure. */ }
     }
     throw primary;

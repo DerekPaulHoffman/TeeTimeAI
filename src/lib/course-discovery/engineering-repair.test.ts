@@ -302,6 +302,20 @@ describe("private failure evidence", () => {
     for (const value of [[{ ...row, pendingRequestCount: -1 }], [{ ...row, nativeTransport: "true" }], Array(7).fill(row), "PRIVATE", null])
       expect(project(value)).not.toHaveProperty("fixedInspectionReadability");
   });
+  it("projects finite inspection execution failures without copied private fields or authority", () => {
+    const execution = { boundary: "BROWSER_REQUEST", action: "inspect_adapter", actionIndex: 2,
+      snapshotReturned: false, browserCreated: true, browserClosed: true, failureCode: "BROWSER_ACTION_FAILED" };
+    const project = (value: unknown, phase = "FIXED_INSPECTION") => discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
+      stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 2,
+        phase, code: "STAGEHAND_WORKER_FAILED", fixedInspectionDiagnostic: { execution: value } }] },
+    } });
+    expect(project({ ...execution, url: "PRIVATE", message: "PRIVATE", stack: "PRIVATE" })).toMatchObject({ fixedInspectionExecution: execution, evidenceAuthority: false });
+    expect(JSON.stringify(project({ ...execution, message: "PRIVATE" }))).not.toContain("PRIVATE");
+    for (const value of [{ ...execution, boundary: "PRIVATE" }, { ...execution, failureCode: "PRIVATE" },
+      { ...execution, actionIndex: 7 }, { ...execution, actionIndex: 0 }, { ...execution, browserCreated: false },
+      { ...execution, snapshotReturned: "false" }]) expect(project(value)).not.toHaveProperty("fixedInspectionExecution");
+    expect(project(execution, "REPLAY")).not.toHaveProperty("fixedInspectionExecution");
+  });
   it("does not traverse malformed or unbounded checkpoint histories", () => {
     for (const entries of [null, "PRIVATE", [{ attempt: 2, phase: "PRIVATE invalid", code: "PRIVATE invalid" }],
       Array.from({ length: 3 }, (_, i) => ({ attempt: i + 1, code: "BROWSER_UNAVAILABLE", phase: "REPLAY" }))]) {

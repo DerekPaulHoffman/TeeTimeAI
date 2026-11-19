@@ -136,6 +136,16 @@ const inspectionReadabilitySchema = z.array(z.object({
   officialDocumentCurrent: z.boolean().nullable(),
   failedPredicates: z.array(z.enum(["TRANSPORT_CHANGED", "PUBLIC_URL_REJECTED", "ACCESS_REQUIREMENT", "NATIVE_FATAL", "OPEN_STATUS_MISSING", "STATUS_REJECTED"])).max(6),
 })).min(1).max(6).refine(rows => new Set(rows.map(row => row.actionIndex)).size === rows.length);
+const inspectionExecutionSchema = z.object({
+  boundary: z.enum(["PREPARATION", "BROWSER_CREATE", "SOURCE_ROUTING", "BROWSER_REQUEST", "SNAPSHOT_VALIDATION", "RECIPE_VALIDATION", "SOURCE_BINDING", "CLEANUP"]),
+  action: z.enum(["open", "observe", "inspect_adapter", "click"]).nullable(), actionIndex: z.number().int().min(0).max(6),
+  snapshotReturned: z.boolean(), browserCreated: z.boolean(), browserClosed: z.boolean(),
+  failureCode: z.enum(["UNKNOWN", "BROWSER_ACTION_FAILED", "BROWSER_ACTION_SCHEMA_INVALID", "BROWSER_EVALUATION_FAILED",
+    "BROWSER_NAVIGATION_FAILED", "BROWSER_UNAVAILABLE", "DISCOVERY_PROCESS_REQUEST_FAILED", "DISCOVERY_PROCESS_OUTPUT_LIMIT",
+    "DISCOVERY_PROCESS_PROTOCOL_INVALID", "DISCOVERY_PROCESS_FAILED", "DISCOVERY_PROCESS_CLOSED", "DISCOVERY_PROCESS_INPUT_FAILED",
+    "DISCOVERY_PROCESS_TIMEOUT", "DISCOVERY_TOOL_FAILED", "DISCOVERY_CANCELLED", "PROVIDER_COORDINATION_UNAVAILABLE",
+    "FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID", "FIXED_INSPECTION_FRAME_SCOPE_INVALID"]),
+}).refine(row => (row.actionIndex === 0) === (row.action === null) && (!row.snapshotReturned || row.actionIndex > 0) && (!row.browserClosed || row.browserCreated));
 
 export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpoint: unknown }, includeBookingEdgeEvidence = false) {
   const checkpoint = object(job.checkpoint), progress = object(checkpoint.stagehandProgress), failure = object(checkpoint.stagehandFailure);
@@ -163,10 +173,12 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
   // Existing persisted inspection facts only. Deliberately omit URL hashes,
   // source text, identities and private binding values from this handoff.
   const readability = inspectionReadabilitySchema.safeParse(object(last?.fixedInspectionDiagnostic).readability);
+  const execution = phase === "FIXED_INSPECTION" ? inspectionExecutionSchema.safeParse(object(last?.fixedInspectionDiagnostic).execution) : null;
   const inspection = { category, code, failureCode: code && diagnosticFailureCodes.has(code) ? code : null,
     ...(code === "STAGEHAND_WORKER_FAILED" && ["Error", "TypeError", "RangeError", "SyntaxError", "TimeoutError", "AbortError", "ZodError", "ProtocolError", "UNKNOWN"].includes(String(last?.workerErrorName))
       ? { workerErrorName: last?.workerErrorName } : {}),
     ...(readability.success ? { fixedInspectionReadability: readability.data } : {}),
+    ...(execution?.success ? { fixedInspectionExecution: execution.data } : {}),
     ...(code === "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED" && cpsPhoneBookingFailureStages.some(stage =>
       stage === object(last?.fixedInspectionDiagnostic).cpsPhoneBookingFailureStage) ? {
         cpsPhoneBookingFailureStage: object(last?.fixedInspectionDiagnostic).cpsPhoneBookingFailureStage,

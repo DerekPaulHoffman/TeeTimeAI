@@ -14,7 +14,7 @@ import { accessRecipeSchema } from "./recipe";
 import { createStagehandGuardedBrowserHost } from "../../../scripts/automation/course-discovery-stagehand-host.mjs";
 import { sourceDiscover as actualSourceDiscover } from "../../../scripts/automation/stagehand/source-discovery.mjs";
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
-import { readStagehandFailure } from "../../../scripts/automation/course-discovery-stagehand-failure.mjs";
+import { readStagehandFailure, createStagehandFailureCheckpoint } from "../../../scripts/automation/course-discovery-stagehand-failure.mjs";
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { cpsOfficialEntryProofSchema } from "./cps-official-entry-proof";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
@@ -770,7 +770,9 @@ describe("regular Stagehand source worker", () => {
     t.request.mockRejectedValueOnce(primary);
     const error = await t.run().catch(e => e), saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
     expect(error).toBe(primary); expect(t.close).toHaveBeenCalledOnce();
-    if (mode === "absent") expect(saved.stagehandFailure.entries[0]).not.toHaveProperty("fixedInspectionDiagnostic");
+    if (mode === "absent") expect(saved.stagehandFailure.entries[0].fixedInspectionDiagnostic).toEqual({ execution: {
+      boundary: "BROWSER_REQUEST", action: "open", actionIndex: 1, snapshotReturned: false,
+      browserCreated: true, browserClosed: true, failureCode: "UNKNOWN" } });
     else {
       const native = mode === "unknown" ? { code: "NATIVE_REDIRECT_ROUTING_FAILED" } : {
         code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_BODY", errorName: "Error", errorCategory: "BODY_UNAVAILABLE",
@@ -856,6 +858,31 @@ describe("regular Stagehand source worker", () => {
       expect(readStagehandFailure({ ...t.f.job, checkpoint: forged }, t.f.clock)).toBeUndefined();
     }
     expect(JSON.stringify(saved.stagehandFailure)).not.toContain("https://"); expect(t.client.candidate).not.toHaveBeenCalled();
+  });
+  it.each(["startup", "request", "validation"])("retains structural diagnosis for a snapshot-free %s failure without admitting a method", async boundary => {
+    const t = setup(), original = t.request.getMockImplementation()!;
+    const primary = Object.assign(Error("PRIVATE_PROVIDER_BODY"), { code: boundary === "request" ? "BROWSER_ACTION_FAILED" : "PRIVATE_CODE" });
+    if (boundary === "startup") t.browserFactory.mockRejectedValue(primary);
+    if (boundary === "request") t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw primary; return original(action); });
+    if (boundary === "validation") t.validateRecipe.mockRejectedValue(primary);
+    await expect(t.run()).rejects.toBe(primary);
+    const saved = t.checkpoints.at(-1) as ReturnType<typeof createStagehandFailureCheckpoint>;
+    const diagnostic = saved.stagehandFailure.entries[0].fixedInspectionDiagnostic;
+    expect(diagnostic).toBeDefined();
+    expect(diagnostic.execution).toEqual({ boundary: boundary === "startup" ? "BROWSER_CREATE" : boundary === "request" ? "BROWSER_REQUEST" : "RECIPE_VALIDATION",
+      action: boundary === "startup" ? null : "inspect_adapter", actionIndex: boundary === "startup" ? 0 : 2,
+      snapshotReturned: boundary === "validation", browserCreated: boundary !== "startup", browserClosed: boundary !== "startup",
+      failureCode: boundary === "request" ? "BROWSER_ACTION_FAILED" : "UNKNOWN" });
+    expect(diagnostic.readability?.length ?? 0).toBe(boundary === "startup" ? 0 : boundary === "request" ? 1 : 2);
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: saved }, t.f.clock)).toEqual(saved.stagehandFailure);
+    expect(currentStagehandInspectionDiagnostic({ ...primary }, t.f.job, t.f.clock, t.f.clock)).toBeUndefined();
+    expect(currentStagehandInspectionDiagnostic(primary, { ...t.f.job }, t.f.clock, t.f.clock)).toBeUndefined();
+    const forged = structuredClone(saved), entry = forged.stagehandFailure.entries[0];
+    entry.fixedInspectionDiagnostic.execution.failureCode = "PRIVATE";
+    entry.fixedInspectionDiagnosticSha256 = stagehandDataHash(entry.fixedInspectionDiagnostic);
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: forged }, t.f.clock)).toBeUndefined();
+    expect(JSON.stringify(saved.stagehandFailure)).not.toMatch(/PRIVATE|https:/u);
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
   it("persists a closed current-invocation final-frame landing failure without granting source authority", async () => {
     const t = setup(), final = "https://unseen-public-booking.example/changed";
