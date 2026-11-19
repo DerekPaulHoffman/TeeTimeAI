@@ -30,6 +30,40 @@ function fixture() {
 }
 
 describe("durable simulator engineering authority", () => {
+  it.each(["plain handoff", "controller attempted", "current plain stopped", "access retained"])("distinguishes actual research from repeated coarse closeout labels: %s", async scenario => {
+    const f = fixture(), homepage = "https://official.example.test/";
+    f.offering.bookingUrl = homepage; Object.assign(f.offering.course, { website: homepage });
+    const fingerprint = getSimulatorOfferingSourceFingerprint(f.offering);
+    Object.assign(f.audit.target, { offeringSourceFingerprint: fingerprint, failureFingerprint: fingerprint });
+    Object.assign(f.audit.simulatorClaim!, { sourceFingerprint: fingerprint, originalSourceFingerprint: fingerprint });
+    const failure = { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_REQUEST",
+      sourceLocation: "src/lib/automation/simulator-interactive-browser.ts:263" };
+    const legacy = { source: "booking", requestedUrl: homepage, sourceUrl: homepage, sourceFingerprint: fingerprint,
+      observedAt: "2026-10-08T11:04:00.000Z", httpStatus: 0, rendered: true, outcome: "HARD_FAILED",
+      requestId: "11111111-1111-4111-8111-111111111111", failure, researchImplementationVersion: "public-calendar-document-scoped-evidence-v37" };
+    f.audit.simulatorResearch = readSimulatorResearchState({ version: 1, sourceFingerprint: fingerprint, readCount: 1,
+      history: [legacy], inFlight: null, links: [], bookingLinks: [], linkBaseUrl: null }, fingerprint);
+    f.row.outcome = "simulator_research_failed";
+    f.rows.push({ ...structuredClone(f.row), id: "previous" });
+    Object.assign(f.audit, { reservedAt: "2026-10-08T11:05:01Z", launchStartedAt: "2026-10-08T11:05:02Z",
+      boundAt: "2026-10-08T11:05:03Z", consumedAt: "2026-10-08T11:05:04Z" });
+    f.audit.simulatorClaim!.claimedAt = f.audit.consumedAt!;
+    f.row.completedAt = new Date("2026-10-08T11:06:00Z");
+    const plain = { ...legacy, observedAt: "2026-10-08T11:05:30.000Z", httpStatus: 200, rendered: false, outcome: "READ", failure: undefined,
+      requestId: "22222222-2222-4222-8222-222222222222", researchImplementationVersion: scenario === "current plain stopped" ? SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION : "public-calendar-document-scoped-evidence-v38",
+      publicReadEvidence: { method: "HTTP", sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [] } };
+    const history = scenario === "controller attempted" ? [plain, { ...legacy,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, observedAt: "2026-10-08T11:05:35.000Z" }] : [plain];
+    f.audit.simulatorResearch = readSimulatorResearchState({ version: 1, sourceFingerprint: fingerprint, readCount: history.length,
+      history, inFlight: null, links: [], bookingLinks: [], linkBaseUrl: null }, fingerprint);
+    Object.assign(f.audit, { simulatorResearchPriorFailures: { version: 1, sourceFingerprint: fingerprint,
+      routes: [{ url: homepage, rendered: true, httpStatus: 0, failure, observedAt: legacy.observedAt,
+        requestId: legacy.requestId, researchImplementationVersion: legacy.researchImplementationVersion },
+      ...(scenario === "access retained" ? [{ url: homepage, rendered: false, httpStatus: 403 }] : [])] } });
+    const before = JSON.stringify(f.rows);
+    expect(await listSimulatorSupportDispatchCandidates(now, f.client)).toHaveLength(scenario === "plain handoff" ? 1 : 0);
+    expect(JSON.stringify(f.rows)).toBe(before);
+  });
   it.each(["repaired controller", "current controller failure", "different failure", "access barrier", "future failure"])("reconsiders only a different public read after a known controller repair: %s", async scenario => {
     const f = fixture(), homepage = "https://official.example.test/";
     f.offering.bookingUrl = homepage; Object.assign(f.offering.course, { website: homepage });

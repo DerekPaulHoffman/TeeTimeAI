@@ -28,6 +28,49 @@ describe("different source read after the shipped public catalog controller repa
       priorFailedRoutes: [blocked] })).toThrow("unchanged structural");
     expect(getSimulatorResearchRetryGuide({ state, officialUrl, bookingUrl: officialUrl, now, priorFailedRoutes: [blocked] }).closeoutReason).toBe("HARD_FAILURE");
   });
+  const repairedHandoff = () => {
+    const blocked: SimulatorResearchBlockedRoute = { url: officialUrl, rendered: true, httpStatus: 0, failure,
+      observedAt: new Date(now.getTime() - 5 * 60_000).toISOString(), requestId: "11111111-1111-4111-8111-111111111111",
+      researchImplementationVersion: "public-calendar-document-scoped-evidence-v37" };
+    const state = readSimulatorResearchState({ ...empty(), readCount: 1, history: [{ source: "booking", requestedUrl: officialUrl,
+      sourceUrl: officialUrl, sourceFingerprint: fingerprint, observedAt: now.toISOString(), requestId: "22222222-2222-4222-8222-222222222222",
+      rendered: false, httpStatus: 200, outcome: "READ", researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      publicReadEvidence: { method: "HTTP", sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [] } }] }, fingerprint);
+    return { blocked, state };
+  };
+  it("permits the corrected browser after a fresh owned public observation, preserving its old failed receipt", () => {
+    const { state, blocked } = repairedHandoff(), before = JSON.stringify({ state, blocked });
+    const input = { state, officialUrl, bookingUrl: officialUrl, now, priorFailedRoutes: [blocked] };
+    expect(hasDifferentPublicReadAfterCatalogRepair(input)).toBe(false);
+    expect(selectSimulatorResearchTarget({ ...input, source: "booking", rendered: true })).toMatchObject({ url: officialUrl, rendered: true });
+    expect(getSimulatorResearchRetryGuide(input).bookingResearchRequired).toBe(true);
+    expect(JSON.stringify({ state, blocked })).toBe(before);
+  });
+  it.each(["stale observation", "changed source", "unknown access", "account denial", "new failure", "other controller", "another read"])("retains browser fencing for %s", scenario => {
+    const { state, blocked } = repairedHandoff(), latest = state.history[0];
+    if (scenario === "stale observation") latest.observedAt = new Date(now.getTime() - 31 * 60_000).toISOString();
+    if (scenario === "changed source") latest.sourceFingerprint = "b".repeat(64);
+    if (scenario === "unknown access") delete latest.publicReadEvidence;
+    if (scenario === "account denial") latest.publicReadEvidence!.accessControls = ["ACCOUNT_REQUIRED"];
+    if (scenario === "new failure") blocked.failure = { ...failure, code: "OTHER_FAILURE" };
+    if (scenario === "other controller") blocked.researchImplementationVersion = SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+    if (scenario === "another read") { state.readCount++; state.history.push({ ...latest }); }
+    expect(() => selectSimulatorResearchTarget({ state, officialUrl, bookingUrl: officialUrl, now,
+      source: "booking", rendered: true, priorFailedRoutes: [blocked] })).toThrow();
+  });
+  it("admits a new owner to refresh an old plain observation, without using that stale observation for a browser read", () => {
+    const { state, blocked } = repairedHandoff();
+    state.history[0].researchImplementationVersion = "public-calendar-document-scoped-evidence-v38";
+    const later = new Date(now.getTime() + 45 * 60_000);
+    expect(hasDifferentPublicReadAfterCatalogRepair({ state, officialUrl, bookingUrl: officialUrl, now: later, priorFailedRoutes: [blocked] })).toBe(true);
+    expect(() => selectSimulatorResearchTarget({ state, officialUrl, bookingUrl: officialUrl, now: later,
+      source: "booking", rendered: true, priorFailedRoutes: [blocked] })).toThrow();
+  });
+  it("does not repeatedly admit a current-contract attempt that stopped before its browser step", () => {
+    const { state, blocked } = repairedHandoff();
+    expect(hasDifferentPublicReadAfterCatalogRepair({ state, officialUrl, bookingUrl: officialUrl, now,
+      priorFailedRoutes: [blocked] })).toBe(false);
+  });
   it.each(["new controller", "other source", "other code", "other module", "later phase", "budget exhausted", "active read", "account denial", "another unknown"])("does not reclassify %s as this repaired defect", scenario => {
     const state = failed();
     const last = state.history[0];
