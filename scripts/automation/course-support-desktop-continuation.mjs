@@ -17,6 +17,21 @@ const git = (cwd, args) => execFileSync("git", args, { cwd, encoding: "utf8", wi
   timeout: 40000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }).trim();
 const readJson = file => { if (!isAbsolute(file)) fail("ABSOLUTE_PRIVATE_INPUT_REQUIRED"); return JSON.parse(readFileSync(file, "utf8")); };
 
+/** Observe the actual canonical aliases once. No waiter loop, environment
+ * loading, promotion, provider read or continuation intent is performed. */
+export function readDesktopContinuationProduction({ selected, nodePath, currentSha }, execute = execFileSync) {
+  const aliases = ["teetimespot.com", "www.teetimespot.com"];
+  const deployments = aliases.map(alias => JSON.parse(execute(nodePath, [join(selected, "node_modules", "vercel", "dist", "vc.js"),
+    "api", `/v13/deployments/${alias}`, "--method", "GET", "--scope", "derekpaulhoffmans-projects"], {
+    cwd: selected, encoding: "utf8", windowsHide: true, timeout: 8000, maxBuffer: 1000000, stdio: ["ignore", "pipe", "pipe"],
+  })));
+  if (deployments.some(d => d.projectId !== "prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y" || d.source !== "git" || d.readyState !== "READY" ||
+      d.gitSource?.type !== "github" || d.gitSource.repoId !== 978781158 || d.gitSource.ref !== "main" || d.gitSource.sha !== currentSha ||
+      !/^dpl_[A-Za-z0-9]+$/u.test(d.id ?? "")) || deployments[0].id !== deployments[1].id ||
+      !deployments[0].url || deployments[0].url !== deployments[1].url) return null;
+  return { source: "git", state: "READY", branch: "main", commitSha: currentSha, deploymentId: deployments[0].id, aliases };
+}
+
 function readFailedLearningProgress(item, now) {
   const progress = item.failedLearningProgress;
   if (progress === undefined) return null;
@@ -132,6 +147,19 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const cli = (dependencies.inspectCli ?? inspectPinnedWorkerCli)(selected);
   const runtime = (dependencies.resolveRuntime ?? resolveCourseSupportWorkerRuntime)();
   if (cli.status !== "current" || runtime.status !== "available" || !isAbsolute(runtime.nodePath ?? "")) fail("PARENT_RUNTIME_UNAVAILABLE");
+  if (sourceReconciliationOnly) {
+    let proof;
+    try { proof = await (dependencies.readProductionProof ?? readDesktopContinuationProduction)({ selected, nodePath: runtime.nodePath, currentSha }); }
+    catch { return { outcome: "production_qualification_unavailable", messageRequired: false, monitoringVerified: false }; }
+    if (proof?.source !== "git" || proof.state !== "READY" || proof.branch !== "main" || proof.commitSha !== currentSha ||
+        !/^dpl_[A-Za-z0-9]+$/u.test(proof.deploymentId ?? "") || !Array.isArray(proof.aliases) || proof.aliases.length !== 2 ||
+        !["teetimespot.com", "www.teetimespot.com"].every(alias => proof.aliases.includes(alias))) {
+      return { outcome: "production_not_ready", messageRequired: false, monitoringVerified: false };
+    }
+    if (execute(selected, ["rev-parse", "HEAD"]) !== currentSha || execute(selected, ["rev-parse", "origin/main"]) !== currentSha) {
+      return { outcome: "production_runtime_changed", messageRequired: false, monitoringVerified: false };
+    }
+  }
   let client;
   try {
     const artifactDir = join(selected, ".codex-artifacts", `desktop-repair-observation-${item.assignmentRef}-${randomUUID()}`);

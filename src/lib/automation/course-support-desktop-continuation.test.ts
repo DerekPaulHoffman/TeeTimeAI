@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { prepareOwnedDesktopContinuation } from "../../../scripts/automation/course-support-desktop-continuation.mjs";
+import { prepareOwnedDesktopContinuation, readDesktopContinuationProduction } from "../../../scripts/automation/course-support-desktop-continuation.mjs";
 
 const PARENT = "11111111-2222-4333-8444-555555555555";
 const CHILD = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -40,6 +40,8 @@ function fixture() {
   const deps = { environment: { CODEX_THREAD_ID: PARENT }, approvedCheckouts: [selected], now: () => Date.parse("2030-01-01T00:00:00.000Z"),
     inspectCli: vi.fn(() => ({ status: "current", cliPath: join(selected, "codex.exe") })),
     resolveRuntime: vi.fn(() => ({ status: "available", nodePath: process.execPath })), clientFactory: vi.fn(() => client),
+    readProductionProof: vi.fn(() => ({ source: "git", state: "READY", branch: "main", commitSha: CURRENT,
+      deploymentId: "dpl_qualified", aliases: ["teetimespot.com", "www.teetimespot.com"] })),
     git: vi.fn((cwd: string, args: string[]) => {
       if (args[0] === "merge-base") return "";
       if (args[0] === "status") return "";
@@ -52,7 +54,57 @@ function fixture() {
   return { root, selected, worker, launcherPath, launcher, context, item, deps, client };
 }
 
+describe("source reconciliation observes current canonical deployments", () => {
+  const deployment = () => ({ id: "dpl_current", url: "current.example.vercel.app", source: "git", readyState: "READY",
+    projectId: "prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y", gitSource: { type: "github", repoId: 978781158, ref: "main", sha: CURRENT },
+    env: { ignoredPrivateValue: "never-return-this" } });
+  const read = (responses: ReturnType<typeof deployment>[]) => {
+    const execute = vi.fn(() => JSON.stringify(responses.shift()));
+    const proof = readDesktopContinuationProduction({ selected: "/approved", nodePath: process.execPath, currentSha: CURRENT },
+      execute as unknown as typeof import("node:child_process").execFileSync);
+    return { proof, execute };
+  };
+  it("checks both real alias targets and returns only bounded Git evidence", () => {
+    const { proof, execute } = read([deployment(), deployment()]);
+    expect(proof).toMatchObject({ commitSha: CURRENT, state: "READY", aliases: ["teetimespot.com", "www.teetimespot.com"] });
+    expect(JSON.stringify(proof)).not.toContain("never-return-this");
+    expect(execute.mock.calls.map(call => (call as unknown as [string, string[]])[1].slice(1)))
+      .toEqual(["teetimespot.com", "www.teetimespot.com"].map(alias => ["api", `/v13/deployments/${alias}`, "--method", "GET", "--scope", "derekpaulhoffmans-projects"]));
+  });
+  it.each(["project", "repo", "branch", "sha", "source", "building", "split-id", "split-url"])("rejects %s deployment drift", scenario => {
+    const first = deployment(), second = deployment();
+    if (scenario === "project") first.projectId = "another-project";
+    if (scenario === "repo") first.gitSource.repoId++;
+    if (scenario === "branch") first.gitSource.ref = "feature/other";
+    if (scenario === "sha") first.gitSource.sha = BEFORE;
+    if (scenario === "source") first.source = "cli";
+    if (scenario === "building") first.readyState = "BUILDING";
+    if (scenario === "split-id") second.id = "dpl_other";
+    if (scenario === "split-url") second.url = "another.example.vercel.app";
+    expect(read([first, second]).proof).toBeNull();
+  });
+});
+
 describe("original Desktop full-repair continuation", () => {
+  it.each(["building", "wrong-sha", "missing-alias", "cli-source", "unavailable"])("defers source reconciliation before consuming its intent when production is %s", async scenario => {
+    const f = fixture();
+    const item = { ...f.item, continuationMode: "DATA_ONLY", continuationTrigger: "UNFINISHED_FULL_REPAIR", sourceReconciliationOnly: true };
+    const ready = f.deps.readProductionProof();
+    if (scenario === "building") f.deps.readProductionProof.mockReturnValue({ ...ready, state: "BUILDING" });
+    if (scenario === "wrong-sha") f.deps.readProductionProof.mockReturnValue({ ...ready, commitSha: BEFORE });
+    if (scenario === "missing-alias") f.deps.readProductionProof.mockReturnValue({ ...ready, aliases: ["teetimespot.com"] });
+    if (scenario === "cli-source") f.deps.readProductionProof.mockReturnValue({ ...ready, source: "cli" });
+    if (scenario === "unavailable") f.deps.readProductionProof.mockImplementation(() => { throw Error("Do not expose private deployment diagnostics"); });
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ messageRequired: false, monitoringVerified: false });
+    expect(result.outcome).toMatch(/^production_/u);
+    expect(JSON.stringify(result)).not.toContain("private deployment diagnostics");
+    expect(f.deps.clientFactory).not.toHaveBeenCalled();
+    f.deps.readProductionProof.mockReturnValue(ready);
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "desktop_continuation_message_required", messageRequired: true });
+  });
+
   it("wakes the same clean data-only owner solely to reconcile a changed source", async () => {
     const f = fixture();
     const item = { ...f.item, continuationMode: "DATA_ONLY", continuationTrigger: "UNFINISHED_FULL_REPAIR", sourceReconciliationOnly: true };
