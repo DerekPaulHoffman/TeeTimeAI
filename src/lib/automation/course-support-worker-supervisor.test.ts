@@ -359,8 +359,11 @@ describe("course worker launch supervisor", () => {
     const prompt = workerInstructions(mode, f.selected, REF, f.deps);
     expect(prompt).toContain("Use only gpt-6.1-sol through the existing ChatGPT/Codex sign-in");
     expect(prompt).toContain("await cua.getState()");
+    expect(prompt).toContain("already has an active request");
+    expect(prompt).toContain("times out during service_info");
+    expect(prompt).toContain("one last inventory attempt");
+    expect(prompt).toContain("a disconnect, an access denial, or failure after those attempts as a setup stop");
     expect(prompt).toContain("not evidence that First user is unavailable");
-    expect(prompt).toContain("An actual CUA host/access denial still stops");
     expect(prompt).toContain("discoveryEngineeringFailure");
     expect(prompt).toContain("INVESTIGATE_PUBLIC_SOURCE");
     expect(prompt).toContain("First user Chrome");
