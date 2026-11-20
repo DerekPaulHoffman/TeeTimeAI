@@ -26,7 +26,17 @@ For `PUBLISHED_IMPLEMENTATION` or `CLAIMED_IMPLEMENTATION`, use the updated test
 
 In `CLAIMED_IMPLEMENTATION`, finish the actual scoped tooling repair rather than handing the same diagnosis back to engineering. Revalidate the fresh owned context and preserve any access barrier. When it returns `discoveryToolingRepairMayProceed=true` with `TOOLING_ONLY_NO_ACCESS_OVERRIDE`, reproduce the concrete local failure, add the failing regression and fix the permitted tooling under your original path claim; `implementationMayProceedFromResearch=false` withholds an unverified provider contract, not that separate repair permission. Continue through tests, exact release qualification and fresh independent verification. A real ownership/source/lease failure still stops. The continuation never expands paths, reads, budgets or provider access and never resets the original failed alert clock.
 
-Read your same owned packet using the exact batch reference. If a `DATA_ONLY` lease expired, follow the existing **original-owner** recovery once. For this data-only unchanged-runtime route, when the old verification runtime has been superseded, use the documented owner-bound `recover --batch-ref <reference> --requeue-superseded-runtime` flow from your clean original branch at the newer main commit. It independently verifies the current Git deployment and retains the failed evidence. If it reports safely requeued/superseded, stop: the scheduler owns the next ordinary admission. Do not claim replacement work, reset a job or bypass any recovery/source fence. A blocked recovery remains an open engineering case.
+Read your same owned packet using the exact batch reference. If a `DATA_ONLY`
+lease expired and its verification runtime has been superseded, continue the
+same batch with `recover --batch-ref <reference> --resume-superseded-runtime`
+from your clean original branch at the reviewed current main. This checks the
+Git deployment and the retained original source, owner and stopped
+verification. It renews only the original lease. It preserves the old
+verification result and registered release. On success, read a fresh owned
+packet and tooling scope before making any edit or provider operation. Use
+`--requeue-superseded-runtime` only for an explicit source-reconciliation wake.
+If same-owner recovery rejects the current evidence, preserve that result and
+stop. Do not switch to requeue or repeat the protected command.
 
 That single recovery command may internally settle at most two acknowledged committed search-execution fence adoptions, rereading the entire recovery/source/ownership state and checking unchanged local Git authority before each pass. This is part of the deterministic command, never permission for a model to replay an error or ambiguous mutation. A previously continued original branch may advance again only when the sealed helper validates its exact prior continuation marker and native terminal turn; unrelated commits remain fenced.
 

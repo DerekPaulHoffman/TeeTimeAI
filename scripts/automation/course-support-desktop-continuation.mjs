@@ -263,7 +263,8 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const cli = (dependencies.inspectCli ?? inspectPinnedWorkerCli)(selected);
   const runtime = (dependencies.resolveRuntime ?? resolveCourseSupportWorkerRuntime)();
   if (cli.status !== "current" || runtime.status !== "available" || !isAbsolute(runtime.nodePath ?? "")) fail("PARENT_RUNTIME_UNAVAILABLE");
-  if (sourceReconciliationOnly || registeredImplementation || simulator) {
+  if (sourceReconciliationOnly || registeredImplementation || simulator ||
+      (item.continuationMode === "DATA_ONLY" && currentSha !== item.baseSha)) {
     let proof;
     try { proof = await (dependencies.readProductionProof ?? readDesktopContinuationProduction)({ selected, nodePath: runtime.nodePath, currentSha }); }
     catch { return { outcome: "production_qualification_unavailable", messageRequired: false, monitoringVerified: false }; }

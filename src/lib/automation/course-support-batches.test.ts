@@ -16883,6 +16883,20 @@ describe("course-support recovery", () => {
       expect(assessCourseSupportRecovery(input).action).toBe(scenario === "owned" ? "RECOVER" : "BLOCK");
     });
 
+  it.each(["original", "unqualified", "unpublished", "wrong-owner", "unrelated", "live"])(
+    "keeps a stopped unchanged-runtime repair with its same owner: %s", scenario => {
+      const input = { leaseExpiresAt: new Date(now.getTime() - 1), ownerThreadId: "owner", requestingThreadId: "owner",
+        baseSha: "a".repeat(40), releaseSha: "a".repeat(40), expectedBranch: "automation/original",
+        currentBranch: "automation/original", currentHeadSha: "b".repeat(40), plannedPaths: [], dirtyPaths: [],
+        currentHeadIsPublished: true, dataOnlyRuntimeImport: true, baseIsAncestor: true, releaseIsAncestor: true, now };
+      if (scenario === "unqualified") input.dataOnlyRuntimeImport = false;
+      if (scenario === "unpublished") input.currentHeadIsPublished = false;
+      if (scenario === "wrong-owner") input.requestingThreadId = "other-owner";
+      if (scenario === "unrelated") input.releaseIsAncestor = false;
+      if (scenario === "live") input.leaseExpiresAt = new Date(now.getTime() + 1);
+      expect(assessCourseSupportRecovery(input).action).toBe(scenario === "original" ? "RECOVER" : "BLOCK");
+    });
+
   it.each(["owned", "foreign-owner", "unpublished-runtime", "unmerged-runtime", "unplanned-path", "no-paths", "dirty", "wrong-branch", "live-lease"])(
     "preserves an original unregistered candidate after shared runtime import: %s", scenario => {
       const input = { leaseExpiresAt: new Date(now.getTime() - 1), ownerThreadId: "original-owner", requestingThreadId: "original-owner",

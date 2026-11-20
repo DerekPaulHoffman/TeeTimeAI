@@ -3316,6 +3316,7 @@ export function assessCourseSupportRecovery(input: {
   releaseCommittedPaths?: string[];
   currentHeadIsPublished?: boolean;
   claimedBaseRuntimeImport?: boolean;
+  dataOnlyRuntimeImport?: boolean;
   unpublishedCandidate?: { publishedMainSha: string; containsRelease: boolean; isAncestorOfHead: boolean; paths: string[] };
   now?: Date;
 }) {
@@ -3331,8 +3332,9 @@ export function assessCourseSupportRecovery(input: {
   if (input.currentHeadSha !== expectedHead) {
     const safelyImportedPublishedRuntime = input.currentHeadIsPublished === true &&
       input.ownerThreadId === input.requestingThreadId && Boolean(input.expectedBranch) && input.expectedBranch === input.currentBranch &&
-      input.dirtyPaths.length === 0 && input.plannedPaths.length > 0 && Boolean(input.releaseSha &&
-        (input.releaseSha !== input.baseSha || input.claimedBaseRuntimeImport === true)) &&
+      input.dirtyPaths.length === 0 && Boolean(input.releaseSha && (input.plannedPaths.length > 0
+        ? input.releaseSha !== input.baseSha || input.claimedBaseRuntimeImport === true
+        : input.releaseSha === input.baseSha && input.dataOnlyRuntimeImport === true)) &&
       input.baseIsAncestor === true && input.releaseIsAncestor === true;
     const committedPaths = input.releaseSha
       ? (input.releaseCommittedPaths ?? [])
@@ -15320,7 +15322,7 @@ export async function recoverCourseSupportBatch(input: {
   releaseCommittedPaths?: string[];
   currentHeadIsPublished?: boolean;
   unpublishedCandidate?: { publishedMainSha: string; containsRelease: boolean; isAncestorOfHead: boolean; paths: string[] };
-  supersedingDeployment?: { commitSha: string; deploymentId: string };
+  supersedingDeployment?: { commitSha: string; deploymentId: string; resumeOriginal?: true };
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -15794,6 +15796,15 @@ export async function recoverCourseSupportBatch(input: {
       recoveryDirective?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" && recoveryDirective.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
       recoveryClaim?.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
       recoveryClaim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE");
+    const supersedingDeployment = input.supersedingDeployment;
+    const dataOnlyRuntimeImport = Boolean(supersedingDeployment?.resumeOriginal && allowPublishedRuntimeImport &&
+      input.releaseIsPublished && input.currentHeadSha === supersedingDeployment.commitSha &&
+      supersedingDeployment.commitSha !== batch.baseSha && batch.deployedAt &&
+      fullRepairContinuationMode({ ...batch, plannedPaths, now }) === "DATA_ONLY" &&
+      batch.incidents.length === 1 && batch.incidents.every(entry => entry.result === "STALE_EVIDENCE" &&
+        entry.incident.status === "AUTO_INVESTIGATING" && entry.incident.cycle === entry.cycle &&
+        entry.incident.activeBatchId === batch.id && !(entry.verificationRequests ?? []).some(isActiveDetachedVerificationRequest) &&
+        recoveryClaim?.providerSnapshotFingerprint === buildCourseSupportProviderSnapshotFingerprint(entry.course)));
     const recovery = assessCourseSupportRecovery({
       leaseExpiresAt: batch.leaseExpiresAt,
       ownerThreadId: batch.ownerThreadId,
@@ -15815,6 +15826,7 @@ export async function recoverCourseSupportBatch(input: {
         input.releaseCommittedPaths ?? [],
       ),
       currentHeadIsPublished: allowPublishedRuntimeImport,
+      dataOnlyRuntimeImport,
       // Only a server-qualified full repair may preserve its own clean local
       // candidate after importing published main. Shared upstream bytes are
       // not claimed as this worker's implementation or registered as a release.
@@ -15832,9 +15844,8 @@ export async function recoverCourseSupportBatch(input: {
       }) === "CLAIMED_IMPLEMENTATION",
       now,
     });
-    const supersedingDeployment = input.supersedingDeployment;
     const requeueSupersededRuntime = Boolean(
-      supersedingDeployment && input.baseIsAncestor === true && input.releaseIsPublished &&
+      supersedingDeployment && !supersedingDeployment.resumeOriginal && input.baseIsAncestor === true && input.releaseIsPublished &&
       batch.ownerThreadId === input.requestingThreadId &&
       batch.status === "VERIFYING" && batch.releaseSha === batch.baseSha && batch.deployedAt &&
       input.currentHeadSha === supersedingDeployment.commitSha && summary.branch === input.currentBranch &&
@@ -15844,7 +15855,7 @@ export async function recoverCourseSupportBatch(input: {
       supersedingDeployment.commitSha !== batch.baseSha &&
       batch.incidents.length > 0 && batch.incidents.every(entry => entry.result === "STALE_EVIDENCE"),
     );
-    if (supersedingDeployment && !requeueSupersededRuntime) {
+    if (supersedingDeployment && !requeueSupersededRuntime && (!dataOnlyRuntimeImport || recovery.action !== "RECOVER")) {
       return {
         outcome: "command_failed" as const,
         recovered: false,
@@ -17228,7 +17239,7 @@ export async function recoverCourseSupportBatch(input: {
           }, now),
           ...backgroundRecoveryRun,
           ...(allowPublishedRuntimeImport && batch.releaseSha && input.currentHeadSha !== batch.releaseSha &&
-            batch.ownerThreadId === input.requestingThreadId && plannedPaths.length > 0 ? {
+            batch.ownerThreadId === input.requestingThreadId && (plannedPaths.length > 0 || dataOnlyRuntimeImport) ? {
               publishedRuntimeRecoveryV1: { runtimeSha: input.currentHeadSha, registeredReleaseSha: batch.releaseSha,
                 observedAt: now.toISOString(), implementationProofChanged: false },
             } : {}),

@@ -543,7 +543,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const pending = scenario.startsWith("pending-") || registered;
     const plannedPath = "src/lib/adapters/example.ts";
     await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: claimed ? "IMPLEMENTING" : "VERIFYING", releaseSha: code && !claimed ? "c".repeat(40) : baseSha,
-      deployedAt: scenario === "published-code" || pending && !registered || claimed ? batch.createdAt : null,
+      deployedAt: scenario === "data-only" || scenario === "published-code" || pending && !registered || claimed ? batch.createdAt : null,
       summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: registered
         ? [plannedPath, ...Array.from({ length: 37 }, (_, index) => `src/lib/previous-fix-${index}.ts`)] : code ? [plannedPath] : [],
         ...(registered ? { searchExecutionFence: null, recheckDispatch: null, releaseProvenance: { schemaVersion: 1,
@@ -581,6 +581,22 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       .toMatchObject({ result: pending ? "PENDING" : "STALE_EVIDENCE" });
     expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
       .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    if (scenario === "data-only") {
+      await client.courseSupportBatch.update({ where: { id: batch.id }, data: { leaseExpiresAt: new Date(Date.now() - 1000) } });
+      const runtimeSha = "d".repeat(40);
+      expect(await lane.recoverCourseSupportBatch({ batchId: batch.id, requestingThreadId: owner,
+        currentBranch: String((batch.summary as Prisma.JsonObject).branch), currentHeadSha: runtimeSha, dirtyPaths: [],
+        releaseIsPublished: true, currentHeadIsPublished: true, baseIsAncestor: true, releaseIsAncestor: true,
+        supersedingDeployment: { commitSha: runtimeSha, deploymentId: "dpl_current", resumeOriginal: true } }))
+        .toMatchObject({ outcome: "ready", recovered: true });
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } })).toMatchObject({
+        ownerThreadId: owner, status: "VERIFYING", releaseSha: baseSha,
+        summary: { plannedPaths: [], publishedRuntimeRecoveryV1: { runtimeSha, registeredReleaseSha: baseSha, implementationProofChanged: false } },
+      });
+      expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } })).toMatchObject({ result: "STALE_EVIDENCE" });
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+        .toMatchObject({ status: "FAILED", firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    }
     if (claimed) {
       await client.courseSupportBatch.update({ where: { id: batch.id }, data: { leaseExpiresAt: new Date(Date.now() - 1000) } });
       expect(await lane.recoverCourseSupportBatch({ batchId: batch.id, requestingThreadId: owner,

@@ -2103,7 +2103,7 @@ async function recover(args: string[]) {
   const ownerThreadId = requireOwnerThread(args);
   if (args.includes("--close-expired-demand")) {
     const batchRef = readSingleOption(args, "--batch-ref");
-    if (!batchRef || args.includes("--requeue-superseded-runtime") ||
+    if (!batchRef || args.includes("--requeue-superseded-runtime") || args.includes("--resume-superseded-runtime") ||
         process.env.CODEX_THREAD_ID?.trim() !== ownerThreadId ||
         git.dirtyPaths.length || git.branch !== provenance.branch ||
         git.headSha !== git.originMainSha || !provenance.releaseSha ||
@@ -2126,8 +2126,11 @@ async function recover(args: string[]) {
     provenance.releaseSha && releaseIsAncestor
       ? readCommittedPaths(provenance.releaseSha, git.headSha)
       : [];
-  let supersedingDeployment: { commitSha: string; deploymentId: string } | undefined;
-  if (args.includes("--requeue-superseded-runtime")) {
+  const resumeOriginal = args.includes("--resume-superseded-runtime");
+  const requeueOriginal = args.includes("--requeue-superseded-runtime");
+  if (resumeOriginal && requeueOriginal) throw new Error("Choose either same-owner continuation or source reconciliation.");
+  let supersedingDeployment: { commitSha: string; deploymentId: string; resumeOriginal?: true } | undefined;
+  if (resumeOriginal || requeueOriginal) {
     if (git.dirtyPaths.length || git.branch !== provenance.branch ||
         git.headSha !== git.originMainSha || provenance.releaseSha !== provenance.baseSha ||
         git.originMainSha === provenance.baseSha || !isGitAncestor(provenance.baseSha, git.originMainSha) ||
@@ -2145,7 +2148,7 @@ async function recover(args: string[]) {
     });
     runGit(["fetch", "origin", "main"]);
     if (readGitState().originMainSha !== commitSha) throw new Error("Production main changed during superseded-runtime recovery.");
-    supersedingDeployment = { commitSha: proof.commitSha, deploymentId: proof.deploymentId };
+    supersedingDeployment = { commitSha: proof.commitSha, deploymentId: proof.deploymentId, ...(resumeOriginal ? { resumeOriginal: true } : {}) };
   }
   return settleCourseSupportRecoveryFence(() => recoverCourseSupportBatch({
     batchId,
