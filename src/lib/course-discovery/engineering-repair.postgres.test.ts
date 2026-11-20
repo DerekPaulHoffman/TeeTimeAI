@@ -737,7 +737,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       branch: "automation/course-support-discovery-claim" }) };
   }
 
-  it("lets the original deployed simulator owner hand off one late learner and releases coding ownership only after replay", async () => {
+  it.each(["replayed", "failed"])("keeps the same original deployed simulator owner through a %s late learner", async scenario => {
     const f = await boundSimulatorHandoff(true);
     const lane = await import("@/lib/automation/simulator-support-ownership");
     const { parseCourseDispatchAudit, planCourseSupportCourseDispatch } = await import("@/lib/automation/course-support-course-dispatch");
@@ -780,6 +780,24 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await service.claimNextDiscoveryJob("stale-runtime", registeredRelease)).toBeNull();
     const pickedUp = await service.claimNextDiscoveryJob("fixture-sol-simulator", runtimeVersion);
     expect(pickedUp).toMatchObject({ id: admitted.value.jobId, offeringId: f.offering!.id, attempts: 1 });
+    if (scenario === "failed") {
+      await service.failDiscoveryJob(pickedUp!.id, pickedUp!.leaseToken!, "TOOL_FAILURE", false);
+      expect(await lane.requestSimulatorLearningRecovery(owner)).toMatchObject({ acquired: true,
+        value: { outcome: "existing", jobId: pickedUp!.id } });
+      const settled = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+      const expired = parseCourseDispatchAudit(settled.audit)!;
+      expired.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+      await client.automationRun.update({ where: { id: f.run.id }, data: { audit: expired as unknown as Prisma.InputJsonValue } });
+      const next = await planCourseSupportCourseDispatch({ ownerThreadId: scheduler, baseSha: runtimeVersion, maxStarts: 1 });
+      expect(next).toMatchObject({ acquired: true, value: { continuationItems: [{
+        assignmentRef: f.assignmentRef, threadId: f.child, releaseSha: registeredRelease, simulatorLearningRecovery: true,
+        failedLearningProgress: { jobId: pickedUp!.id, fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+      }], launchItems: [] } });
+      expect(await client.courseDiscoveryJob.count({ where: { offeringId: f.offering!.id } })).toBe(2);
+      expect(await client.courseDiscoveryJob.findUnique({ where: { id: f.job.id } })).toMatchObject({
+        status: f.job.status, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+      return;
+    }
     const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "HTTP_JSON", target: { ...f.target, kind: "SIMULATOR" },
       source: { venueName: f.course.name, officialUrl: f.course.website, bookingUrl: "https://golf.example.com/times",
         timeZone: "UTC", providerFamily: "EXAMPLE" },

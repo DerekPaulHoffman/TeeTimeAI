@@ -22,6 +22,10 @@ repair. It preserves the original failed job and its clock. The independent
 replay hands the method to the usual workflow, which owns matching and email.
 If the operation stops before admission, the scheduler may continue the same
 native owner when the existing verification lease expires.
+If that linked learner settles in failure, the scheduler can wake the same
+owner once for the new diagnosis. Read the linked result and previously
+collected evidence before claiming paths for a different correction. The wake
+adds no provider reads and grants no repeat of that learner or budget.
 
 Read `discoveryEngineeringFailure`, retained research history and failed routes
 before choosing a different approach. Keep a private hypothesis, evidence,

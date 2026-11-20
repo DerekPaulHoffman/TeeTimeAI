@@ -38,16 +38,18 @@ export function readDesktopContinuationProduction({ selected, nodePath, currentS
   return { source: "git", state: "READY", branch: "main", commitSha: currentSha, deploymentId: deployments[0].id, aliases };
 }
 
-function readFailedLearningProgress(item, now) {
+function readFailedLearningProgress(item, now, simulatorLearning) {
   const progress = item.failedLearningProgress;
   if (progress === undefined) return null;
   if (!progress || typeof progress !== "object" || Array.isArray(progress) ||
       Object.keys(progress).sort().join(",") !== "completedAt,fingerprint,jobId,version" || progress.version !== 1 ||
       !/^[A-Za-z0-9_-]{1,128}$/u.test(progress.jobId ?? "") || typeof progress.completedAt !== "string" ||
       !Number.isFinite(Date.parse(progress.completedAt)) || new Date(progress.completedAt).toISOString() !== progress.completedAt ||
-      Date.parse(progress.completedAt) > now || item.continuationMode !== "PUBLISHED_IMPLEMENTATION" ||
-      item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" ||
-      progress.fingerprint !== createHash("sha256").update([progress.jobId, progress.completedAt, item.batchReference, item.releaseSha].join("\0")).digest("hex")) {
+      Date.parse(progress.completedAt) > now ||
+      (!simulatorLearning && (item.continuationMode !== "PUBLISHED_IMPLEMENTATION" ||
+        item.continuationTrigger !== "UNFINISHED_FULL_REPAIR")) ||
+      progress.fingerprint !== createHash("sha256").update([progress.jobId, progress.completedAt,
+        simulatorLearning ? item.assignmentRef : item.batchReference, item.releaseSha].join("\0")).digest("hex")) {
     fail("CURRENT_FAILED_LEARNING_PROGRESS_REQUIRED");
   }
   return progress;
@@ -89,7 +91,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
         simulatorStage.fullRepair.offeringSourceFingerprint !== item.sourceFingerprint
         : !Array.isArray(item.plannedPaths) || item.plannedPaths.length || item.releaseSha !== null) ||
       item.expectedNativeContinuation !== null || item.continuationMode !== undefined ||
-      item.expiredDemandRecoveryOnly !== undefined || item.failedLearningProgress !== undefined ||
+      item.expiredDemandRecoveryOnly !== undefined || (!simulatorLearning && item.failedLearningProgress !== undefined) ||
       !Number.isFinite(Date.parse(item.checkpoint.ownedStage.leaseExpiresAt ?? "")) ||
       Date.parse(item.checkpoint.ownedStage.leaseExpiresAt) > now)) fail("DESKTOP_SIMULATOR_WAIT_REQUIRED");
   const publishedImplementation = item?.continuationMode === "PUBLISHED_IMPLEMENTATION";
@@ -123,7 +125,18 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const worker = realpathSync(launcher.cwd);
   if (execute(worker, ["branch", "--show-current"]) !== launcher.branch || execute(worker, ["status", "--porcelain"])) fail("ORIGINAL_WORKER_CHANGED");
   const workerHead = execute(worker, ["rev-parse", "HEAD"]);
-  if (simulator && workerHead !== (simulatorLearning ? item.releaseSha : item.baseSha)) fail("ORIGINAL_SIMULATOR_WAIT_CHECKOUT_CHANGED");
+  const progress = readFailedLearningProgress(item, now, simulatorLearning);
+  const primaryMarker = join(selected, ".codex-artifacts", simulatorLearning
+    ? `desktop-simulator-learning-${item.assignmentRef}-${item.releaseSha}.private.json`
+    : simulator
+    ? `desktop-simulator-wait-${item.assignmentRef}-${item.claimRevision}.private.json`
+    : registeredImplementation
+    ? `desktop-repair-${expiredDemandRecoveryOnly ? "expired-demand" : "registered"}-${item.assignmentRef}-${item.releaseSha}.private.json`
+    : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
+  if (simulator && workerHead !== (simulatorLearning ? item.releaseSha : item.baseSha)) {
+    if (!simulatorLearning || !progress || !existsSync(primaryMarker)) fail("ORIGINAL_SIMULATOR_WAIT_CHECKOUT_CHANGED");
+    execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, workerHead]);
+  }
   if (simulatorLearning) execute(selected, ["merge-base", "--is-ancestor", item.baseSha, item.releaseSha]);
   const unchangedRuntime = workerHead === currentSha || currentSha === item.baseSha;
   // The database projection already requires a current, unresolved full
@@ -155,7 +168,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       localCandidate = { headSha: workerHead, sharedBaseSha: sharedBase, paths };
     }
   }
-  if (workerHead !== originalWorkerHead) {
+  if (!simulatorLearning && workerHead !== originalWorkerHead) {
     // A previous automatic continuation let this same owner fast-forward its
     // own clean branch. Retain that exact request as provenance; never adopt
     // arbitrary clean commits or an unrelated worker's checkout.
@@ -182,22 +195,15 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const parentCommon = realpathSync(resolve(selected, execute(selected, ["rev-parse", "--git-common-dir"])));
   if (!same(common, parentCommon) || same(common, realpathSync(execute(worker, ["rev-parse", "--absolute-git-dir"])))) fail("ORIGINAL_LINKED_WORKER_REQUIRED");
   if (!localCandidate) execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
-  const progress = readFailedLearningProgress(item, now);
-  const primaryMarker = join(selected, ".codex-artifacts", simulatorLearning
-    ? `desktop-simulator-learning-${item.assignmentRef}-${item.releaseSha}.private.json`
-    : simulator
-    ? `desktop-simulator-wait-${item.assignmentRef}-${item.claimRevision}.private.json`
-    : registeredImplementation
-    ? `desktop-repair-${expiredDemandRecoveryOnly ? "expired-demand" : "registered"}-${item.assignmentRef}-${item.releaseSha}.private.json`
-    : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
   let marker = primaryMarker, prior = null;
+  if (simulatorLearning && progress && !existsSync(primaryMarker)) fail("ORIGINAL_CONTINUATION_PROVENANCE_REQUIRED");
   if (existsSync(primaryMarker)) {
     if (!progress) return { outcome: "already_requested", messageRequired: false };
     prior = readJson(primaryMarker);
     if (prior.schemaVersion !== 1 || prior.kind !== "OWNED_DESKTOP_CONTINUATION_REQUESTED" ||
         prior.status !== "REQUESTED_NOT_ACKNOWLEDGED" || prior.childThreadId !== item.threadId ||
-        prior.assignmentRef !== item.assignmentRef || prior.batchReference !== item.batchReference ||
-        prior.runtimeSha !== currentSha || !UUID.test(prior.priorTurnId ?? "") ||
+        prior.assignmentRef !== item.assignmentRef || prior.batchReference !== (simulatorLearning ? null : item.batchReference) ||
+        prior.runtimeSha !== (simulatorLearning ? workerHead : currentSha) || !UUID.test(prior.priorTurnId ?? "") ||
         !Number.isFinite(Date.parse(prior.preparedAt)) || Date.parse(prior.preparedAt) > now) fail("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
     if (Date.parse(progress.completedAt) <= Date.parse(prior.preparedAt) || progress.fingerprint === prior.observedFailureFingerprint) {
       return { outcome: "already_requested", messageRequired: false };
@@ -257,8 +263,11 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       : `finish the unresolved diagnosis under the existing action plan; a newer release is not required. Do not rerun unchanged verification or an exhausted read. Obtain and validate fresh research context, distinguish tooling-repair permission from provider-contract permission, and diagnose the actual missing evidence/transport/extraction tool within the returned scope.${phaseInstruction}${releaseInstruction}`;
     const candidateInstruction = localCandidate && !registeredImplementation ? `\nPreserved unregistered local candidate: ${localCandidate.headSha}. Its exact unpublished delta is confined to your already claimed paths. Follow the guide's candidate-preserving merge; do not reset it or treat it as registered/published.` : "";
     const commonInstruction = `\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nExact tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`;
+    const simulatorPurpose = progress
+      ? "A linked late learner just failed. Recover only your original lease, then inspect the new owned diagnostics and your prior evidence. Diagnose what failed before changing anything. Claim only the reusable tooling paths needed for a new, tested correction. Do not read a provider again under this wake, widen guardrails, repeat the failed learner or send email. A new late learner is permitted only after registering and qualifying a different implementation that fixes the measured defect."
+      : "Recover only your original lease, then use the simulator-support recover-learning command. It delegates one separate late job to the normal learner with independent replay and keeps the old failed pickup/deadline. Do not supply route hints, read a provider yourself, edit configuration, request another check, or send email. A queued result is evidence of admission only.";
     const message = buildWorkerFirstTurnPrompt(simulatorLearning
-      ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at expired VERIFYING revision ${item.claimRevision}. The human authorized your original Sol/ChatGPT Desktop continuation. Your exact own deployed repair is ${item.releaseSha}. On your clean original branch fast-forward to the exact reviewed main while preserving that registered SHA. Verify First user Chrome, re-read the current owner, source and revision, recover only that original lease, then use the simulator-support recover-learning command. It delegates one separate late job to the normal learner with independent replay and keeps the old failed pickup/deadline. Do not supply route hints, read a provider yourself, edit configuration, request another check, or send email. A queued result is evidence of admission only. Stop on any changed claim, denied command or unverified runtime.${commonInstruction}`
+      ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at expired VERIFYING revision ${item.claimRevision}. The human authorized your original Sol/ChatGPT Desktop continuation. Your exact own deployed repair is ${item.releaseSha}. On your clean original branch fast-forward to the exact reviewed main while preserving that registered SHA. Verify First user Chrome, then re-read the current owner, source and revision. ${simulatorPurpose} Stop on any changed claim, denied command or unverified runtime.${commonInstruction}`
       : simulator
       ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at durable WAITING_IMPLEMENTATION revision ${item.claimRevision}. The human authorized your original Sol/ChatGPT Desktop continuation. Implementation capacity was available at planning. Use First user Chrome if needed. On your original clean branch fast-forward to the exact reviewed main. Revalidate your existing claim, source, expired lease and pending path with the normal simulator commands, recover only that original owner, and request only the saved pending implementation path. This wake grants no path, provider read, source change or additional learning attempt. Stop on a changed claim or a fresh busy result. Continue the full original mission after an actual path grant.${commonInstruction}`
       : `This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${item.continuationMode ?? "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha}${candidateInstruction}${commonInstruction}`, item.threadId, runtime.nodePath);

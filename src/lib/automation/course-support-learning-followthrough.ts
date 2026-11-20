@@ -8,6 +8,7 @@ type Job = Pick<CourseDiscoveryJob, "id" | "courseId" | "offeringId" | "targetKe
 type Expected = {
   batchId: string; batchReference: string; ownerThreadId: string; releaseSha: string;
   deployedAt: Date; courseId: string; incidentId: string; cycle: number; sourceFingerprint: string;
+  offeringId?: string; simulatorAssignmentRef?: string;
   searchRefs: readonly { id: string; alertGeneration: number }[]; now: Date;
 };
 const record = (value: unknown): Record<string, unknown> | null =>
@@ -19,13 +20,18 @@ const time = (value: Date | null) => value instanceof Date ? value.getTime() : N
 export function projectOwnedFailedLearningProgress(child: Job, parent: Job, expected: Expected): FailedLearningProgress | null {
   const link = readLearningRepairRecoveryOf(child.result);
   const completed = time(child.completedAt), picked = time(child.firstPickedUpAt), deadline = time(child.deadlineAt);
+  const offeringId = expected.offeringId ?? null;
+  const kind = offeringId ? "SIMULATOR" : "OUTDOOR";
   if (!link || !Number.isFinite(time(expected.now)) || !Number.isFinite(time(expected.deployedAt)) ||
-    !/^[A-Za-z0-9_-]{1,128}$/u.test(child.id) || child.targetKey !== `course:${expected.courseId}` ||
+    !/^[A-Za-z0-9_-]{1,128}$/u.test(child.id) ||
+    child.targetKey !== (offeringId ? `offering:${offeringId}` : `course:${expected.courseId}`) ||
     !["FAILED", "TIMED_OUT"].includes(child.status) || !child.outcome || !Number.isSafeInteger(child.attempts) || child.attempts < 1 || child.attempts > 2 ||
     !Number.isFinite(completed) || !Number.isFinite(picked) || deadline - picked !== 900_000 ||
     completed < picked || completed > expected.now.getTime() || Date.parse(link.requestedAt) > picked ||
     expected.deployedAt.getTime() > Date.parse(link.requestedAt) ||
-    child.offeringId !== null || parent.offeringId !== null || child.courseId !== expected.courseId || parent.courseId !== child.courseId ||
+    child.offeringId !== offeringId || parent.offeringId !== offeringId || child.courseId !== expected.courseId ||
+    parent.courseId !== child.courseId || Boolean(offeringId) !== Boolean(expected.simulatorAssignmentRef) ||
+    link.simulatorAssignmentRef !== expected.simulatorAssignmentRef ||
     child.targetKey !== parent.targetKey || child.baseRecipeId !== parent.baseRecipeId ||
     child.sourceFingerprint !== expected.sourceFingerprint || parent.sourceFingerprint !== child.sourceFingerprint ||
     link.sourceFingerprint !== child.sourceFingerprint || link.jobId !== child.id || link.originalJobId !== parent.id ||
@@ -36,8 +42,8 @@ export function projectOwnedFailedLearningProgress(child: Job, parent: Job, expe
     readLearningExecutionRuntime(child.result) !== link.runtimeVersion) return null;
   const request = record(parent.request), target = record(request?.target), demand = record(request?.demand);
   const childRequest = record(child.request), childTarget = record(childRequest?.target), childDemand = record(childRequest?.demand);
-  if (target?.kind !== "OUTDOOR" || target.courseId !== expected.courseId || target.offeringId ||
-    childTarget?.kind !== "OUTDOOR" || childTarget.courseId !== expected.courseId || childTarget.offeringId ||
+  if (target?.kind !== kind || target.courseId !== expected.courseId || (target.offeringId ?? null) !== offeringId ||
+    childTarget?.kind !== kind || childTarget.courseId !== expected.courseId || (childTarget.offeringId ?? null) !== offeringId ||
     childDemand?.searchId !== demand?.searchId || childDemand?.alertGeneration !== demand?.alertGeneration ||
     !expected.searchRefs.some(ref => ref.id === demand?.searchId && ref.alertGeneration === demand.alertGeneration)) return null;
   const completedAt = child.completedAt!.toISOString();
@@ -48,7 +54,7 @@ export function projectOwnedFailedLearningProgress(child: Job, parent: Job, expe
 export async function readOwnedFailedLearningProgress(reader: Pick<Prisma.TransactionClient, "courseDiscoveryJob">,
   expected: Expected): Promise<FailedLearningProgress | null> {
   const children = await reader.courseDiscoveryJob.findMany({ where: {
-    courseId: expected.courseId, offeringId: null, status: { in: ["FAILED", "TIMED_OUT"] },
+    courseId: expected.courseId, offeringId: expected.offeringId ?? null, status: { in: ["FAILED", "TIMED_OUT"] },
     AND: [{ result: { path: ["learningRecoveryOf", "batchId"], equals: expected.batchId } },
       { result: { path: ["learningRecoveryOf", "releaseSha"], equals: expected.releaseSha } }],
   }, take: 2 });

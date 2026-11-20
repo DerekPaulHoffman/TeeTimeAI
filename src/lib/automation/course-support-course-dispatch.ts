@@ -991,6 +991,7 @@ async function collectCourseSupportContinuationCandidates(input: {
     launcherReceiptPath?: string; claimToken?: string; claimRevision?: number; sourceFingerprint?: string;
     plannedPaths?: string[]; releaseSha?: string | null; checkpoint?: CourseSupportContinuationCheckpoint;
     simulatorLearningRecovery?: true;
+    failedLearningProgress?: NonNullable<Awaited<ReturnType<typeof readOwnedFailedLearningProgress>>>;
     expectedNativeContinuation?: { turnId: string; key: string; receiptPath: string } | null }> = [];
   let attentionCount = 0;
   if (!input.runs.some(run => run.status === "RUNNING" && run.parsed?.target.mode === "SIMULATOR" && run.parsed.state === "CONSUMED")) {
@@ -1019,8 +1020,15 @@ async function collectCourseSupportContinuationCandidates(input: {
       const history = recovery
         ? (await import("@/lib/course-discovery/learning-repair-recovery")).readLearningRepairRecoveries(recovery.failure.job.result)
         : null;
-      const simulatorLearningRecovery = recovery && history && !history.some(link =>
-        link.batchId === run.id && link.releaseSha === recovery.claim.releaseSha) &&
+      const priorRecovery = recovery && history?.some(link => link.batchId === run.id && link.releaseSha === recovery.claim.releaseSha);
+      const failedLearningProgress = recovery && priorRecovery ? await readOwnedFailedLearningProgress(input.tx, {
+        batchId: run.id, batchReference: audit.assignmentRef, ownerThreadId: audit.childThreadId,
+        releaseSha: recovery.claim.releaseSha!, deployedAt: new Date(recovery.claim.deployment!.deployedAt),
+        courseId: audit.target.courseId, offeringId: audit.target.offeringId, simulatorAssignmentRef: audit.assignmentRef,
+        incidentId: audit.target.incidentId, cycle: audit.target.cycle, sourceFingerprint: recovery.failure.job.sourceFingerprint,
+        searchRefs: audit.target.searchRefs, now: input.now,
+      }) : null;
+      const simulatorLearningRecovery = recovery && history && (!priorRecovery || failedLearningProgress) &&
         !await hasSimulatorSupportImplementationOwnership(input.tx, audit.assignmentRef);
       continuationItems.push({ mode: "SIMULATOR", assignmentRef: audit.assignmentRef, threadId: audit.childThreadId,
         originalParentThreadId: audit.ownerThreadId, branch: audit.simulatorClaim!.branch, baseSha: audit.baseSha,
@@ -1030,6 +1038,7 @@ async function collectCourseSupportContinuationCandidates(input: {
           plannedPaths: audit.simulatorClaim!.plannedPaths, releaseSha: audit.simulatorClaim!.releaseSha,
           expectedNativeContinuation: latestConfirmedNativeContinuation(ledger),
           ...(simulatorLearningRecovery ? { simulatorLearningRecovery: true as const } : {}),
+          ...(simulatorLearningRecovery && failedLearningProgress ? { failedLearningProgress } : {}),
           checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight,
             ...(simulatorLearningRecovery ? { ownedStage: {
               ...context.checkpoint.ownedStage!, leaseExpiresAt: audit.simulatorClaim!.leaseExpiresAt,

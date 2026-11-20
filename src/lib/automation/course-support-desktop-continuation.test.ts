@@ -166,6 +166,27 @@ describe("original Desktop full-repair continuation", () => {
     await expect(prepareOwnedDesktopContinuation({ context: f.context,
       item: { ...item, checkpoint: { ...item.checkpoint, ownedStage: { ...item.checkpoint.ownedStage, deployment: null } } } }, f.deps))
       .rejects.toThrow();
+
+    const nextRuntime = "d".repeat(40), completedAt = "2030-01-01T00:02:00.000Z", jobId = "failed-simulator-child";
+    f.deps.now = () => Date.parse("2030-01-01T00:03:00.000Z");
+    f.deps.git.mockImplementation((cwd, args) => args[0] === "rev-parse" && !args[1].startsWith("--")
+      ? cwd === f.worker ? CURRENT : nextRuntime : git(cwd, args));
+    f.deps.readProductionProof.mockReturnValue({ source: "git", state: "READY", branch: "main", commitSha: nextRuntime,
+      deploymentId: "dpl_qualified", aliases: ["teetimespot.com", "www.teetimespot.com"] });
+    const request = f.client.request.getMockImplementation()!;
+    f.client.request.mockImplementation(method => method === "thread/turns/list" ? Promise.resolve({ data: [{
+      id: "cccccccc-dddd-4eee-8fff-000000000000", status: "completed", error: null, itemsView: "notLoaded", items: [],
+      completedAt: 1893456180,
+    }] }) : request(method));
+    const followthrough = { ...item, claimRevision: 9, failedLearningProgress: { version: 1, jobId, completedAt,
+      fingerprint: createHash("sha256").update([jobId, completedAt, REF, releaseSha].join("\0")).digest("hex") } };
+    const follow = await prepareOwnedDesktopContinuation({ context: f.context, item: followthrough }, f.deps);
+    expect(follow).toMatchObject({ threadId: CHILD, messageRequired: true,
+      prompt: expect.stringContaining("A linked late learner just failed") });
+    expect(follow.prompt).toContain(jobId);
+    expect(follow.prompt).not.toContain("use the simulator-support recover-learning command");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: followthrough }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
     expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
   });
 
