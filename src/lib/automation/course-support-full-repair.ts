@@ -40,26 +40,41 @@ export function fullRepairSourceContinuation(input: {
     ? "RECONCILE_SOURCE" as const : null;
 }
 
-export function interruptedRegisteredFullRepairPaths(input: {
+type UnexecutedFullRepairProgress = {
   status: string; result: string; baseSha: string; releaseSha: string | null; deployedAt: Date | null;
   leaseExpiresAt: Date; now: Date; recheckDispatchKey: string | null;
   recheckDispatchStartedAt: Date | null; recheckDispatchedAt: Date | null;
   summary: Record<string, unknown>;
-}) {
-  const { summary } = input;
-  const provenance = summary.releaseProvenance as Record<string, unknown> | null;
-  const paths = summary.plannedPaths;
-  const fence = readPersistedCourseSupportSearchExecutionFence(summary.searchExecutionFence);
+};
+
+function isUnexecutedFullRepair(input: UnexecutedFullRepairProgress) {
+  const fence = readPersistedCourseSupportSearchExecutionFence(input.summary.searchExecutionFence);
   // A first implementation can retain the empty fence captured at claim time.
   // Preserve a registered candidate only before any real search execution.
   const emptyClaimFence = fence?.settled && fence.batchSearchCount === 0 && fence.reasons.length === 0 &&
     fence.memberships.length === 0 && fence.deletedSearchRefs.length === 0 && fence.probeEvidenceBySearch.length === 0 &&
     fence.probeEvidenceRefs.length === 0 && fence.providerExecutionAttemptCourseRefs.length === 0 &&
     fence.searchExecutionMayHaveStartedCourseRefs.length === 0;
-  const eligible = input.status === "VERIFYING" && input.result === "PENDING" && input.deployedAt === null &&
-    input.leaseExpiresAt <= input.now && input.releaseSha !== input.baseSha && /^[a-f0-9]{40}$/u.test(input.releaseSha ?? "") &&
+  return input.result === "PENDING" && input.deployedAt === null && input.leaseExpiresAt <= input.now &&
     input.recheckDispatchKey === null && input.recheckDispatchStartedAt === null && input.recheckDispatchedAt === null &&
-    (summary.searchExecutionFence === null || emptyClaimFence) && summary.recheckDispatch === null &&
+    (input.summary.searchExecutionFence === null || emptyClaimFence) && input.summary.recheckDispatch == null;
+}
+
+export function interruptedClaimedFullRepairPaths(input: UnexecutedFullRepairProgress) {
+  const paths = input.summary.plannedPaths;
+  return input.status === "IMPLEMENTING" && input.releaseSha === null && !input.summary.releaseProvenance &&
+    /^[a-f0-9]{40}$/u.test(input.baseSha) && isUnexecutedFullRepair(input) &&
+    Array.isArray(paths) && paths.length > 0 && paths.length <= 32 &&
+    paths.every(path => typeof path === "string" && path.length > 0 && path.length <= 300)
+    ? paths as string[] : null;
+}
+
+export function interruptedRegisteredFullRepairPaths(input: UnexecutedFullRepairProgress) {
+  const { summary } = input;
+  const provenance = summary.releaseProvenance as Record<string, unknown> | null;
+  const paths = summary.plannedPaths;
+  const eligible = input.status === "VERIFYING" && input.releaseSha !== input.baseSha && /^[a-f0-9]{40}$/u.test(input.releaseSha ?? "") &&
+    isUnexecutedFullRepair(input) &&
     Array.isArray(paths) && paths.length > 0 && paths.every(path => typeof path === "string" && path.length > 0) &&
     provenance?.schemaVersion === 1 && provenance.descendantVerified === true && provenance.toSha === input.releaseSha &&
     typeof provenance.fromSha === "string" && /^[a-f0-9]{40}$/u.test(provenance.fromSha) && provenance.fromSha !== input.releaseSha &&

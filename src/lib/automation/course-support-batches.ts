@@ -3,7 +3,7 @@ import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-excl
 import { isGeneralDiscoveryEnabled } from "@/lib/course-discovery/config";
 
 import { Prisma } from "@prisma/client";
-import { fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair, readLegacyFullRepairBaseVerification, retainOlderFullRepairReleaseWindows } from "./course-support-full-repair";
+import { fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, interruptedClaimedFullRepairPaths, isDataOnlyFullRepair, readLegacyFullRepairBaseVerification, retainOlderFullRepairReleaseWindows } from "./course-support-full-repair";
 import type {
   AutomationReason,
   BookingMethod,
@@ -3330,12 +3330,13 @@ export function assessCourseSupportRecovery(input: {
   }
   const expectedHead = input.releaseSha ?? input.baseSha;
   if (input.currentHeadSha !== expectedHead) {
+    const recoveryBaseIsAncestor = input.baseIsAncestor === true &&
+      (input.releaseSha ? input.releaseIsAncestor === true : input.claimedBaseRuntimeImport === true);
     const safelyImportedPublishedRuntime = input.currentHeadIsPublished === true &&
       input.ownerThreadId === input.requestingThreadId && Boolean(input.expectedBranch) && input.expectedBranch === input.currentBranch &&
-      input.dirtyPaths.length === 0 && Boolean(input.releaseSha && (input.plannedPaths.length > 0
-        ? input.releaseSha !== input.baseSha || input.claimedBaseRuntimeImport === true
-        : input.releaseSha === input.baseSha && input.dataOnlyRuntimeImport === true)) &&
-      input.baseIsAncestor === true && input.releaseIsAncestor === true;
+      input.dirtyPaths.length === 0 && recoveryBaseIsAncestor && (input.plannedPaths.length > 0
+        ? input.claimedBaseRuntimeImport === true || Boolean(input.releaseSha && input.releaseSha !== input.baseSha)
+        : input.releaseSha === input.baseSha && input.dataOnlyRuntimeImport === true);
     const committedPaths = input.releaseSha
       ? (input.releaseCommittedPaths ?? [])
       : (input.committedPaths ?? []);
@@ -3347,7 +3348,7 @@ export function assessCourseSupportRecovery(input: {
     const candidate = input.unpublishedCandidate;
     const safelyPreservedCandidate = Boolean(candidate && /^[a-f0-9]{40}$/u.test(candidate.publishedMainSha) &&
       candidate.publishedMainSha !== input.currentHeadSha && candidate.containsRelease && candidate.isAncestorOfHead &&
-      input.baseIsAncestor === true && input.releaseIsAncestor === true && input.releaseSha &&
+      recoveryBaseIsAncestor &&
       input.ownerThreadId === input.requestingThreadId && input.expectedBranch && input.expectedBranch === input.currentBranch &&
       input.dirtyPaths.length === 0 && input.plannedPaths.length > 0 && candidate.paths.length > 0 &&
       candidate.paths.every(path => input.plannedPaths.includes(path)));
@@ -15789,13 +15790,21 @@ export async function recoverCourseSupportBatch(input: {
       ? summary.plannedPaths.filter((path): path is string => typeof path === "string")
       : [];
     const recoveryDirective = readCourseSupportRemediationDirective(summary);
-    const recoveryClaim = batch.incidents.length === 1 ? readCourseSupportRemediationClaimAttempt({
-      summary, courseId: batch.incidents[0].courseId, expectedAttemptCount: 1,
+    const entry = batch.incidents.length === 1 ? batch.incidents[0] : null;
+    const recoveryClaim = entry ? readCourseSupportRemediationClaimAttempt({
+      summary, courseId: entry.courseId, expectedAttemptCount: 1,
     }) : null;
-    const allowPublishedRuntimeImport = input.currentHeadIsPublished === true &&
+    const isOwnedImplementationMission =
       recoveryDirective?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" && recoveryDirective.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
       recoveryClaim?.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
       recoveryClaim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE");
+    const allowPublishedRuntimeImport = input.currentHeadIsPublished === true && isOwnedImplementationMission;
+    const firstClaimedRepair = Boolean(isOwnedImplementationMission && entry &&
+      typeof summary.dispatchAssignmentRef === "string" && /^course-assignment-[a-f0-9-]{36}$/u.test(summary.dispatchAssignmentRef) &&
+      interruptedClaimedFullRepairPaths({ ...batch, result: entry.result, summary, now }) &&
+      entry.incident.status === "AUTO_INVESTIGATING" && entry.incident.cycle === entry.cycle && entry.incident.activeBatchId === batch.id &&
+      !(entry.verificationRequests ?? []).some(isActiveDetachedVerificationRequest) &&
+      recoveryClaim?.providerSnapshotFingerprint === buildCourseSupportProviderSnapshotFingerprint(entry.course));
     const supersedingDeployment = input.supersedingDeployment;
     const dataOnlyRuntimeImport = Boolean(supersedingDeployment?.resumeOriginal && allowPublishedRuntimeImport &&
       input.releaseIsPublished && input.currentHeadSha === supersedingDeployment.commitSha &&
@@ -15830,20 +15839,27 @@ export async function recoverCourseSupportBatch(input: {
       // Only a server-qualified full repair may preserve its own clean local
       // candidate after importing published main. Shared upstream bytes are
       // not claimed as this worker's implementation or registered as a release.
-      unpublishedCandidate: recoveryDirective?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
-        recoveryDirective.workMode === "IMPLEMENT_REUSABLE_SUPPORT" && recoveryClaim?.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
-        recoveryClaim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") &&
+      unpublishedCandidate: isOwnedImplementationMission &&
         input.unpublishedCandidate ? { ...input.unpublishedCandidate,
           paths: normalizeCourseSupportObservedGitPaths(input.unpublishedCandidate.paths) } : undefined,
       // Derived here from the actual retained batch, never a CLI switch. The
       // same original owner may import shared tested tooling before writing
       // its first implementation; its release and failed clock stay unchanged.
-      claimedBaseRuntimeImport: allowPublishedRuntimeImport && fullRepairContinuationMode({
+      claimedBaseRuntimeImport: firstClaimedRepair || allowPublishedRuntimeImport && fullRepairContinuationMode({
         status: batch.status, baseSha: batch.baseSha, releaseSha: batch.releaseSha,
         deployedAt: batch.deployedAt, plannedPaths, now,
       }) === "CLAIMED_IMPLEMENTATION",
       now,
     });
+    if (firstClaimedRepair && (batch.ownerThreadId !== input.requestingThreadId || summary.branch !== input.currentBranch ||
+        input.dirtyPaths.length !== 0 || recovery.action !== "RECOVER")) {
+      return {
+        outcome: "deferred_busy" as const, recovered: false,
+        reasons: ["The original responder must recover its current implementation paths from the qualified original checkout."],
+        threadDisposition: "KEEP_VISIBLE" as const,
+        archiveReason: "The original unpublished implementation remains owned.",
+      };
+    }
     const requeueSupersededRuntime = Boolean(
       supersedingDeployment && !supersedingDeployment.resumeOriginal && input.baseIsAncestor === true && input.releaseIsPublished &&
       batch.ownerThreadId === input.requestingThreadId &&
@@ -17218,7 +17234,7 @@ export async function recoverCourseSupportBatch(input: {
     const leaseExpiresAt = new Date(
       now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS,
     );
-    const recoveredReleaseSha =
+    const recoveredReleaseSha = firstClaimedRepair ? null :
       batch.releaseSha ??
       (input.currentHeadSha !== batch.baseSha ? input.currentHeadSha : null);
     const updated = await prisma.courseSupportBatch.updateMany({

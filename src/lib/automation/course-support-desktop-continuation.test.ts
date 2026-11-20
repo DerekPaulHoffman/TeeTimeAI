@@ -362,14 +362,24 @@ describe("original Desktop full-repair continuation", () => {
     expect(f.deps.clientFactory).not.toHaveBeenCalled();
   });
 
-  it("continues the original clean owner between claiming a tooling path and publishing its implementation", async () => {
+  it.each(["deployed-base", "first-implementation"])("continues the original clean owner after claiming tooling paths: %s", async stage => {
     const f = fixture();
     const item = { ...f.item, continuationMode: "CLAIMED_IMPLEMENTATION", continuationTrigger: "UNFINISHED_FULL_REPAIR",
+      ...(stage === "first-implementation" ? { releaseSha: null } : {}),
       plannedPaths: ["src/lib/course-discovery/public-source.ts"] };
+    if (stage === "first-implementation") {
+      const ready = f.deps.readProductionProof();
+      f.deps.readProductionProof.mockReturnValue({ ...ready, state: "BUILDING" });
+      expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+        .toMatchObject({ outcome: "production_not_ready", messageRequired: false });
+      expect(f.deps.clientFactory).not.toHaveBeenCalled();
+      f.deps.readProductionProof.mockReturnValue(ready);
+    }
     const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
     expect(result).toMatchObject({ outcome: "desktop_continuation_message_required", threadId: CHILD,
       monitoringVerified: false, prompt: expect.stringContaining("Continuation mode: CLAIMED_IMPLEMENTATION") });
     expect(result.prompt).toContain("Finish the already claimed tooling repair");
+    if (stage === "first-implementation") expect(result.prompt).toContain("Original registered release: none");
     expect(result.prompt).toContain("standing full-repair release authorization includes normal promotion");
     expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
       .toMatchObject({ outcome: "already_requested", messageRequired: false });

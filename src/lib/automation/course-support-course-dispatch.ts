@@ -41,7 +41,7 @@ import {
   courseSupportBatchReservesCheckout,
   courseSupportRecoveryBatchesConflict,
 } from "./course-support-batches";
-import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, hasStoppedFullRepairVerification, interruptedRegisteredFullRepairPaths } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, hasStoppedFullRepairVerification, interruptedClaimedFullRepairPaths, interruptedRegisteredFullRepairPaths } from "./course-support-full-repair";
 import { readOwnedFailedLearningProgress } from "./course-support-learning-followthrough";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
@@ -732,8 +732,10 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
     const entry = batch.incidents[0];
     const paths = Array.isArray(summary.plannedPaths) ? summary.plannedPaths : null;
     const registeredPaths = entry && interruptedRegisteredFullRepairPaths({ ...batch, result: entry.result, summary, now });
+    const firstClaimedPaths = entry && interruptedClaimedFullRepairPaths({ ...batch, result: entry.result, summary, now });
+    const interruptedPaths = registeredPaths ?? firstClaimedPaths;
     const continuationMode = registeredPaths ? "REGISTERED_IMPLEMENTATION" as const
-      : fullRepairContinuationMode({ ...batch, plannedPaths: paths, now });
+      : firstClaimedPaths ? "CLAIMED_IMPLEMENTATION" as const : fullRepairContinuationMode({ ...batch, plannedPaths: paths, now });
     const publishedImplementation = continuationMode === "PUBLISHED_IMPLEMENTATION";
     // This projection changes no implementation/recovery authority. The local
     // helper must additionally prove that the exact clean release is on main.
@@ -746,7 +748,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
     const directive = readCourseSupportRemediationDirective(batch.summary);
     const claim = readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 });
     if (!directive || !claim) continue;
-    if (registeredPaths && (directive.workMode !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+    if (interruptedPaths && (directive.workMode !== "IMPLEMENT_REUSABLE_SUPPORT" ||
         claim.actionPlan?.primaryAction !== "IMPLEMENT_REUSABLE_SUPPORT" || !claim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE"))) continue;
     const sourcePurpose = fullRepairSourceContinuation({ mode: continuationMode, result: entry.result,
       claimedFingerprint: claim.providerSnapshotFingerprint,
@@ -780,7 +782,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       sourceFingerprint: (await import("@/lib/course-discovery/service")).getDiscoverySourceFingerprint(entry.course),
       searchRefs: audit.target.searchRefs, now,
     }) : null;
-    if (!registeredPaths && !allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
+    if (!interruptedPaths && !allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
       batchStatus: batch.status, result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [],
       pendingVerificationStopped: Boolean(failedLearningProgress) || hasStoppedFullRepairVerification({ summary: batch.summary,
         batchCreatedAt: batch.createdAt, deployedAt: batch.deployedAt, now }) })) continue;
@@ -791,7 +793,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       ...(sourcePurpose === "RECONCILE_SOURCE" ? { sourceReconciliationOnly: true as const } : {}),
       ...(expiredDemandRecoveryOnly ? { expiredDemandRecoveryOnly: true as const } : {}),
       ...(failedLearningProgress ? { failedLearningProgress } : {}),
-      continuationMode, ...(registeredPaths ? { plannedPaths: registeredPaths }
+      continuationMode, ...(interruptedPaths ? { plannedPaths: interruptedPaths }
         : ["CLAIMED_IMPLEMENTATION", "PUBLISHED_IMPLEMENTATION"].includes(continuationMode) ? { plannedPaths: paths as string[] } : {}) });
     if (items.length === 5) break;
   }

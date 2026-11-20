@@ -116,6 +116,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       Date.parse(item.checkpoint.ownedStage.leaseExpiresAt) > now)) fail("DESKTOP_SIMULATOR_WAIT_REQUIRED");
   const publishedImplementation = item?.continuationMode === "PUBLISHED_IMPLEMENTATION";
   const claimedImplementation = item?.continuationMode === "CLAIMED_IMPLEMENTATION";
+  const firstClaimedImplementation = claimedImplementation && item.releaseSha === null;
   const registeredImplementation = item?.continuationMode === "REGISTERED_IMPLEMENTATION" || simulatorRelease;
   const sourceReconciliationOnly = item?.sourceReconciliationOnly === true;
   const expiredDemandRecoveryOnly = item?.expiredDemandRecoveryOnly === true;
@@ -133,8 +134,8 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if ((!simulator && item?.kind !== "OWNED_OUTDOOR_FULL_REPAIR") || !UUID.test(item.threadId ?? "") || item.threadId === environment.CODEX_THREAD_ID ||
       !/^course-assignment-[a-f0-9-]{36}$/u.test(item.assignmentRef ?? "") ||
       !SHA.test(item.baseSha ?? "") ||
-      (!simulator && (!/^[A-Za-z0-9_-]{1,200}$/u.test(item.batchReference ?? "") || !SHA.test(item.releaseSha ?? "") ||
-        (publishedImplementation || registeredImplementation ? item.releaseSha === item.baseSha : item.releaseSha !== item.baseSha))) ||
+      (!simulator && (!/^[A-Za-z0-9_-]{1,200}$/u.test(item.batchReference ?? "") || (!firstClaimedImplementation &&
+        (!SHA.test(item.releaseSha ?? "") || (publishedImplementation || registeredImplementation ? item.releaseSha === item.baseSha : item.releaseSha !== item.baseSha))))) ||
       !isAbsolute(item.launcherReceiptPath ?? "")) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
   const launcher = readJson(item.launcherReceiptPath);
   if (launcher.schemaVersion !== 1 || launcher.status !== "DESKTOP_REQUESTED" || launcher.executionMode !== "DESKTOP" ||
@@ -217,7 +218,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       if (!(publishedImplementation || claimedImplementation) || item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths)) fail("ORIGINAL_DATA_ONLY_BASE_CHANGED");
       const sharedBase = execute(selected, ["merge-base", "--all", workerHead, currentSha]);
       if (!SHA.test(sharedBase) || sharedBase === workerHead) fail("ORIGINAL_CANDIDATE_ANCESTRY_REQUIRED");
-      execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, sharedBase]);
+      execute(selected, ["merge-base", "--is-ancestor", item.releaseSha ?? item.baseSha, sharedBase]);
       const raw = execute(worker, ["diff", "--name-only", "--no-renames", "-z", `${sharedBase}..${workerHead}`]);
       const paths = typeof raw === "string" && raw.endsWith("\0") ? raw.slice(0, -1).split("\0") : [];
       if (!validPaths(paths) || paths.some(path => !item.plannedPaths.includes(path))) fail("ORIGINAL_CANDIDATE_PATHS_REQUIRED");
@@ -263,7 +264,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const cli = (dependencies.inspectCli ?? inspectPinnedWorkerCli)(selected);
   const runtime = (dependencies.resolveRuntime ?? resolveCourseSupportWorkerRuntime)();
   if (cli.status !== "current" || runtime.status !== "available" || !isAbsolute(runtime.nodePath ?? "")) fail("PARENT_RUNTIME_UNAVAILABLE");
-  if (sourceReconciliationOnly || registeredImplementation || simulator ||
+  if (sourceReconciliationOnly || registeredImplementation || simulator || firstClaimedImplementation ||
       (item.continuationMode === "DATA_ONLY" && currentSha !== item.baseSha)) {
     let proof;
     try { proof = await (dependencies.readProductionProof ?? readDesktopContinuationProduction)({ selected, nodePath: runtime.nodePath, currentSha }); }
@@ -330,7 +331,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
         : "RESEARCH. Preserve earlier captures, access findings and all spent reads. Continue the original full repair from the evidence. If the fresh owner guide explicitly permits an untried observation within the remaining budget and there is no access denial or uncertain effect, follow that exact guide. Otherwise work offline. Any implementation requires a fresh owned path grant."} Keep the original learner and clock. Stop on an ownership or source change, failed protected operation, actual access barrier or unavailable tooling.${commonInstruction}`
       : simulator
       ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at durable WAITING_IMPLEMENTATION revision ${item.claimRevision}. The human authorized your original Sol/ChatGPT Desktop continuation. Implementation capacity was available at planning. Use First user Chrome if needed. On your original clean branch fast-forward to the exact reviewed main. Revalidate your existing claim, source, expired lease and pending path with the normal simulator commands, recover only that original owner, and request only the saved pending implementation path. This wake grants no path, provider read, source change or additional learning attempt. Stop on a changed claim or a fresh busy result. Continue the full original mission after an actual path grant.${commonInstruction}`
-      : `This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${item.continuationMode ?? "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha}${candidateInstruction}${commonInstruction}`, item.threadId, runtime.nodePath);
+      : `This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${item.continuationMode ?? "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha ?? "none"}${candidateInstruction}${commonInstruction}`, item.threadId, runtime.nodePath);
     privateWrite(marker, { schemaVersion: 1, kind: "OWNED_DESKTOP_CONTINUATION_REQUESTED", status: "REQUESTED_NOT_ACKNOWLEDGED",
       parentThreadId: environment.CODEX_THREAD_ID, childThreadId: item.threadId, assignmentRef: item.assignmentRef,
       batchReference: item.batchReference ?? null, priorTurnId: turn.id, priorTurnStatus: turn.status, priorTurnError: turn.error,

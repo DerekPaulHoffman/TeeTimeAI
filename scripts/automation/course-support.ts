@@ -2164,7 +2164,7 @@ async function recover(args: string[]) {
     currentHeadIsPublished: isGitAncestor(git.headSha, git.originMainSha),
     unpublishedCandidate: {
       publishedMainSha: git.originMainSha,
-      containsRelease: releaseIsPublished,
+      containsRelease: provenance.releaseSha ? releaseIsPublished : isGitAncestor(provenance.baseSha, git.originMainSha),
       isAncestorOfHead: isGitAncestor(git.originMainSha, git.headSha),
       paths: isGitAncestor(git.originMainSha, git.headSha)
         ? readCommittedPaths(git.originMainSha, git.headSha) : []
