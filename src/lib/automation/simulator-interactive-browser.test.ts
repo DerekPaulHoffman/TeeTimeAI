@@ -8,6 +8,42 @@ import { collectInteractiveSimulatorResearch, interactiveControlKind, isAnonymou
 import { classifySimulatorSupportFailure } from "./simulator-support-failure";
 
 describe("interactive public research boundaries", () => {
+  it("bounds structural witnesses and excludes attributes, scripts and form values", async () => {
+    const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
+    await mkdir(channel, { recursive: true });
+    const fetch = vi.fn(async () => new Response(`<html><body>
+      <h1>Public calendar</h1><div id="private-token-value" data-token="private-attribute-value">
+      <input type="hidden" value="private-form-value"><span>private@example.test</span></div>
+      ${'<button type="button">Next month</button>'.repeat(40)}
+      <script>const secret='private-script-value';</script></body></html>`, { headers: { "content-type": "text/html" } })) as typeof global.fetch;
+    const lease = (async (_family: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
+    const task = collectInteractiveSimulatorResearch({ url: "https://public.example.test/calendar", channel,
+      assertOwned: async () => {} }, { fetch, lease });
+    const settled = task.then(value => ({ value }), error => ({ error }));
+    try {
+      let view;
+      for (let i = 0; i < 400 && !view; i++) {
+        try { view = JSON.parse(await readFile(join(channel, "response-0.json"), "utf8")); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(done => setTimeout(done, 25)); }
+      }
+      expect(view).toBeDefined();
+      expect(view.controls).toHaveLength(40);
+      expect(view.structuralEvidence).toMatchObject({ version: 1, observedOnly: true, truncated: true });
+      expect(view.structuralEvidence.entries.length).toBeGreaterThan(0);
+      expect(view.structuralEvidence.entries.length).toBeLessThanOrEqual(24);
+      expect(Buffer.byteLength(JSON.stringify(view.structuralEvidence.entries))).toBeLessThanOrEqual(12_050);
+      expect(JSON.stringify(view.structuralEvidence)).not.toMatch(/private-|private@example|data-token|<script|value=/u);
+      await writeFile(join(channel, "request-1.json"), JSON.stringify({ action: "finish" }));
+      expect((await task).renderComplete).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      await writeFile(join(channel, "request-1.json"), JSON.stringify({ action: "finish" })).catch(() => {});
+      await settled;
+      if (!channel.startsWith(resolve(".codex-artifacts/browser") + "/") && !channel.startsWith(resolve(".codex-artifacts/browser") + "\\")) throw new Error("Bad fixture path");
+      await rm(channel, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("offers navigation and calendar filters, never slots, checkout or contact controls", () => {
     const button = (name: string) => ({ tag: "button", role: "", name, label: "" });
     expect(interactiveControlKind(button("Next month"))).toBe("calendar");
@@ -213,6 +249,11 @@ describe("interactive public research boundaries", () => {
         return;
       }
       expect(add).toBeDefined();
+      const addEvidence = first.structuralEvidence.entries.find((entry: { target: string }) => entry.target === add.target);
+      expect(first.structuralEvidence).toMatchObject({ version: 1, observedOnly: true, truncated: false });
+      expect(addEvidence.selector).toContain("button");
+      expect(JSON.stringify(addEvidence)).toContain("1 hour simulator practice");
+      expect(JSON.stringify(addEvidence)).not.toMatch(/onclick|data-|<script|input\[|type="email/iu);
       await send(sequence, { action: "click", target: add.target });
       const second = await wait(sequence++);
       const next = second.controls.find((c: { name: string; kind: string }) => c.name === "Next" && c.kind === "service");
@@ -223,6 +264,10 @@ describe("interactive public research boundaries", () => {
         return;
       }
       expect(next, JSON.stringify(second.controls)).toBeDefined();
+      const nextEvidence = second.structuralEvidence.entries.find((entry: { target: string }) => entry.target === next.target);
+      expect(JSON.stringify(nextEvidence)).toContain("Appointment summary");
+      expect(nextEvidence.ancestors.some((ancestor: { children: { tag: string; text: string }[] }) =>
+        ancestor.children.some(child => child.tag === "h2" && child.text === "Appointment summary"))).toBe(true);
       expect(second.url).toBe(catalog);
       await send(sequence, { action: "click", target: next.target });
       const third = await wait(sequence++);

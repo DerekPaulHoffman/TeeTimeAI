@@ -35,6 +35,47 @@ const forbidden = /\b(?:login|log in|sign in|sign up|register|checkout|check out
 const filterName = /\b(?:date|day|month|calendar|duration|length|party|players?|people|guests?|bay|resource|simulator|location|activity|previous month|next month|availability|available|search|view times)\b/iu;
 const timeSlot = /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/iu;
 
+/** Read-only, ephemeral DOM witnesses for already-admitted controls. No attributes,
+ * form values, HTML or action capabilities leave the browser through this path. */
+function readPublicControlStructure(element: Element) {
+  const tree = {
+    parent(node: Element): Element | null {
+      return node.parentElement ?? ((node.getRootNode() as ShadowRoot).host ?? null);
+    },
+    selector(node: Element) {
+      let path = "";
+      for (let current: Element | null = node, depth = 0; current && depth < 16; depth++) {
+        const root = current.getRootNode() as Document | ShadowRoot;
+        const siblings = current.parentElement?.children ?? root.children;
+        const peers = Array.from(siblings).filter(sibling => sibling.tagName === current!.tagName);
+        const tag = current.tagName.toLowerCase();
+        if (!/^[a-z][a-z0-9-]*$/u.test(tag)) return "";
+        const part = `${tag}:nth-of-type(${peers.indexOf(current) + 1})`;
+        path = part + (path ? (current.shadowRoot ? " " : " > ") + path : "");
+        if (path.length > 240) return "";
+        if (current === document.documentElement) return path;
+        current = tree.parent(current);
+      }
+      return "";
+    },
+    text(node: Element) {
+      if (node.closest('form,[contenteditable]') || node.querySelector('form,input,select,textarea,[contenteditable]')) return "";
+      return (node as HTMLElement).innerText?.trim().slice(0, 200) ?? "";
+    },
+  };
+  const ancestors = [];
+  for (let node = tree.parent(element), depth = 0; node && depth < 4; node = tree.parent(node), depth++) {
+    const selector = tree.selector(node);
+    if (!selector) break;
+    const children = Array.from(node.querySelectorAll('h1,h2,h3,label,time,button,span,div,market-button'))
+      .filter(child => child.getClientRects().length && !child.closest('form,[contenteditable]')).slice(0, 12)
+      .map(child => ({ selector: tree.selector(child), tag: child.tagName.toLowerCase(), text: tree.text(child) }))
+      .filter(child => child.selector);
+    ancestors.push({ selector, tag: node.tagName.toLowerCase(), text: tree.text(node), children });
+  }
+  return { selector: tree.selector(element), ancestors };
+}
+
 /** UI intent is checked separately from the server request contract. Slots are never clicked. */
 export function interactiveControlKind(input: { tag: string; role: string; name: string; label: string; href?: string; calendar?: boolean; verifiedCalendarDay?: boolean; sensitiveForm?: boolean; inputType?: string; hasPopup?: string; squareServiceSelection?: { operation: "ADD" | "NEXT" } | null }) {
   const name = `${input.name} ${input.label}`.trim();
@@ -417,6 +458,9 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const access = detectSimulatorResearchAccessControls(html);
           controls = new Map();
           const visible = [];
+          const structuralEvidence = { version: 1 as const, observedOnly: true as const, truncated: false,
+            entries: [] as Array<{ target: string } & ReturnType<typeof readPublicControlStructure>> };
+          let structuralBytes = 0;
           selectedCalendarFilters = [];
           const selectedDates: string[] = [];
           const locators = await page!.locator('a[href],button,select,input,[role=combobox],[role=button][aria-haspopup="listbox"],[role=option],[role=gridcell]').all();
@@ -430,6 +474,16 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             controls.set(target, { locator, kind, signature: JSON.stringify(item), href: item.href, squareServiceSelection: item.squareServiceSelection });
             visible.push({ target, kind, name: sanitizeResponderText(item.name), label: sanitizeResponderText(item.label),
               ...(item.tag === "select" ? { options: await locator.locator("option").allTextContents() } : {}) });
+            if (structuralEvidence.entries.length < 24 && structuralBytes < 12_000) {
+              const raw = await locator.evaluate(readPublicControlStructure);
+              const evidence = JSON.parse(JSON.stringify({ target, ...raw }, (key, value) =>
+                key === "text" && typeof value === "string" ? sanitizeResponderText(value).slice(0, 200) : value)) as
+                { target: string } & ReturnType<typeof readPublicControlStructure>;
+              const size = Buffer.byteLength(JSON.stringify(evidence));
+              if (evidence.selector && size + structuralBytes <= 12_000 && await page!.locator(evidence.selector).count() === 1) {
+                structuralEvidence.entries.push(evidence); structuralBytes += size;
+              } else structuralEvidence.truncated = true;
+            } else structuralEvidence.truncated = true;
             if (kind === "filter") selectedCalendarFilters.push({ label: sanitizeResponderText(item.label).slice(0, 200),
               value: sanitizeResponderText(item.selectedValue ?? "").replace(/[\u200b-\u200d\ufeff]/gu, "").trim().slice(0, 160) });
             if (item.calendarDate && item.calendarDateSelected) selectedDates.push(item.calendarDate);
@@ -440,7 +494,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const text = sanitizeResponderText(await page!.locator("body").innerText()).slice(0, 12_000);
           if (generation !== viewGeneration || epoch !== documentEpoch) throw new Error("BROWSER_DOCUMENT_CHANGED");
           return { html, view: { phase: "open", sequence, message, url: page!.url(), text,
-            controls: visible, selectedCalendarFilters, loading: pendingNavigation || !loadComplete || pendingPublicReads > 0,
+            controls: visible, structuralEvidence, selectedCalendarFilters, loading: pendingNavigation || !loadComplete || pendingPublicReads > 0,
             accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image } };
         } catch (error) {
           const changed = error instanceof Error &&
