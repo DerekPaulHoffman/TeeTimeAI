@@ -93,6 +93,36 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
 }
 
 describe("unattended direct public protocol inspection", () => {
+  it("distinguishes an oversized controller checkpoint from rejected model fields without writing or exposing retained provenance", async () => {
+    const out = await run({ workerOptions: { checkpointProvenance: { stagehandSource: { report: "PRIVATE_PROVENANCE".repeat(3000) } } },
+      actions: [{ tool: "discovery_checkpoint", arguments: { summary: "observation" } }] });
+    const reply = JSON.stringify(out.replies);
+    expect(reply).toContain("PAYLOAD_TOO_LARGE");
+    expect(reply).not.toContain("PRIVATE_PROVENANCE");
+    expect(out.client.checkpoint).not.toHaveBeenCalled();
+    expect(out.browserFactory).not.toHaveBeenCalled();
+    expect(out.client.activate).not.toHaveBeenCalled();
+  });
+  it.each([
+    [{ summary: "private-checkpoint", outcome: "SUCCESS" }, "OUTCOME_INVALID"],
+    [{ summary: "private-checkpoint", privateField: "private-value" }, "FIELDS_INVALID"],
+    [{ summary: "private-checkpoint".repeat(200) }, "SUMMARY_TOO_LONG"],
+    [{ summary: null }, "SUMMARY_REQUIRED"],
+  ])("returns a closed correction for malformed checkpoints and accepts the corrected checkpoint (%j)", async (argumentsValue, reason) => {
+    const out = await run({ actions: [
+      { tool: "discovery_checkpoint", arguments: argumentsValue },
+      { tool: "discovery_checkpoint", arguments: { summary: "corrected observation" } },
+    ] });
+    const first = JSON.stringify(out.replies[0]);
+    expect(first).toContain('DISCOVERY_CHECKPOINT_INVALID');
+    expect(first).toContain(reason);
+    expect(first).not.toMatch(/private-checkpoint|privateField|private-value/);
+    expect(JSON.parse((out.replies[1] as { result: { contentItems: { text: string }[] } }).result.contentItems[0].text)).toEqual({ saved: true });
+    expect(out.browserFactory).not.toHaveBeenCalled();
+    expect(out.client.candidate).not.toHaveBeenCalled();
+    expect(out.client.activate).not.toHaveBeenCalled();
+    expect(out.checkpoints.at(-1)).toMatchObject({ summary: "corrected observation" });
+  });
   const open: Action = { tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } };
   const checkpoint: Action = { tool: "discovery_checkpoint", arguments: { summary: "bounded synthetic observation" } };
   it("denies the failed inspection on retry while allowing a fresh public observation", async () => {

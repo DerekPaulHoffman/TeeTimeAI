@@ -1283,7 +1283,7 @@ export function discoveryBrowserFeedback(snapshot, action, error) {
 export function discoveryCheckpointDisposition(outcome, currentAccessRequirementObserved) {
   if (outcome === undefined) return "CONTINUE";
   if (outcome === "UNSUPPORTED") return "RETRYABLE_LIMITATION";
-  if (outcome !== "ACCESS_REQUIRED") throw discoveryError("DISCOVERY_CHECKPOINT_INVALID");
+  if (outcome !== "ACCESS_REQUIRED") throw discoveryError("DISCOVERY_CHECKPOINT_INVALID", { details: { checkpointReason: "OUTCOME_INVALID" } });
   if (currentAccessRequirementObserved !== true) throw discoveryError("DISCOVERY_ACCESS_NOT_CONFIRMED");
   return "TERMINAL_ACCESS";
 }
@@ -1881,7 +1881,8 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
       oldest.delete(oldest.values().next().value);
       payload = { ...provenance, summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
     }
-    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > checkpointBytes) throw discoveryError("DISCOVERY_CHECKPOINT_INVALID");
+    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > checkpointBytes)
+      throw discoveryError("DISCOVERY_CHECKPOINT_INVALID", { details: { checkpointReason: "PAYLOAD_TOO_LARGE" } });
     // Diagnostics cannot evict source authority or turn a previously valid
     // checkpoint into an oversized write. Final metrics retain the full trace.
     const traced = { ...payload, genericToolTrace: toolTrace.snapshot() };
@@ -2207,8 +2208,10 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             }
             }
           } else if (message.params.tool === "discovery_checkpoint") {
-            if (typeof input?.summary !== "string" || input.summary.length > 2000 ||
-                Object.keys(input).some(key => !["summary", "outcome"].includes(key))) throw discoveryError("DISCOVERY_CHECKPOINT_INVALID");
+            const checkpointReason = typeof input?.summary !== "string" ? "SUMMARY_REQUIRED" :
+              input.summary.length > 2000 ? "SUMMARY_TOO_LONG" :
+              Object.keys(input).some(key => !["summary", "outcome"].includes(key)) ? "FIELDS_INVALID" : undefined;
+            if (checkpointReason) throw discoveryError("DISCOVERY_CHECKPOINT_INVALID", { details: { checkpointReason } });
             const disposition = discoveryCheckpointDisposition(input.outcome, currentAccessRequirementObserved);
             checkpointSummary = input.summary;
             if (disposition === "RETRYABLE_LIMITATION") {
@@ -2298,6 +2301,14 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             }
           }
           const modelText = JSON.stringify(previewDiscoverySnapshot({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
+            ...(message.params.tool === "discovery_checkpoint" && error?.code === "DISCOVERY_CHECKPOINT_INVALID" && error?.details?.checkpointReason === "PAYLOAD_TOO_LARGE"
+              ? { checkpointReason: "PAYLOAD_TOO_LARGE", hint: "The controller checkpoint exceeds its existing byte budget. Preserve source evidence and report this tooling limitation; do not repeat unchanged checkpoints, discard proof or infer a venue limitation." } : {}),
+            // Return only closed schema corrections. Never echo the model's
+            // rejected checkpoint, extra field names or arbitrary error data.
+            ...(message.params.tool === "discovery_checkpoint" && error?.code === "DISCOVERY_CHECKPOINT_INVALID" &&
+                ["SUMMARY_REQUIRED", "SUMMARY_TOO_LONG", "FIELDS_INVALID", "OUTCOME_INVALID"].includes(error?.details?.checkpointReason)
+              ? { checkpointReason: error.details.checkpointReason,
+                hint: "Use only summary (a string of at most 2000 characters) and optional outcome. Omit outcome for progress; the only outcomes are UNSUPPORTED or ACCESS_REQUIRED. ACCESS_REQUIRED still requires a current observed access wall. This correction grants no browser read, terminal finding or extra attempt budget." } : {}),
             ...(feedback ? { details: feedback.details } : {}),
             ...(replayClosedBrowser ? { browserSessionClosed: true,
               hint: "Independent replay closed the discovery browser. Open an already observed public URL to obtain fresh controls before correcting the recipe; the original deadline is unchanged." } : {}),
