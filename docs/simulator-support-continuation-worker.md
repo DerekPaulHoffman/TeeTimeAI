@@ -8,9 +8,12 @@ For a Desktop wake that explicitly names a published simulator learning
 handoff, retain the registered repair SHA and fast-forward the original clean
 branch to the exact tested main. Verify First user Chrome, inspect the original
 assignment, and recover the same expired verification lease through the normal
-owner command. Run `automation:simulator-support -- recover-learning` with the
-current original assignment token and revision. It verifies the managed Sol
-runtime and queues one separate late read for this deployed repair. Preserve
+owner command. Check retained browser evidence first using the full-repair
+guide. Submit an established method with `recover-learning --recipe`. Without an
+established method, plain `recover-learning` is appropriate only when the
+registered release changes a reader or discovery behavior relevant to a recorded
+failure. An update to error reporting alone calls for using the improved evidence
+to continue diagnosis. The command verifies the managed Sol runtime. Preserve
 the original failed job and clock. The learner independently replays a method
 before handing it to the usual workflow. Admission does not prove replay,
 matching times or delivery. Keep the same owner and stop on any changed source,

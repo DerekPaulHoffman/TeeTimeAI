@@ -185,8 +185,10 @@ describe("original Desktop full-repair continuation", () => {
       ? releaseSha : git(cwd, args));
     const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
     expect(result).toMatchObject({ threadId: CHILD, model: "gpt-6.1-sol", messageRequired: true,
-      prompt: expect.stringContaining("recover-learning") });
+      prompt: expect.stringContaining("recover-learning --recipe for independent verification before considering generic discovery") });
     expect(result.prompt).toContain("First user Chrome");
+    expect(result.prompt).toContain("source-read settlement receipt rules");
+    expect(result.prompt).toContain("A reporting-only repair does not qualify an unchanged learner");
     expect(result.receiptPath).toContain("desktop-simulator-learning-");
     expect(f.deps.git).toHaveBeenCalledWith(f.selected, ["merge-base", "--is-ancestor", releaseSha, CURRENT]);
     expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
@@ -213,7 +215,9 @@ describe("original Desktop full-repair continuation", () => {
     expect(follow).toMatchObject({ threadId: CHILD, messageRequired: true,
       prompt: expect.stringContaining("A linked late learner just failed") });
     expect(follow.prompt).toContain(jobId);
-    expect(follow.prompt).not.toContain("use the simulator-support recover-learning command");
+    expect(follow.prompt).toContain("recover-learning --recipe for independent verification before considering generic discovery");
+    expect(follow.prompt).toContain("This wake grants no provider reads");
+    expect(follow.prompt).not.toContain("use recover-learning without a recipe");
     expect(await prepareOwnedDesktopContinuation({ context: f.context, item: followthrough }, f.deps))
       .toMatchObject({ outcome: "already_requested", messageRequired: false });
 
