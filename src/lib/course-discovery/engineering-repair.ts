@@ -227,7 +227,7 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
   return { ...inspection, ...(guardCode ? {
     category: guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? "BROWSER_TRANSPORT_REJECTED" : "READER_OR_RUNTIME_FAILURE",
     code: guardCode, failureCode: guardCode, phase: "GENERIC_FALLBACK",
-    genericFallbackDiagnostic: projectGenericFailureDiagnostic(guard, checkpoint.genericToolTrace),
+    genericFallbackDiagnostic: projectGenericFailureDiagnostic(guard, checkpoint.genericToolTrace, checkpoint.controller),
     delegationDiagnostic: undefined, bookingEdgeEvidence: undefined, physicalBindingEvidence: undefined, priorInspection: inspection,
     ...(guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? {
       nativeTransportDiagnostic: { failureCode: nativeFailureCode, ...nativeFacts },

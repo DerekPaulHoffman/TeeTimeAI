@@ -347,6 +347,31 @@ describe("private failure evidence", () => {
       tokenUsage: { totalTokens: 1234 }, limits: { toolOperations: 16 }, traceRetention: "PRESENT",
       toolTrace: checkpoint.genericToolTrace, evidenceAuthority: false } });
   });
+  it("keeps the historical failed control predicate apart from later passive feedback", () => {
+    const checkpoint = { genericGuard: { code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" }, controller: {
+      lastFailure: { code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action: "click", failure: { code: "STALE_OR_UNKNOWN_CONTROL", url: "PRIVATE_CANARY" },
+        staleControlReason: "CONTROL_SIGNATURE_CHANGED", loading: false, pendingRequestCount: 0, selector: "PRIVATE_CANARY" } },
+      lastFeedback: { code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action: "observe", loading: true, pendingRequestCount: 2 } },
+    } };
+    const value = sanitizeResponderValue(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint }));
+    expect(value).toMatchObject({ genericFallbackDiagnostic: { historicalFailure: { action: "click", failureCode: "STALE_OR_UNKNOWN_CONTROL",
+      staleControlReason: "CONTROL_SIGNATURE_CHANGED", loading: false, pendingRequestCount: 0 },
+      lastFeedback: { action: "observe", loading: true, pendingRequestCount: 2 }, evidenceAuthority: false } });
+    expect(JSON.stringify(value)).not.toContain("PRIVATE_CANARY");
+  });
+  it.each([null, [], { code: "PRIVATE_CANARY", details: { staleControlReason: "CONTROL_DISABLED" } },
+    { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { staleControlReason: "CONTROL_DISABLED" } }])("rejects unrelated feedback %j", value => {
+    const result = projectGenericFailureDiagnostic({ code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" }, undefined,
+      { lastFailure: value, lastFeedback: value });
+    expect(result).not.toHaveProperty("historicalFailure"); expect(result).not.toHaveProperty("lastFeedback");
+  });
+  it("strips arbitrary failure/control values and malformed counts from browser feedback", () => {
+    const result = projectGenericFailureDiagnostic({ code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" }, undefined,
+      { lastFailure: { code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action: "PRIVATE_CANARY", failure: { code: "PRIVATE_CANARY" },
+        staleControlReason: "PRIVATE_CANARY", loading: "PRIVATE_CANARY", pendingRequestCount: -1, url: "PRIVATE_CANARY" } } });
+    expect(result?.historicalFailure).toEqual({ feedbackKind: "DISCOVERY_BROWSER_INCOMPLETE" });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_CANARY");
+  });
   it("projects the actual persisted worker trace under the production tsx loader without tool arguments", () => {
     const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=commonjs", "-e", `
       const {createDiscoveryToolTrace}=require('./scripts/automation/course-discovery-worker.mjs');
@@ -354,11 +379,12 @@ describe("private failure evidence", () => {
       const trace=createDiscoveryToolTrace();
       trace.record('discovery_browser',{action:'inspect_adapter',url:'PRIVATE_CANARY'},'ERROR','UNSUPPORTED_ADAPTER_SOURCE','PRIVATE_CANARY');
       console.log(JSON.stringify(projectGenericFailureDiagnostic({code:'DISCOVERY_GENERIC_BUDGET_EXHAUSTED',limit:'outputTokens',
-        toolOperations:1,tokenUsage:{outputTokens:8192},limits:{outputTokens:8192}},trace.snapshot())));
+        toolOperations:1,tokenUsage:{outputTokens:8192},limits:{outputTokens:8192}},trace.snapshot(),{
+          lastFailure:{code:'DISCOVERY_BROWSER_INCOMPLETE',details:{action:'click',staleControlReason:'CONTROL_SIGNATURE_CHANGED',url:'PRIVATE_CANARY'}}})));
     `], { encoding: "utf8", windowsHide: true });
     expect(JSON.parse(output)).toMatchObject({ limit: "outputTokens", toolOperations: 1,
       tokenUsage: { outputTokens: 8192 }, toolTrace: { entries: [{ action: "BROWSER_INSPECT_ADAPTER", status: "ERROR",
-        errorCode: "UNSUPPORTED_ADAPTER_SOURCE" }], lostEntries: 0 }, evidenceAuthority: false });
+        errorCode: "UNSUPPORTED_ADAPTER_SOURCE" }], lostEntries: 0 }, historicalFailure: { action: "click", staleControlReason: "CONTROL_SIGNATURE_CHANGED" }, evidenceAuthority: false });
     expect(output).not.toContain("PRIVATE_CANARY");
   });
   it("caps traces and strips unknown codes, counts and private fields", () => {

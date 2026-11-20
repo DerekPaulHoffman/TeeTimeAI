@@ -17,15 +17,32 @@ function counts(value: unknown, keys: readonly string[]) {
   return Object.fromEntries(keys.filter(key => count(input[key])).map(key => [key, input[key] as number]));
 }
 type Entry = { action: string; status: string; modelPreviewBytes: number; previewOmitted: boolean; errorCode?: string; schemaEngine?: string };
+const staleReasons = new Set(["ELEMENT_NOT_OBSERVED", "TARGET_OR_DOCUMENT_CHANGED", "NATIVE_DOCUMENT_CHANGED", "CONTROL_NOT_RENDERED",
+  "CONTROL_DISABLED", "CONTROL_SIGNATURE_CHANGED", "PUBLIC_DATE_CHOICE_CHANGED", "ENTRY_DISCLOSURE_CHANGED", "PUBLIC_ENTRY_SOURCE_UNVERIFIED",
+  "PUBLIC_ENTRY_CONTROL_CHANGED", "GESTURE_CONTROL_MISSING", "GESTURE_CONTROL_AMBIGUOUS", "GESTURE_NATIVE_SOURCE_CHANGED",
+  "GESTURE_LABEL_INVALID", "GESTURE_BOOKING_INTENT_MISSING", "GESTURE_INTENT_MISSING"]);
+function feedback(value: unknown) {
+  const input = record(value), details = record(input.details), failure = record(details.failure);
+  if (input.code !== "DISCOVERY_BROWSER_INCOMPLETE") return;
+  return { feedbackKind: "DISCOVERY_BROWSER_INCOMPLETE" as const,
+    ...(typeof details.action === "string" && actions.has(`BROWSER_${details.action.toUpperCase()}`) && details.action === details.action.toLowerCase()
+      ? { action: details.action } : {}),
+    ...(typeof failure.code === "string" && errors.has(failure.code) ? { failureCode: failure.code } : {}),
+    ...(typeof details.staleControlReason === "string" && staleReasons.has(details.staleControlReason) ? { staleControlReason: details.staleControlReason } : {}),
+    ...(typeof details.loading === "boolean" ? { loading: details.loading } : {}),
+    ...(count(details.pendingRequestCount, 1024) ? { pendingRequestCount: details.pendingRequestCount } : {}),
+  };
+}
 
 /** Closed structural projection of already-persisted facts. Never retain page
  * contents, tool arguments, selectors, URLs or free-form errors. No authority. */
-export function projectGenericFailureDiagnostic(guardValue: unknown, traceValue: unknown) {
+export function projectGenericFailureDiagnostic(guardValue: unknown, traceValue: unknown, controllerValue?: unknown) {
   const guard = record(guardValue);
   if (guard.code !== "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" && guard.code !== "DISCOVERY_NATIVE_TRANSPORT_FATAL") return;
   const trace = record(traceValue), entries: Entry[] = [];
   let lostEntries = count(trace.lostEntries, 999_999) ? trace.lostEntries : 0;
   const validTrace = Array.isArray(trace.entries) && trace.entries.length <= 1024 && count(trace.lostEntries, 999_999);
+  const controller = record(controllerValue), historicalFailure = feedback(controller.lastFailure), lastFeedback = feedback(controller.lastFeedback);
   if (validTrace) for (const value of trace.entries as unknown[]) {
     const entry = record(value);
     if (entries.length >= 8 || !["SUCCESS", "ERROR", "NO_REPLY"].includes(String(entry.status)) ||
@@ -44,5 +61,6 @@ export function projectGenericFailureDiagnostic(guardValue: unknown, traceValue:
     tokenUsage: counts(guard.tokenUsage, tokenKeys), limits: counts(guard.limits, budgetKeys),
     traceRetention: traceValue === undefined ? "NOT_RETAINED" as const : validTrace ? "PRESENT" as const : "INVALID" as const,
     ...(validTrace ? { toolTrace: { entries, lostEntries } } : {}), evidenceAuthority: false as const,
+    ...(historicalFailure ? { historicalFailure } : {}), ...(lastFeedback ? { lastFeedback } : {}),
   };
 }
