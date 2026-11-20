@@ -34,6 +34,7 @@ import {
   courseSupportAssignedCandidateConflicts,
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
   runWithCourseSupportWriterTransitionLease,
+  isRetryableCourseSupportWriteConflict,
   withCourseSupportWriteConflictRetry,
   readCourseSupportRemediationDirective,
   readCourseSupportRemediationClaimAttempt,
@@ -1065,7 +1066,12 @@ async function collectCourseSupportContinuationCandidates(input: {
             } } : {}),
           },
         } : {}) });
-    } catch { attentionCount += 1; }
+    } catch (error) {
+      // PostgreSQL has aborted this transaction. Let the existing bounded
+      // transaction retry see the conflict before issuing another query.
+      if (isRetryableCourseSupportWriteConflict(error)) throw error;
+      attentionCount += 1;
+    }
   }
   return { continuationItems, attentionCount };
 }

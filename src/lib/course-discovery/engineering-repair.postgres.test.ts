@@ -779,7 +779,12 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await client.$transaction(tx => hasSimulatorSupportImplementationOwnership(tx))).toBe(false);
     const parent = `resume-parent-${randomUUID()}`;
     batchOwners.push(parent);
+    const ownership = await import("@/lib/automation/simulator-support-ownership");
+    const inspect = vi.spyOn(ownership, "readSimulatorSupportContinuationContext");
+    if (failed) inspect.mockRejectedValueOnce(Object.assign(new Error("could not serialize access"), { code: "40001" }));
     const plan = await planCourseSupportCourseDispatch({ ownerThreadId: parent, baseSha: "c".repeat(40), maxStarts: 1 });
+    expect(inspect).toHaveBeenCalledTimes(failed ? 2 : 1);
+    inspect.mockRestore();
     expect(plan).toMatchObject({ acquired: true, value: { launchItems: [], continuationItems: [{
       threadId: f.child, assignmentRef: f.assignmentRef, simulatorOwnedRecovery: mode,
       checkpoint: { claimLeaseExpired: true, providerReadInFlight: false, readCount: 1, requestId: failed ? requestId : null,
