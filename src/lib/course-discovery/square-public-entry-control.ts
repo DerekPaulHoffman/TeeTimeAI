@@ -63,8 +63,13 @@ export function inspectSquarePublicCatalogLinkElement(element: Element): { selec
   const labels = host.querySelectorAll('label[slot="label"]'), anchors = root.querySelectorAll("a[href]");
   if (labels.length !== 1 || !check.visible(labels[0]) || anchors.length !== 1 || anchors[0] !== element) return;
   const name = ((labels[0] as HTMLElement).innerText ?? "").replace(/\s+/gu, " ").trim();
-  if (!name || name.length > 160 || !/\b(?:golf\s+simulator|simulator\s+(?:rental|bay|room|time)|(?:golf|bay|room)\s+rental)\b/iu.test(name) ||
-      /\b(?:lesson|coaching|fitting|league|event|member|private|package|pass|sponsorship)\b|\b\d{1,2}:\d{2}|\b\d{1,2}\s*(?:am|pm)\b|\b\d{4}-\d{2}-\d{2}\b/iu.test(name)) return;
+  // Navigation only: the same explicit practice/play label accepted by the
+  // detail reader must be reachable from its real catalog shadow anchor.
+  // Detail price/duration, selection and full dated inventory still need proof.
+  const practice = /^[1-8] hours? practice\/play(?: after ([1-9]|1[0-2])(am|pm) and weekends)?$/iu.test(name);
+  if (!name || name.length > 160 ||
+      (!practice && (!/\b(?:golf\s+simulator|simulator\s+(?:rental|bay|room|time)|(?:golf|bay|room)\s+rental)\b/iu.test(name) || /\b\d{1,2}\s*(?:am|pm)\b/iu.test(name))) ||
+      /\b(?:lesson|coaching|fitting|league|event|member|private|package|pass|sponsorship)\b|\b\d{1,2}:\d{2}|\b\d{4}-\d{2}-\d{2}\b/iu.test(name)) return;
   const raw = host.getAttribute("href") ?? "", target = new URL(element.href);
   if (element.getAttribute("href") !== raw || target.origin !== current.origin || target.search || target.hash ||
       !new RegExp(`^${current.pathname}/[A-Z0-9]{16,32}$`, "u").test(target.pathname) ||

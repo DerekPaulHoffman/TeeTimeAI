@@ -2,7 +2,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:https";
 import { connect, type AddressInfo } from "node:net";
-import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createCourseDiscoveryBrowserSession } from "./browser-session";
 import { launchPublicReadBrowser } from "./public-browser-launch";
@@ -16,12 +15,15 @@ const source = catalog + "?color=054032&buttonTextColor=ffffff&locale=en&referre
 const variant = catalog + "/M7X4A9B2C6D8E3F5G1H0J2K4";
 
 describe.runIf(existsSync(executablePath))("native public Square catalog links", () => {
-  it.each(["valid", "tsx", "spa-open", "spa-click", "hidden", "foreign", "dated", "form", "lesson", "duplicate", "unsafe-path", "query", "disabled"])("opens only a visible undated public rental variant: %s", async mode => {
+  it.each(["valid", "tsx", "practice-tsx", "practice-restricted", "practice-member", "practice-lesson", "practice-ambiguous", "practice-zero", "practice-too-long", "practice-dated", "spa-open", "spa-click", "hidden", "foreign", "dated", "form", "lesson", "duplicate", "unsafe-path", "query", "disabled"])("opens only a visible undated public rental variant: %s", async mode => {
     const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
     const tls = (name: string) => JSON.parse(new RegExp(`^const ${name} = (".*");$`, "m").exec(material)![1]) as string;
     const href = mode === "foreign" ? variant.replace("book.squareup.com", "foreign.example") : variant + (mode === "unsafe-path" ? "/checkout" : mode === "query" ? "?slot_id=selected" : "");
     const raw = new URL(href).origin === new URL(catalog).origin ? new URL(href).pathname + new URL(href).search : href;
-    const name = mode === "dated" ? "Golf Simulator Rental 9:00 AM" : mode === "lesson" ? "Golf Simulator Lesson" : "Golf Simulator Rental";
+    const practiceLabels: Record<string, string> = { "practice-tsx": "1 hour practice/play", "practice-restricted": "2 hours practice/play after 5pm and weekends",
+      "practice-member": "Member 1 hour practice/play", "practice-lesson": "1 hour practice/play lesson", "practice-ambiguous": "Practice/play",
+      "practice-zero": "0 hours practice/play", "practice-too-long": "9 hours practice/play", "practice-dated": "1 hour practice/play 2030-01-01" };
+    const name = practiceLabels[mode] ?? (mode === "dated" ? "Golf Simulator Rental 9:00 AM" : mode === "lesson" ? "Golf Simulator Lesson" : "Golf Simulator Rental");
     const card = `<market-row class="service-row" interactive transient href="${raw}" ${mode === "hidden" ? 'hidden' : ""} ${mode === "disabled" ? "disabled" : ""}><label slot="label">${name}</label><div slot="subtext">${"Public rental description. ".repeat(40)} Price varies ・ 55 min+</div></market-row>`;
     const section = `<section aria-label="Main content"><h2>Services</h2>${card}${mode === "duplicate" ? card : ""}</section>`;
     const spa = mode.startsWith("spa-") ? `this.shadowRoot.querySelector('a').addEventListener('click',e=>{e.preventDefault();history.pushState({},'',this.getAttribute('href'));document.body.innerHTML='<h1>Public rental options</h1>'})` : "";
@@ -34,8 +36,8 @@ describe.runIf(existsSync(executablePath))("native public Square catalog links",
     let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
     let proxy: ReturnType<typeof vi.spyOn> | undefined, runtime: ReturnType<typeof vi.spyOn> | undefined;
     try {
-      if (mode === "tsx") {
-        const serialized = execFileSync(process.execPath, [resolve("node_modules/tsx/dist/cli.mjs"), "-e", 'import {inspectSquarePublicCatalogLinkElement as f} from "./src/lib/course-discovery/square-public-entry-control.ts"; process.stdout.write(f.toString())'], { cwd: process.cwd(), encoding: "utf8", timeout: 15_000, windowsHide: true });
+      if (mode === "tsx" || mode === "practice-tsx") {
+        const serialized = execFileSync(process.execPath, ["--import", "tsx", "--input-type=commonjs", "-e", 'const {inspectSquarePublicCatalogLinkElement:f}=require("./src/lib/course-discovery/square-public-entry-control.ts"); process.stdout.write(f.toString())'], { cwd: process.cwd(), encoding: "utf8", timeout: 15_000, windowsHide: true });
         runtime = vi.spyOn(controls, "inspectSquarePublicCatalogLinkElement").mockImplementation(new Function(`return (${serialized})`)());
         Object.defineProperty(runtime, "toString", { value: () => serialized });
       }
@@ -49,9 +51,9 @@ describe.runIf(existsSync(executablePath))("native public Square catalog links",
         launchBrowser: () => launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
       });
       const initial = await session.execute({ id: 1, action: "open", url: source });
-      const rental = initial.controls.find(control => control.name === "Golf Simulator Rental");
-      if (mode === "valid" || mode === "tsx" || mode.startsWith("spa-")) {
-        expect(rental).toMatchObject({ kind: "link", name: "Golf Simulator Rental", href: variant });
+      const rental = initial.controls.find(control => control.name === name);
+      if (mode === "valid" || mode === "tsx" || ["practice-tsx", "practice-restricted"].includes(mode) || mode.startsWith("spa-")) {
+        expect(rental).toMatchObject({ kind: "link", name, href: variant });
         expect(rental!.selector).toContain("market-row:nth-of-type(");
         expect(initial.controls.filter(control => control.href === variant)).toHaveLength(1);
         const result = await session.execute(mode === "spa-click" ? { id: 2, action: "click", target: rental!.target } : { id: 2, action: "open", url: rental!.href! });
