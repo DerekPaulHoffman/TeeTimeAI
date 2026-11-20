@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import type { CourseDiscoveryJob, Prisma } from "@prisma/client";
 import { hasReciprocalLearningRepairLink, readLearningExecutionRuntime, readLearningRepairRecoveryOf } from "@/lib/course-discovery/learning-repair-recovery";
 
-export type FailedLearningProgress = { version: 1; jobId: string; completedAt: string; fingerprint: string };
+export type FailedLearningProgress = { version: 1; jobId: string; completedAt: string; fingerprint: string;
+  simulatorExecutionRuntime?: string; simulatorRequestedAt?: string };
 type Job = Pick<CourseDiscoveryJob, "id" | "courseId" | "offeringId" | "targetKey" | "baseRecipeId" | "sourceFingerprint" |
   "status" | "outcome" | "attempts" | "firstPickedUpAt" | "deadlineAt" | "completedAt" | "request" | "result">;
 type Expected = {
@@ -48,6 +49,7 @@ export function projectOwnedFailedLearningProgress(child: Job, parent: Job, expe
     !expected.searchRefs.some(ref => ref.id === demand?.searchId && ref.alertGeneration === demand.alertGeneration)) return null;
   const completedAt = child.completedAt!.toISOString();
   return { version: 1, jobId: child.id, completedAt,
+    ...(offeringId ? { simulatorExecutionRuntime: link.runtimeVersion, simulatorRequestedAt: link.requestedAt } : {}),
     fingerprint: createHash("sha256").update([child.id, completedAt, expected.batchReference, expected.releaseSha].join("\0")).digest("hex") };
 }
 

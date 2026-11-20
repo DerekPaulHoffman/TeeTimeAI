@@ -791,7 +791,8 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       const next = await planCourseSupportCourseDispatch({ ownerThreadId: scheduler, baseSha: runtimeVersion, maxStarts: 1 });
       expect(next).toMatchObject({ acquired: true, value: { continuationItems: [{
         assignmentRef: f.assignmentRef, threadId: f.child, releaseSha: registeredRelease, simulatorLearningRecovery: true,
-        failedLearningProgress: { jobId: pickedUp!.id, fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+        failedLearningProgress: { jobId: pickedUp!.id, fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          simulatorExecutionRuntime: runtimeVersion, simulatorRequestedAt: expect.any(String) },
       }], launchItems: [] } });
       expect(await client.courseDiscoveryJob.count({ where: { offeringId: f.offering!.id } })).toBe(2);
       expect(await client.courseDiscoveryJob.findUnique({ where: { id: f.job.id } })).toMatchObject({

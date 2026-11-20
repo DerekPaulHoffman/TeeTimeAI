@@ -179,6 +179,7 @@ describe("original Desktop full-repair continuation", () => {
       completedAt: 1893456180,
     }] }) : request(method));
     const followthrough = { ...item, claimRevision: 9, failedLearningProgress: { version: 1, jobId, completedAt,
+      simulatorExecutionRuntime: CURRENT, simulatorRequestedAt: "2030-01-01T00:01:00.000Z",
       fingerprint: createHash("sha256").update([jobId, completedAt, REF, releaseSha].join("\0")).digest("hex") } };
     const follow = await prepareOwnedDesktopContinuation({ context: f.context, item: followthrough }, f.deps);
     expect(follow).toMatchObject({ threadId: CHILD, messageRequired: true,
@@ -187,6 +188,33 @@ describe("original Desktop full-repair continuation", () => {
     expect(follow.prompt).not.toContain("use the simulator-support recover-learning command");
     expect(await prepareOwnedDesktopContinuation({ context: f.context, item: followthrough }, f.deps))
       .toMatchObject({ outcome: "already_requested", messageRequired: false });
+
+    // A worker can publish another repair and admit its own late read within
+    // the same turn. There was no fresh scheduler send for that release.
+    f.deps.git.mockImplementation((cwd, args) => args[0] === "rev-parse" && !args[1].startsWith("--")
+      ? nextRuntime : git(cwd, args));
+    const nextRepair = { ...followthrough, releaseSha: nextRuntime, checkpoint: { ...followthrough.checkpoint,
+      ownedStage: { ...followthrough.checkpoint.ownedStage, releaseSha: nextRuntime, deployment: { commitSha: nextRuntime } } },
+      failedLearningProgress: { ...followthrough.failedLearningProgress,
+        jobId: "failed-owner-admitted-simulator", simulatorExecutionRuntime: nextRuntime,
+        fingerprint: createHash("sha256").update(["failed-owner-admitted-simulator", completedAt, REF, nextRuntime].join("\0")).digest("hex"),
+      } };
+    const currentNative = f.client.request.getMockImplementation()!;
+    f.client.request.mockImplementation(async method => {
+      const result = await currentNative(method);
+      if ("data" in result && result.data) result.data[0].completedAt = 1893456060;
+      return result;
+    });
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: nextRepair }, f.deps))
+      .toMatchObject({ outcome: "original_admission_turn_not_observed", messageRequired: false });
+    f.client.request.mockImplementation(currentNative);
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: nextRepair }, f.deps))
+      .toMatchObject({ threadId: CHILD, messageRequired: true, prompt: expect.stringContaining("failed-owner-admitted-simulator") });
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: nextRepair }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    await expect(prepareOwnedDesktopContinuation({ context: f.context, item: { ...nextRepair, failedLearningProgress: {
+      ...nextRepair.failedLearningProgress, simulatorExecutionRuntime: releaseSha,
+    } } }, f.deps)).rejects.toThrow("ORIGINAL_CONTINUATION_PROVENANCE_REQUIRED");
     expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
   });
 

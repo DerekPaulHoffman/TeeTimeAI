@@ -41,11 +41,16 @@ export function readDesktopContinuationProduction({ selected, nodePath, currentS
 function readFailedLearningProgress(item, now, simulatorLearning) {
   const progress = item.failedLearningProgress;
   if (progress === undefined) return null;
+  const fields = simulatorLearning ? "completedAt,fingerprint,jobId,simulatorExecutionRuntime,simulatorRequestedAt,version"
+    : "completedAt,fingerprint,jobId,version";
   if (!progress || typeof progress !== "object" || Array.isArray(progress) ||
-      Object.keys(progress).sort().join(",") !== "completedAt,fingerprint,jobId,version" || progress.version !== 1 ||
+      Object.keys(progress).sort().join(",") !== fields || progress.version !== 1 ||
       !/^[A-Za-z0-9_-]{1,128}$/u.test(progress.jobId ?? "") || typeof progress.completedAt !== "string" ||
       !Number.isFinite(Date.parse(progress.completedAt)) || new Date(progress.completedAt).toISOString() !== progress.completedAt ||
       Date.parse(progress.completedAt) > now ||
+      (simulatorLearning && (!SHA.test(progress.simulatorExecutionRuntime ?? "") ||
+        !Number.isFinite(Date.parse(progress.simulatorRequestedAt ?? "")) ||
+        Date.parse(progress.simulatorRequestedAt) > Date.parse(progress.completedAt))) ||
       (!simulatorLearning && (item.continuationMode !== "PUBLISHED_IMPLEMENTATION" ||
         item.continuationTrigger !== "UNFINISHED_FULL_REPAIR")) ||
       progress.fingerprint !== createHash("sha256").update([progress.jobId, progress.completedAt,
@@ -126,6 +131,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (execute(worker, ["branch", "--show-current"]) !== launcher.branch || execute(worker, ["status", "--porcelain"])) fail("ORIGINAL_WORKER_CHANGED");
   const workerHead = execute(worker, ["rev-parse", "HEAD"]);
   const progress = readFailedLearningProgress(item, now, simulatorLearning);
+  const originalSimulatorAdmittedHere = simulatorLearning && progress?.simulatorExecutionRuntime === workerHead;
   const primaryMarker = join(selected, ".codex-artifacts", simulatorLearning
     ? `desktop-simulator-learning-${item.assignmentRef}-${item.releaseSha}.private.json`
     : simulator
@@ -134,7 +140,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     ? `desktop-repair-${expiredDemandRecoveryOnly ? "expired-demand" : "registered"}-${item.assignmentRef}-${item.releaseSha}.private.json`
     : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
   if (simulator && workerHead !== (simulatorLearning ? item.releaseSha : item.baseSha)) {
-    if (!simulatorLearning || !progress || !existsSync(primaryMarker)) fail("ORIGINAL_SIMULATOR_WAIT_CHECKOUT_CHANGED");
+    if (!originalSimulatorAdmittedHere) fail("ORIGINAL_SIMULATOR_WAIT_CHECKOUT_CHANGED");
     execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, workerHead]);
   }
   if (simulatorLearning) execute(selected, ["merge-base", "--is-ancestor", item.baseSha, item.releaseSha]);
@@ -196,7 +202,14 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (!same(common, parentCommon) || same(common, realpathSync(execute(worker, ["rev-parse", "--absolute-git-dir"])))) fail("ORIGINAL_LINKED_WORKER_REQUIRED");
   if (!localCandidate) execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
   let marker = primaryMarker, prior = null;
-  if (simulatorLearning && progress && !existsSync(primaryMarker)) fail("ORIGINAL_CONTINUATION_PROVENANCE_REQUIRED");
+  if (simulatorLearning && progress && !existsSync(primaryMarker)) {
+    // A still-active original worker can publish another repair and admit its
+    // own learner without a scheduler message for that release. The planner
+    // supplies the real reciprocal admission, not an invented send marker.
+    if (!originalSimulatorAdmittedHere) fail("ORIGINAL_CONTINUATION_PROVENANCE_REQUIRED");
+    marker = join(selected, ".codex-artifacts", `desktop-repair-followthrough-${item.assignmentRef}-${progress.fingerprint}.private.json`);
+    if (existsSync(marker)) return { outcome: "already_requested", messageRequired: false };
+  }
   if (existsSync(primaryMarker)) {
     if (!progress) return { outcome: "already_requested", messageRequired: false };
     prior = readJson(primaryMarker);
@@ -247,6 +260,8 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     if (!Array.isArray(turns.data) || turns.data.length !== 1 || !UUID.test(turn?.id ?? "") || turn.status !== "completed" || turn.error !== null ||
         turn.itemsView !== "notLoaded" || !Array.isArray(turn.items) || turn.items.length !== 0 || !Number.isSafeInteger(turn.completedAt) || turn.completedAt <= 0) fail("ORIGINAL_TERMINAL_TURN_REQUIRED");
     if (prior && turn.id === prior.priorTurnId) return { outcome: "prior_continuation_not_observed", messageRequired: false };
+    if (simulatorLearning && progress && !prior && (turn.completedAt + 1) * 1000 < Date.parse(progress.completedAt))
+      return { outcome: "original_admission_turn_not_observed", messageRequired: false };
     if (execute(selected, ["rev-parse", "HEAD"]) !== currentSha || execute(worker, ["rev-parse", "HEAD"]) !== workerHead) fail("CONTINUATION_RUNTIME_CHANGED");
     const guide = join(selected, "docs", simulator ? "simulator-support-continuation-worker.md" : "course-support-full-repair-continuation.md");
     const guideBytes = readFileSync(guide);
@@ -283,6 +298,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       ...(localCandidate ? { localCandidate } : {}),
       observedFailureFingerprint: progress?.fingerprint ?? null,
       ...(prior ? { parentReceiptPath: primaryMarker, failedLearningProgress: progress } : {}),
+      ...(simulatorLearning && progress && !prior ? { failedLearningProgress: progress } : {}),
       unchangedRuntime, preparedAt: new Date(now).toISOString(), monitoringVerified: false }, true);
     return { outcome: "desktop_continuation_message_required", messageRequired: true, threadId: item.threadId,
       hostId: "local", model: "gpt-6.1-sol", thinking: "high",
