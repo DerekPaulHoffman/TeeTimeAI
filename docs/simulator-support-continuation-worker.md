@@ -2,6 +2,19 @@ You are continuing your existing simulator assignment, not starting another task
 
 If the server-issued claim contains `fullRepair`, read `docs/simulator-support-full-repair.md` and keep that full mission. A `CLAIMED` full-repair investigation can continue under the same original-owner gates without claiming a code path; implementation still requires the normal exclusive path grant. Preserve the spent native research allowance and failed routes. A `repair_required` response retains the mission and does not authorize another public request or an unchanged retry.
 
+The Desktop `RESEARCH` continuation restores the same expired full-repair
+investigation. Keep its captures and spent budget. Follow a fresh guide only
+for an already authorized, untried public observation with no access denial
+or uncertain operation effects. The `SETTLED_READ_FAILURE` continuation of a
+deployed repair allows offline diagnosis of that saved failure. It grants no
+provider request, alternate route, or learner admission.
+
+A recorded deployment releases the shared implementation slot while the
+original worker retains its course, committed release, and verification work.
+Claim an implementation path again before editing or registering a follow-up
+code release. Source changes requiring a new deployment must still obtain
+capacity through the normal owner-bound operation.
+
 `WAITING_IMPLEMENTATION` retains one requested repair path after bounded capacity waiting. It grants no path, code edit, provider read, configuration, disposition or retry. The normal controller resumes only the original terminal native owner after its lease expires and implementation capacity is available. Preserve the original branch and clean checkout; when there is no registered release or local code, fetch and fast-forward that same branch to the reviewed published main before preparing current tooling. Validate the original assignment/source/token/revision, recover under the existing lease gate, and request exactly `pendingImplementation.path` through the normal `path` command. Only an actual `IMPLEMENTING` response grants the path. A new busy result keeps the same durable intent; stop the native turn on `stopWorker=true`. Do not call retry or perform extra source research to clear capacity, and never restart the learner clock.
 
 For a Desktop wake that explicitly names a published simulator learning

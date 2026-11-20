@@ -22,6 +22,7 @@ import { evaluateMonitoringGate, isCoherentManualDisposition } from "@/lib/autom
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 import { isGenericCourseName } from "@/lib/places/course-identity";
+import { simulatorSupportReservesImplementation } from "./simulator-support-policy";
 import {
   COURSE_DISPATCH_SOURCE_SELECT,
   isCurrentCourseDispatchSource,
@@ -4396,7 +4397,7 @@ export async function claimCourseSupportBatch(input: {
       };
     }
     const sharedCheckoutImplementationReserved = liveReservations.some(entry =>
-      entry.audit.target.mode === "SIMULATOR" && (entry.audit.simulatorClaim?.plannedPaths.length ?? 0) > 0) || activeBatches.some((batch) =>
+      entry.audit.target.mode === "SIMULATOR" && simulatorSupportReservesImplementation(entry.audit.simulatorClaim)) || activeBatches.some((batch) =>
       courseSupportBatchReservesCheckout(batch),
     );
     if (plannedPaths.length > 0 && sharedCheckoutImplementationReserved) {
@@ -5606,7 +5607,7 @@ export async function claimCourseSupportBatch(input: {
           ),
         );
         const currentSharedCheckoutImplementationReserved = lockedReservations.some(entry =>
-          entry.audit.target.mode === "SIMULATOR" && (entry.audit.simulatorClaim?.plannedPaths.length ?? 0) > 0) ||
+          entry.audit.target.mode === "SIMULATOR" && simulatorSupportReservesImplementation(entry.audit.simulatorClaim)) ||
           currentActiveBatches.some((batch) =>
             courseSupportBatchReservesCheckout(batch),
           );

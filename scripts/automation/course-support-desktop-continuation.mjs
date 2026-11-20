@@ -83,21 +83,33 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const simulator = item?.mode === "SIMULATOR";
   const simulatorLearning = simulator && item.simulatorLearningRecovery === true;
   const simulatorRelease = simulator && item.simulatorRegisteredRelease === true;
+  const simulatorResearch = simulator && item.simulatorOwnedRecovery === "RESEARCH";
+  const simulatorReadFailure = simulator && item.simulatorOwnedRecovery === "SETTLED_READ_FAILURE";
+  const simulatorPublished = simulatorLearning || simulatorReadFailure;
+  const recoveredSimulatorStage = simulatorResearch || simulatorReadFailure;
   const simulatorStage = item?.checkpoint?.ownedStage;
   if (simulator && (item.checkpoint?.kind !== "EXPIRED_OWNED_STAGE" ||
-      simulatorLearning && simulatorRelease ||
-      simulatorStage?.phase !== (simulatorLearning || simulatorRelease ? "VERIFYING" : "WAITING_IMPLEMENTATION") ||
+      Number(simulatorLearning) + Number(simulatorRelease) + Number(recoveredSimulatorStage) > 1 ||
+      (item.simulatorOwnedRecovery !== undefined && !recoveredSimulatorStage) ||
+      simulatorStage?.phase !== (simulatorPublished || simulatorRelease ? "VERIFYING" : simulatorResearch ? "CLAIMED" : "WAITING_IMPLEMENTATION") ||
       item.checkpoint.claimLeaseExpired !== true || item.checkpoint.providerReadInFlight !== false ||
       item.checkpoint.ownedStage.sourceFingerprint !== item.sourceFingerprint ||
       item.checkpoint.ownedStage.branch !== item.branch ||
       !Number.isSafeInteger(item.claimRevision) || item.claimRevision < 1 ||
       !UUID.test(item.claimToken ?? "") || !/^[a-f0-9]{64}$/u.test(item.sourceFingerprint ?? "") ||
-      (simulatorLearning || simulatorRelease ? !validPaths(item.plannedPaths) || !SHA.test(item.releaseSha ?? "") || item.releaseSha === item.baseSha ||
+      (simulatorPublished || simulatorRelease ? !validPaths(item.plannedPaths) || !SHA.test(item.releaseSha ?? "") || item.releaseSha === item.baseSha ||
         simulatorStage.releaseSha !== item.releaseSha || (simulatorRelease ? simulatorStage.deployment !== null ||
           simulatorStage.recheckQueuedAt !== null || simulatorStage.verificationCycle !== 0 : simulatorStage.deployment?.commitSha !== item.releaseSha) ||
         simulatorStage.fullRepair?.kind !== "FAILED_LEARNER_FULL_REPAIR" ||
         simulatorStage.fullRepair.offeringSourceFingerprint !== item.sourceFingerprint
         : !Array.isArray(item.plannedPaths) || item.plannedPaths.length || item.releaseSha !== null) ||
+      (recoveredSimulatorStage && (simulatorStage.fullRepair?.kind !== "FAILED_LEARNER_FULL_REPAIR" ||
+        simulatorStage.fullRepair.offeringSourceFingerprint !== item.sourceFingerprint ||
+        !Number.isInteger(item.checkpoint.readCount) || item.checkpoint.readCount < 0 || item.checkpoint.readCount > 6 ||
+        (simulatorResearch ? item.checkpoint.requestId !== null || simulatorStage.originalSourceFingerprint !== item.sourceFingerprint ||
+          simulatorStage.plannedPaths?.length !== 0 || simulatorStage.releaseSha !== null || simulatorStage.deployment !== null ||
+          simulatorStage.recheckQueuedAt !== null || simulatorStage.verificationCycle !== 0
+          : !UUID.test(item.checkpoint.requestId ?? "")))) ||
       item.expectedNativeContinuation !== null || item.continuationMode !== undefined ||
       item.expiredDemandRecoveryOnly !== undefined || (!simulatorLearning && item.failedLearningProgress !== undefined) ||
       !Number.isFinite(Date.parse(item.checkpoint.ownedStage.leaseExpiresAt ?? "")) ||
@@ -135,20 +147,37 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const workerHead = execute(worker, ["rev-parse", "HEAD"]);
   const progress = readFailedLearningProgress(item, now, simulatorLearning);
   const originalSimulatorAdmittedHere = simulatorLearning && progress?.simulatorExecutionRuntime === workerHead;
+  const simulatorLearningMarkerName = `desktop-simulator-learning-${item.assignmentRef}-${item.releaseSha}.private.json`;
+  const simulatorLearningMarker = join(selected, ".codex-artifacts", simulatorLearningMarkerName);
+  let simulatorPrior = null;
   const primaryMarker = join(selected, ".codex-artifacts", simulatorRelease
     ? `desktop-simulator-registered-${item.assignmentRef}-${item.releaseSha}.private.json`
     : simulatorLearning
-    ? `desktop-simulator-learning-${item.assignmentRef}-${item.releaseSha}.private.json`
+    ? simulatorLearningMarkerName
+    : simulatorReadFailure
+    ? `desktop-simulator-source-failure-${item.assignmentRef}-${item.checkpoint.requestId}.private.json`
+    : simulatorResearch
+    ? `desktop-simulator-research-${item.assignmentRef}-${item.checkpoint.readCount}.private.json`
     : simulator
     ? `desktop-simulator-wait-${item.assignmentRef}-${item.claimRevision}.private.json`
     : registeredImplementation
     ? `desktop-repair-${expiredDemandRecoveryOnly ? "expired-demand" : "registered"}-${item.assignmentRef}-${item.releaseSha}.private.json`
     : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
-  if (simulator && workerHead !== (simulatorLearning || simulatorRelease ? item.releaseSha : item.baseSha)) {
-    if (!originalSimulatorAdmittedHere) fail("ORIGINAL_SIMULATOR_WAIT_CHECKOUT_CHANGED");
-    execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, workerHead]);
+  if (simulator && workerHead !== (simulatorPublished || simulatorRelease ? item.releaseSha : item.baseSha)) {
+    if (recoveredSimulatorStage) {
+      const markers = simulatorReadFailure ? [simulatorLearningMarker] : Array.from({ length: item.checkpoint.readCount },
+        (_, count) => join(selected, ".codex-artifacts", `desktop-simulator-research-${item.assignmentRef}-${count}.private.json`)).reverse();
+      simulatorPrior = markers.filter(path => existsSync(path)).map(readJson).find(prior =>
+        prior.schemaVersion === 1 && prior.kind === "OWNED_DESKTOP_CONTINUATION_REQUESTED" &&
+        prior.status === "REQUESTED_NOT_ACKNOWLEDGED" &&
+        prior.continuationMode === (simulatorReadFailure ? "SIMULATOR_LEARNING_RECOVERY" : "SIMULATOR_RESEARCH") &&
+        prior.childThreadId === item.threadId && prior.assignmentRef === item.assignmentRef && prior.runtimeSha === workerHead &&
+        UUID.test(prior.priorTurnId ?? "") && Number.isFinite(Date.parse(prior.preparedAt)) && Date.parse(prior.preparedAt) <= now);
+      if (!simulatorPrior) fail("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
+    } else if (!originalSimulatorAdmittedHere) fail("ORIGINAL_SIMULATOR_WAIT_CHECKOUT_CHANGED");
+    execute(selected, ["merge-base", "--is-ancestor", simulatorResearch ? item.baseSha : item.releaseSha, workerHead]);
   }
-  if (simulatorLearning) execute(selected, ["merge-base", "--is-ancestor", item.baseSha, item.releaseSha]);
+  if (simulatorPublished) execute(selected, ["merge-base", "--is-ancestor", item.baseSha, item.releaseSha]);
   const unchangedRuntime = workerHead === currentSha || currentSha === item.baseSha;
   // The database projection already requires a current, unresolved full
   // mission and its original owner. One native follow-through must not depend
@@ -157,7 +186,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (!simulator && unchangedRuntime && item.continuationTrigger !== "UNFINISHED_FULL_REPAIR") {
     return { outcome: "unchanged_runtime", messageRequired: false };
   }
-  const originalWorkerHead = publishedImplementation || registeredImplementation || simulatorLearning ? item.releaseSha : item.baseSha;
+  const originalWorkerHead = publishedImplementation || registeredImplementation || simulatorPublished ? item.releaseSha : item.baseSha;
   let localCandidate = null;
   if (publishedImplementation) {
     // A database deployment timestamp alone is insufficient. Require this
@@ -179,7 +208,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       localCandidate = { headSha: workerHead, sharedBaseSha: sharedBase, paths };
     }
   }
-  if (!simulatorLearning && workerHead !== originalWorkerHead) {
+  if (!simulatorPublished && !simulatorResearch && workerHead !== originalWorkerHead) {
     // A previous automatic continuation let this same owner fast-forward its
     // own clean branch. Retain that exact request as provenance; never adopt
     // arbitrary clean commits or an unrelated worker's checkout.
@@ -265,6 +294,9 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     if (!Array.isArray(turns.data) || turns.data.length !== 1 || !UUID.test(turn?.id ?? "") || turn.status !== "completed" || turn.error !== null ||
         turn.itemsView !== "notLoaded" || !Array.isArray(turn.items) || turn.items.length !== 0 || !Number.isSafeInteger(turn.completedAt) || turn.completedAt <= 0) fail("ORIGINAL_TERMINAL_TURN_REQUIRED");
     if (prior && turn.id === prior.priorTurnId) return { outcome: "prior_continuation_not_observed", messageRequired: false };
+    if (simulatorPrior && (turn.id === simulatorPrior.priorTurnId ||
+        (turn.completedAt + 1) * 1000 < Date.parse(simulatorPrior.preparedAt)))
+      return { outcome: "prior_continuation_not_observed", messageRequired: false };
     if (simulatorLearning && progress && !prior && (turn.completedAt + 1) * 1000 < Date.parse(progress.completedAt))
       return { outcome: "original_admission_turn_not_observed", messageRequired: false };
     if (execute(selected, ["rev-parse", "HEAD"]) !== currentSha || execute(worker, ["rev-parse", "HEAD"]) !== workerHead) fail("CONTINUATION_RUNTIME_CHANGED");
@@ -291,6 +323,10 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       ? `Resume only your SAME original simulator Desktop assignment ${item.assignmentRef}, with expired VERIFYING revision ${item.claimRevision}. Your preserved, registered candidate is ${item.releaseSha}. Revalidate your native identity and current original lease, source and planned paths before any writes. Continue its release using the existing exact-head CI run, ownership and production proof commands. If that CI failed, correct the proven defect within your existing claimed paths and qualify the new exact head. If main advanced, preserve committed code, merge the qualified main in your same branch, re-register the exact reviewed result and validate it. Verify First user Chrome. Do not replay any failed source read or run a second build of the same healthy candidate. This wake grants no provider reads, source changes, new claims, or email. After the existing release is qualified, hand a reusable method to independent replay only under the simulator full-repair guide.${commonInstruction}`
       : simulatorLearning
       ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at expired VERIFYING revision ${item.claimRevision}. The human authorized your original Sol/ChatGPT Desktop continuation. Your exact own deployed repair is ${item.releaseSha}. On your clean original branch fast-forward to the exact reviewed main while preserving that registered SHA. Verify First user Chrome, then re-read the current owner, source and revision. ${simulatorPurpose} Stop on any changed claim, denied command or unverified runtime.${commonInstruction}`
+      : recoveredSimulatorStage
+      ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at expired ${simulatorStage.phase} revision ${item.claimRevision}. Use Sol through ChatGPT and verify First user Chrome. On the original clean branch fast-forward only to the reviewed exact main after checking ownership and source. Inspect your original assignment and recover only its current exact token and revision. ${simulatorReadFailure
+        ? "SETTLED_READ_FAILURE. Preserve the settled source failure and deployed repair. Diagnose with the retained evidence and owned local tooling only. This continuation grants no provider operation, alternate route, or new learning job."
+        : "RESEARCH. Preserve earlier captures, access findings and all spent reads. Continue the original full repair from the evidence. If the fresh owner guide explicitly permits an untried observation within the remaining budget and there is no access denial or uncertain effect, follow that exact guide. Otherwise work offline. Any implementation requires a fresh owned path grant."} Keep the original learner and clock. Stop on an ownership or source change, failed protected operation, actual access barrier or unavailable tooling.${commonInstruction}`
       : simulator
       ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at durable WAITING_IMPLEMENTATION revision ${item.claimRevision}. The human authorized your original Sol/ChatGPT Desktop continuation. Implementation capacity was available at planning. Use First user Chrome if needed. On your original clean branch fast-forward to the exact reviewed main. Revalidate your existing claim, source, expired lease and pending path with the normal simulator commands, recover only that original owner, and request only the saved pending implementation path. This wake grants no path, provider read, source change or additional learning attempt. Stop on a changed claim or a fresh busy result. Continue the full original mission after an actual path grant.${commonInstruction}`
       : `This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${item.continuationMode ?? "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha}${candidateInstruction}${commonInstruction}`, item.threadId, runtime.nodePath);
@@ -299,6 +335,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       batchReference: item.batchReference ?? null, priorTurnId: turn.id, priorTurnStatus: turn.status, priorTurnError: turn.error,
       runtimeSha: currentSha, continuationTrigger: item.continuationTrigger ?? null,
       continuationMode: simulatorRelease ? "SIMULATOR_REGISTERED_RELEASE" : simulatorLearning ? "SIMULATOR_LEARNING_RECOVERY" :
+        simulatorResearch ? "SIMULATOR_RESEARCH" : simulatorReadFailure ? "SIMULATOR_SETTLED_READ_FAILURE" :
         simulator ? "SIMULATOR_WAITING_IMPLEMENTATION" : item.continuationMode ?? "DATA_ONLY",
       plannedPathCount: claimedImplementation ? item.plannedPaths.length : 0,
       ...(simulator ? { claimRevision: item.claimRevision } : {}),

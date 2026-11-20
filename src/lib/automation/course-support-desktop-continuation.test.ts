@@ -169,6 +169,41 @@ describe("original Desktop full-repair continuation", () => {
       .rejects.toThrow("EXPIRED_COURSE_RELEASE_NOT_PUBLISHED");
   });
 
+  it.each(["RESEARCH", "SETTLED_READ_FAILURE"] as const)("resumes a simulator's original %s checkpoint once", async mode => {
+    const f = fixture(), fingerprint = "a".repeat(64), failed = mode === "SETTLED_READ_FAILURE";
+    const releaseSha = failed ? "c".repeat(40) : null;
+    const plannedPaths = failed ? ["src/lib/course-discovery/test-reader.ts"] : [];
+    const item = { mode: "SIMULATOR", simulatorOwnedRecovery: mode, assignmentRef: REF, threadId: CHILD,
+      branch: f.launcher.branch, baseSha: BEFORE, launcherReceiptPath: f.launcherPath,
+      sourceFingerprint: fingerprint, claimToken: TURN, claimRevision: 8, plannedPaths, releaseSha, expectedNativeContinuation: null,
+      checkpoint: { kind: "EXPIRED_OWNED_STAGE", claimLeaseExpired: true, providerReadInFlight: false,
+        readCount: failed ? 6 : 2, requestId: failed ? TURN : null, ownedStage: {
+          phase: failed ? "VERIFYING" : "CLAIMED", sourceFingerprint: fingerprint, originalSourceFingerprint: fingerprint,
+          branch: f.launcher.branch, leaseExpiresAt: "2029-12-31T23:59:00.000Z", plannedPaths, releaseSha,
+          deployment: failed ? { commitSha: releaseSha } : null, recheckQueuedAt: null, verificationCycle: 0,
+          fullRepair: { kind: "FAILED_LEARNER_FULL_REPAIR", offeringSourceFingerprint: fingerprint },
+        },
+      },
+    };
+    if (failed) {
+      const git = f.deps.git.getMockImplementation()!;
+      f.deps.git.mockImplementation((cwd, args) => cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD" ? CURRENT : git(cwd, args));
+      await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+        .rejects.toThrow("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
+      writeFileSync(join(f.selected, ".codex-artifacts", `desktop-simulator-learning-${REF}-${releaseSha}.private.json`), JSON.stringify({
+        schemaVersion: 1, kind: "OWNED_DESKTOP_CONTINUATION_REQUESTED", status: "REQUESTED_NOT_ACKNOWLEDGED",
+        continuationMode: "SIMULATOR_LEARNING_RECOVERY", childThreadId: CHILD, assignmentRef: REF, runtimeSha: CURRENT,
+        priorTurnId: PARENT, preparedAt: "2023-11-14T22:00:00.000Z",
+      }));
+    }
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ threadId: CHILD, model: "gpt-6.1-sol", messageRequired: true });
+    expect(result.prompt).toContain("First user Chrome");
+    expect(result.prompt).toContain(failed ? "grants no provider operation" : "fresh owner guide explicitly permits an untried observation");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: { ...item, claimRevision: 9 } }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+  });
+
   it("wakes a deployed simulator repair once with its original Desktop owner and no new read authority", async () => {
     const f = fixture(), fingerprint = "a".repeat(64), releaseSha = "c".repeat(40);
     const item = { mode: "SIMULATOR", simulatorLearningRecovery: true, assignmentRef: REF, threadId: CHILD,

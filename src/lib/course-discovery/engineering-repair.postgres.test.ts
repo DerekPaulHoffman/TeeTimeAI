@@ -737,6 +737,42 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       branch: "automation/course-support-discovery-claim" }) };
   }
 
+  it.each(["RESEARCH", "SETTLED_READ_FAILURE"] as const)("projects a stopped simulator %s without replacing its assignment or holding a deployed writer", async mode => {
+    const f = await boundSimulatorHandoff(true);
+    const { parseCourseDispatchAudit, planCourseSupportCourseDispatch, hasSimulatorSupportImplementationOwnership } =
+      await import("@/lib/automation/course-support-course-dispatch");
+    const claimed = await f.claim();
+    if (!claimed.acquired) throw Error("Simulator ownership unavailable in fixture.");
+    const row = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = parseCourseDispatchAudit(row.audit)!, claim = audit.simulatorClaim!;
+    const requestId = randomUUID(), failed = mode === "SETTLED_READ_FAILURE", releaseSha = "b".repeat(40);
+    audit.launcherReceiptPath = join(tmpdir(), "original-simulator", "launcher.receipt.private.json");
+    claim.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+    if (failed) Object.assign(claim, { phase: "VERIFYING", releaseSha,
+      plannedPaths: ["src/lib/course-discovery/test-reader.ts"], deployment: { source: "git", state: "READY", branch: "main",
+        commitSha: releaseSha, deploymentId: "dpl_fixture", deploymentUrl: "https://fixture.vercel.app",
+        aliases: ["teetimespot.com", "www.teetimespot.com"], deployedAt: new Date().toISOString() },
+    });
+    audit.simulatorResearch = { version: 1, sourceFingerprint: claim.sourceFingerprint, readCount: 1,
+      links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null, history: [{ source: "official",
+        requestedUrl: f.course.website, sourceUrl: f.course.website, sourceFingerprint: claim.sourceFingerprint,
+        observedAt: new Date().toISOString(), requestId, rendered: true,
+        ...(failed ? { outcome: "HARD_FAILED", httpStatus: 0, failure: { stage: "PUBLIC_READ", category: "ACCESS",
+          code: "PUBLIC_REDIRECT_NOT_ELIGIBLE", researchPhase: "BROWSER_REQUEST" } } : { outcome: "READ", httpStatus: 200 }) }] };
+    const persisted = await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    expect(await client.$transaction(tx => hasSimulatorSupportImplementationOwnership(tx))).toBe(false);
+    const parent = `resume-parent-${randomUUID()}`;
+    batchOwners.push(parent);
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: parent, baseSha: "c".repeat(40), maxStarts: 1 });
+    expect(plan).toMatchObject({ acquired: true, value: { launchItems: [], continuationItems: [{
+      threadId: f.child, assignmentRef: f.assignmentRef, simulatorOwnedRecovery: mode,
+      checkpoint: { claimLeaseExpired: true, providerReadInFlight: false, readCount: 1, requestId: failed ? requestId : null,
+        ownedStage: { phase: failed ? "VERIFYING" : "CLAIMED", fullRepair: { failedJobId: f.job.id } } },
+    }] } });
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: row.id } })).audit).toEqual(persisted.audit);
+    expect(await client.courseDiscoveryJob.count({ where: { offeringId: f.offering!.id } })).toBe(1);
+  });
+
   it.each(["replayed", "failed", "prepared", "registered"])("keeps the same original simulator owner through a %s repair", async scenario => {
     const f = await boundSimulatorHandoff(true);
     const lane = await import("@/lib/automation/simulator-support-ownership");

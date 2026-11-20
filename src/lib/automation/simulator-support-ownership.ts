@@ -9,7 +9,7 @@ import { SIMULATOR_IMPLEMENTATION_BUSY } from "./simulator-support-path-admissio
 import { currentSimulatorFullRepair, hasConsumedSimulatorFullRepair, loadSimulatorRecoveryClaim, readSimulatorFullRepair } from "./simulator-full-repair";
 import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
-import { assertSimulatorSupportDeployment, createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorImplementationWait, SIMULATOR_SUPPORT_LEASE_MS, SIMULATOR_SUPPORT_SOURCE_SELECT, validateSimulatorSupportPath, type SimulatorSupportClaim } from "./simulator-support-policy";
+import { assertSimulatorSupportDeployment, createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorImplementationWait, simulatorSupportReservesImplementation, SIMULATOR_SUPPORT_LEASE_MS, SIMULATOR_SUPPORT_SOURCE_SELECT, validateSimulatorSupportPath, type SimulatorSupportClaim } from "./simulator-support-policy";
 import type { GitDeploymentProof } from "@/lib/deployments/wait-for-git-deployment";
 import { parseSimulatorOfferingManifest } from "../../../scripts/automation/manage-simulator-offerings";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
@@ -268,7 +268,9 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
   } : null;
   return { currentSource: true as const, currentClaimRevision: audit.simulatorClaim.revision, implementationWaiting, implementationCapacityBusy,
     leaseValid: new Date(audit.simulatorClaim.leaseExpiresAt) > now,
-    providerReadInFlight: Boolean(pending && !expiredPending), checkpoint };
+    providerReadInFlight: Boolean(pending && !expiredPending), checkpoint,
+    settledOwnedResearchFailure: !pending && last?.failure && last.outcome === "HARD_FAILED" &&
+      last.requestId !== research.lastRecoveredFailureRequestId ? last.requestId : undefined };
 }
 
 async function saveClaim(tx: Prisma.TransactionClient, row: { runId: string; audit: CourseDispatchAudit; claim: SimulatorSupportClaim }, now: Date, changes: Partial<SimulatorSupportClaim> = {}, research?: SimulatorResearchState, auditChanges?: Record<string, unknown>) {
@@ -314,6 +316,8 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
         (row.source.offering.observationToken && row.source.offering.observationExpiresAt && row.source.offering.observationExpiresAt > now) ||
         (venue.website && new URL(facts.website).hostname !== new URL(venue.website).hostname)) throw new Error("Simulator configuration does not match the exact owned venue, source revision or official site.");
     if (!apply) return { mode: "dry-run" as const, offeringId: row.source.offering.id, expectedFingerprint: row.source.fingerprint, expectedOfferingRevision: row.source.offering.monitoringRevision, facts };
+    if (metadataRepair && row.claim.plannedPaths.length && !simulatorSupportReservesImplementation(row.claim) &&
+        await simulatorImplementationCapacityBusy(tx, input.assignmentRef)) throw new Error(SIMULATOR_IMPLEMENTATION_BUSY);
     const updated = await tx.courseOffering.update({ where: { id: row.source.offering.id }, data: {
       active: true, publicAccessStatus: "PUBLIC", bookingUrl: facts.bookingUrl, evidenceUrl: facts.evidenceUrl, verifiedAt: new Date(facts.verifiedAt),
       providerFamilyKey: facts.providerFamilyKey ?? null, providerMetadata: facts.providerMetadata ?? Prisma.DbNull,
@@ -635,7 +639,7 @@ export function recoverSimulatorSupport(input: Owner) {
       !research.inFlight && row.source.fingerprint === row.claim.sourceFingerprint;
     if (new Date(row.claim.leaseExpiresAt) > now && !failedRead) throw new Error("Recover is reserved for the same native owner after its lease expires.");
     const dispatch = await import("./course-support-course-dispatch");
-    if (row.claim.plannedPaths.length && await dispatch.hasSimulatorSupportImplementationOwnership(tx, input.assignmentRef)) throw new Error("Simulator implementation ownership conflicts during recovery.");
+    if (simulatorSupportReservesImplementation(row.claim) && await dispatch.hasSimulatorSupportImplementationOwnership(tx, input.assignmentRef)) throw new Error("Simulator implementation ownership conflicts during recovery.");
     const pending = research.inFlight;
     if (pending && new Date(pending.expiresAt) > now) throw new Error("The original simulator research request is still within its bounded interval.");
     const saved = await saveClaim(tx, row, now, {}, pending ? { ...research, inFlight: null, lastRecoveredFailureRequestId: pending.requestId, history: [...research.history, {
@@ -703,6 +707,8 @@ export function adoptSimulatorSupportSource(input: Owner & { expectedFingerprint
     const research = readSimulatorResearchState(row.audit.simulatorResearch, row.claim.sourceFingerprint);
     if (research.inFlight) throw new Error("Finish the original simulator research request before source adoption.");
     const changed = row.source.fingerprint !== row.claim.sourceFingerprint;
+    if (changed && row.claim.plannedPaths.length && !simulatorSupportReservesImplementation(row.claim) &&
+        await simulatorImplementationCapacityBusy(tx, input.assignmentRef)) throw new Error(SIMULATOR_IMPLEMENTATION_BUSY);
     return saveClaim(tx, row, now, { sourceFingerprint: row.source.fingerprint, offeringRevision: row.source.offering.monitoringRevision,
       ...(changed ? { deployment: null, recheckQueuedAt: null, verificationCycle: 0 } : {}) },
       changed ? { ...research, sourceFingerprint: row.source.fingerprint,
@@ -726,6 +732,10 @@ export function registerSimulatorSupportRelease(input: Owner & { releaseSha: str
     const metadataReuseKind = row.claim.plannedPaths.length === 0 && input.releaseSha === row.audit.baseSha ? "ORIGINAL_BASE" :
       row.claim.plannedPaths.length === 0 && input.releaseSha === input.trustedUpstreamSha ? "TRUSTED_UPSTREAM" :
       priorSha && input.releaseSha === input.trustedUpstreamSha ? "TRUSTED_UPSTREAM_OWNED_RELEASE" : null;
+    if (row.claim.plannedPaths.length && !simulatorSupportReservesImplementation(row.claim)) {
+      if (!metadataReuseKind) throw new Error("Claim an implementation path before registering a follow-up simulator release.");
+      if (await simulatorImplementationCapacityBusy(tx, input.assignmentRef)) throw new Error(SIMULATOR_IMPLEMENTATION_BUSY);
+    }
     const claimedRuntimePaths = input.committedPaths.filter(path => /^(src\/|scripts\/|prisma\/)/.test(path) && isRuntimeBearingCourseSupportPath(path));
     if (!/^[a-f0-9]{40}$/i.test(input.releaseSha) || !/^[a-f0-9]{40}$/i.test(input.trustedUpstreamSha) ||
         input.branch !== row.claim.branch || !input.upstreamDescendantVerified || !input.descendantVerified ||

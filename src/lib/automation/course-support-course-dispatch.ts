@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { isSearchWindowActive } from "./date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
 import { listSimulatorSupportDispatchCandidates, reconcileSimulatorCapabilityWakeups, validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
-import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
+import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, simulatorSupportReservesImplementation, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { readSimulatorResearchFailureMemory, type SimulatorResearchFailureMemory, type SimulatorResearchState } from "./simulator-support-research-policy";
 import {
@@ -723,6 +723,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
   const audits = originalRuns.map(run => parseCourseDispatchAudit(run.audit)).filter((audit): audit is CourseDispatchAudit =>
     Boolean(audit && audit.state === "CONSUMED" && audit.target.mode === undefined && audit.childThreadId && audit.launcherReceiptPath));
   const items = [];
+  let simulatorImplementationBusy: boolean | undefined;
   for (const batch of batches) {
     const summary = batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary) ? batch.summary : {};
     const audit = audits.find(value => value.assignmentRef === summary.dispatchAssignmentRef &&
@@ -765,6 +766,10 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       sourcePurpose === "CONTINUE_REPAIR" && audit.target.trafficClass === "REAL" &&
       boundSources.every(isNaturallyCompletedCourseDispatchSource);
     if (!currentDemand && !expiredDemandRecoveryOnly) continue;
+    if (continuationMode === "DATA_ONLY" && sourcePurpose === "CONTINUE_REPAIR") {
+      simulatorImplementationBusy ??= await hasSimulatorSupportImplementationOwnership(tx);
+      if (simulatorImplementationBusy) continue;
+    }
     // Read-only progress from a reciprocal terminal child, after revalidating
     // the original owner, provider and active demand. This can wake diagnosis;
     // it never creates/retries a job or grants another public read.
@@ -979,7 +984,7 @@ export async function consumeBoundCourseSupportDispatchAssignment(
 export async function hasSimulatorSupportImplementationOwnership(tx: Prisma.TransactionClient, exceptAssignmentRef?: string) {
   const live = await listLiveCourseSupportDispatchReservations(tx);
   return live.some(({ audit }) => audit.assignmentRef !== exceptAssignmentRef && audit.target.mode === "SIMULATOR" &&
-    audit.state === "CONSUMED" && (audit.simulatorClaim?.plannedPaths.length ?? 0) > 0);
+    audit.state === "CONSUMED" && simulatorSupportReservesImplementation(audit.simulatorClaim));
 }
 
 /** Private references only; RUNNING is never proof of a native turn. */
@@ -992,6 +997,7 @@ async function collectCourseSupportContinuationCandidates(input: {
     plannedPaths?: string[]; releaseSha?: string | null; checkpoint?: CourseSupportContinuationCheckpoint;
     simulatorLearningRecovery?: true;
     simulatorRegisteredRelease?: true;
+    simulatorOwnedRecovery?: "RESEARCH" | "SETTLED_READ_FAILURE";
     failedLearningProgress?: NonNullable<Awaited<ReturnType<typeof readOwnedFailedLearningProgress>>>;
     expectedNativeContinuation?: { turnId: string; key: string; receiptPath: string } | null }> = [];
   let attentionCount = 0;
@@ -1030,8 +1036,16 @@ async function collectCourseSupportContinuationCandidates(input: {
         incidentId: audit.target.incidentId, cycle: audit.target.cycle, sourceFingerprint: recovery.failure.job.sourceFingerprint,
         searchRefs: audit.target.searchRefs, now: input.now,
       }) : null;
-      const simulatorContinuation = recovery && history && (deploymentPending || !priorRecovery || failedLearningProgress) &&
-        !await hasSimulatorSupportImplementationOwnership(input.tx, audit.assignmentRef);
+      const simulatorOwnedRecovery = context.checkpoint.kind === "EXPIRED_OWNED_STAGE" &&
+          !latestConfirmedNativeContinuation(ledger) && !context.providerReadInFlight
+        ? context.checkpoint.ownedStage?.phase === "CLAIMED" && !context.checkpoint.requestId
+          ? "RESEARCH" as const
+          : recovery?.claim.deployment && context.settledOwnedResearchFailure
+            ? "SETTLED_READ_FAILURE" as const : undefined
+        : undefined;
+      const simulatorContinuation = !simulatorOwnedRecovery && recovery && history &&
+        (deploymentPending || !priorRecovery || failedLearningProgress) &&
+        (!simulatorSupportReservesImplementation(recovery.claim) || !await hasSimulatorSupportImplementationOwnership(input.tx, audit.assignmentRef));
       continuationItems.push({ mode: "SIMULATOR", assignmentRef: audit.assignmentRef, threadId: audit.childThreadId,
         originalParentThreadId: audit.ownerThreadId, branch: audit.simulatorClaim!.branch, baseSha: audit.baseSha,
         ...(context.checkpoint.kind === "EXPIRED_OWNED_STAGE" ? {
@@ -1042,8 +1056,10 @@ async function collectCourseSupportContinuationCandidates(input: {
           ...(simulatorContinuation ? (deploymentPending ? { simulatorRegisteredRelease: true as const }
             : { simulatorLearningRecovery: true as const }) : {}),
           ...(simulatorContinuation && failedLearningProgress ? { failedLearningProgress } : {}),
+          ...(simulatorOwnedRecovery ? { simulatorOwnedRecovery } : {}),
           checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight,
-            ...(simulatorContinuation ? { ownedStage: {
+            ...(simulatorOwnedRecovery === "SETTLED_READ_FAILURE" ? { requestId: context.settledOwnedResearchFailure } : {}),
+            ...(simulatorContinuation || simulatorOwnedRecovery ? { ownedStage: {
               ...context.checkpoint.ownedStage!, leaseExpiresAt: audit.simulatorClaim!.leaseExpiresAt,
               fullRepair: audit.target.fullRepair,
             } } : {}),

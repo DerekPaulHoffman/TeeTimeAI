@@ -54,6 +54,16 @@ export type SimulatorSupportClaim = {
   pendingImplementation?: { version: 1; path: string; requestedAt: string; sourceFingerprint: string; offeringRevision: number } | null;
 };
 
+/** A recorded deployment finishes the code-writing stage. The claim and its
+ * paths remain available to the original owner for verification and history. */
+export function simulatorSupportReservesImplementation(claim?: SimulatorSupportClaim | null) {
+  if (!claim?.plannedPaths.length) return false;
+  if (claim.phase !== "VERIFYING" || !claim.releaseSha || !claim.deployment) return true;
+  try { assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, new Date()); }
+  catch { return true; }
+  return false;
+}
+
 export function createSimulatorSupportIntentDigest(search: SimulatorSupportSource) {
   return createHash("sha256").update(JSON.stringify({
     outdoorCompatibleDigest: createCourseDispatchIntentDigest(search),

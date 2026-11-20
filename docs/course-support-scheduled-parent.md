@@ -135,8 +135,9 @@ manually free implementation or release ownership.
 Observe the same private supervisor/launcher receipts and process handles when
 useful; never restart healthy work because a wait returned. On a
 `continuationItems` handoff, read the original launcher status. If the item is an
-expired `WAITING_IMPLEMENTATION` stage or carries `simulatorLearningRecovery: true`
-or `simulatorRegisteredRelease: true`
+expired `WAITING_IMPLEMENTATION` stage or carries `simulatorLearningRecovery: true`,
+`simulatorRegisteredRelease: true`, or `simulatorOwnedRecovery` equal to
+`RESEARCH` or `SETTLED_READ_FAILURE`
 and its original receipt is
 `DESKTOP_REQUESTED`, pass the original context and item through the same sealed
 `course-support-desktop-continuation.mjs` helper above. Use only its exact
@@ -147,6 +148,11 @@ registered deployed repair, unchanged active offering and alert, and no
 existing late job for that repair. An expired registered simulator candidate
 with no deployment record can return to its original Desktop owner for release
 reconciliation. This stage requires exact committed code and claimed paths.
+An expired full-repair research stage can return to its same Desktop worker
+with its spent budget and evidence. A settled read failure after deployment
+returns the exact request once for offline diagnosis. When the worker has
+already fast-forwarded from the registered release, the helper requires its
+earlier sealed handoff, its completed native turn and published Git ancestry.
 For detached command-line continuations, follow
 `course-support-worker-continuation.md` using the original native worker.
 An expired owned simulator implementation or release
