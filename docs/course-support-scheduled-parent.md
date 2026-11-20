@@ -133,9 +133,16 @@ native-chat revival or special collector-recovery message is needed. Never
 manually free implementation or release ownership.
 
 Observe the same private supervisor/launcher receipts and process handles when
-useful; never restart healthy work because a wait returned. On an existing
-`continuationItems` handoff, follow `course-support-worker-continuation.md` using
-the original native worker. An expired owned simulator implementation or release
+useful; never restart healthy work because a wait returned. On a
+`continuationItems` handoff, read the original launcher status. If the item is an
+expired `WAITING_IMPLEMENTATION` stage and its original receipt is
+`DESKTOP_REQUESTED`, pass the original context and item through the same sealed
+`course-support-desktop-continuation.mjs` helper above. Use only its exact
+returned Desktop message and retain the acknowledgement. This wake requires the
+original inactive, completed Desktop turn and a qualified release. It grants
+no claim or path. For detached command-line continuations, follow
+`course-support-worker-continuation.md` using the original native worker.
+An expired owned simulator implementation or release
 stage requires the actual STOPPED or COMPLETED receipt and corresponding latest
 failed/interrupted or completed/error-null terminal-turn proof, plus one successful
 production `continue` reservation before the deterministic same-thread runner.

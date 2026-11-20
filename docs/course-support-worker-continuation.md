@@ -4,6 +4,8 @@ The human approved bounded recovery of the same existing native worker. This is 
 
 Use only private `value.continuationItems` from the health-bearing preflight's original successful plan. Do not run a second planning inspection or select another incident. An empty new-launch list does not make returned continuation attention healthy or complete. Keep private assignment, native, source and receipt references out of prose.
 
+For a `WAITING_IMPLEMENTATION` item whose original launcher status is `DESKTOP_REQUESTED`, use the sealed Desktop helper and supported same-chat send described in the scheduled parent guide. The native Desktop turn supplies the completion evidence for that launch. The detached command-line receipt, reservation, and runner below apply to command-line launches.
+
 An item carrying `launcherReceiptPath`, `claimToken`, `claimRevision`,
 `sourceFingerprint`, `plannedPaths`, and `releaseSha` is an expired owned
 implementation/release candidate. The original launcher path is recorded at

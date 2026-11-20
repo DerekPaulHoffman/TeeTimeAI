@@ -21,6 +21,7 @@ function fixture() {
   const selected = join(root, "selected"), worker = join(root, "worker"), common = join(root, "common");
   for (const dir of [selected, worker, common, join(selected, ".codex-artifacts"), join(selected, "docs")]) mkdirSync(dir);
   writeFileSync(join(selected, "docs", "course-support-full-repair-continuation.md"), "Trusted original-owner continuation guide.");
+  writeFileSync(join(selected, "docs", "simulator-support-continuation-worker.md"), "Trusted original simulator continuation guide.");
   const launcherPath = join(root, "launcher.receipt.private.json");
   const launcher = { schemaVersion: 1, status: "DESKTOP_REQUESTED", executionMode: "DESKTOP", threadId: CHILD,
     cwd: worker, baseSha: BEFORE, branch: "automation/course-support-test", model: "gpt-6.1-sol", authentication: "ChatGPT",
@@ -86,6 +87,31 @@ describe("source reconciliation observes current canonical deployments", () => {
 });
 
 describe("original Desktop full-repair continuation", () => {
+  it("wakes the original waiting simulator Desktop chat with actual native completion proof", async () => {
+    const f = fixture();
+    const fingerprint = "a".repeat(64), expired = "2029-12-31T23:59:00.000Z";
+    const item = { mode: "SIMULATOR", assignmentRef: REF, threadId: CHILD, branch: f.launcher.branch, baseSha: BEFORE,
+      launcherReceiptPath: f.launcherPath, sourceFingerprint: fingerprint, claimToken: TURN, claimRevision: 5,
+      plannedPaths: [], releaseSha: null, expectedNativeContinuation: null, checkpoint: {
+        kind: "EXPIRED_OWNED_STAGE", claimLeaseExpired: true, providerReadInFlight: false, ownedStage: {
+          phase: "WAITING_IMPLEMENTATION", sourceFingerprint: fingerprint, branch: f.launcher.branch, leaseExpiresAt: expired,
+        },
+      },
+    };
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ threadId: CHILD, model: "gpt-6.1-sol", messageRequired: true,
+      prompt: expect.stringContaining("WAITING_IMPLEMENTATION revision 5") });
+    expect(result.prompt).toContain("First user Chrome");
+    expect(result.prompt).not.toContain("REGISTERED_RELEASE_RECONCILIATION");
+    expect(result.receiptPath).toContain("desktop-simulator-wait-");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    await expect(prepareOwnedDesktopContinuation({ context: f.context,
+      item: { ...item, checkpoint: { ...item.checkpoint, providerReadInFlight: true } } }, f.deps))
+      .rejects.toThrow("DESKTOP_SIMULATOR_WAIT_REQUIRED");
+    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
+  });
+
   it("uses a separate closeout-only intent for expired demand and published code", async () => {
     const f = fixture();
     const registered = "c".repeat(40);
