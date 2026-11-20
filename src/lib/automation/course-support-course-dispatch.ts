@@ -1029,13 +1029,13 @@ async function collectCourseSupportContinuationCandidates(input: {
           claimRevision: audit.simulatorClaim!.revision, sourceFingerprint: audit.simulatorClaim!.sourceFingerprint,
           plannedPaths: audit.simulatorClaim!.plannedPaths, releaseSha: audit.simulatorClaim!.releaseSha,
           expectedNativeContinuation: latestConfirmedNativeContinuation(ledger),
-          ...(simulatorLearningRecovery ? { simulatorLearningRecovery: true as const,
-            checkpoint: { ...context.checkpoint, providerReadInFlight: false, ownedStage: {
+          ...(simulatorLearningRecovery ? { simulatorLearningRecovery: true as const } : {}),
+          checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight,
+            ...(simulatorLearningRecovery ? { ownedStage: {
               ...context.checkpoint.ownedStage!, leaseExpiresAt: audit.simulatorClaim!.leaseExpiresAt,
               fullRepair: audit.target.fullRepair,
-            } },
-          } : {}),
-          checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight },
+            } } : {}),
+          },
         } : {}) });
     } catch { attentionCount += 1; }
   }

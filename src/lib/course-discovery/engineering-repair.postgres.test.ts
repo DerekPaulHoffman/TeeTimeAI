@@ -759,7 +759,11 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     batchOwners.push(scheduler);
     const plan = await planCourseSupportCourseDispatch({ ownerThreadId: scheduler, baseSha: runtimeVersion, maxStarts: 1 });
     expect(plan).toMatchObject({ acquired: true, value: {
-      continuationItems: [{ assignmentRef: f.assignmentRef, threadId: f.child, simulatorLearningRecovery: true }],
+      continuationItems: [{ assignmentRef: f.assignmentRef, threadId: f.child, simulatorLearningRecovery: true,
+        checkpoint: { kind: "EXPIRED_OWNED_STAGE", providerReadInFlight: false, ownedStage: {
+          phase: "VERIFYING", leaseExpiresAt: audit.simulatorClaim!.leaseExpiresAt, releaseSha: registeredRelease,
+          deployment: { commitSha: registeredRelease }, fullRepair: { failedJobId: f.job.id },
+        } } }],
       launchItems: [],
     } });
     const resumed = await lane.recoverSimulatorSupport({ assignmentRef: f.assignmentRef, ownerThreadId: f.child,
