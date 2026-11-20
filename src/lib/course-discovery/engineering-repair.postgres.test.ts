@@ -747,7 +747,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const audit = parseCourseDispatchAudit(current.audit)!;
     const registeredRelease = "b".repeat(40), runtimeVersion = "c".repeat(40);
     // Release proof comes from the Git deployment boundary in production.
-    audit.launcherReceiptPath = join(tmpdir(), "original-simulator-launcher.json");
+    audit.launcherReceiptPath = join(tmpdir(), "original-simulator", "launcher.receipt.private.json");
     Object.assign(audit.simulatorClaim!, { phase: "VERIFYING", releaseSha: registeredRelease,
       leaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
       plannedPaths: ["src/lib/course-discovery/test-reader.ts"],
