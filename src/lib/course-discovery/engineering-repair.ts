@@ -20,6 +20,7 @@ import { physicalBindingFailureEvidenceSchema } from "./physical-binding-failure
 import { safeOfficialSourceDiagnostic, navigationFailureKinds } from "./official-source-diagnostics";
 import { readPrivateCourseNameComparison } from "./cps-course-name-comparison-evidence";
 import { readPrivateCpsAvailabilityStructure } from "./cps-availability-structure";
+import { projectGenericFailureDiagnostic } from "./generic-failure-diagnostic";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -226,6 +227,7 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
   return { ...inspection, ...(guardCode ? {
     category: guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? "BROWSER_TRANSPORT_REJECTED" : "READER_OR_RUNTIME_FAILURE",
     code: guardCode, failureCode: guardCode, phase: "GENERIC_FALLBACK",
+    genericFallbackDiagnostic: projectGenericFailureDiagnostic(guard, checkpoint.genericToolTrace),
     delegationDiagnostic: undefined, bookingEdgeEvidence: undefined, physicalBindingEvidence: undefined, priorInspection: inspection,
     ...(guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? {
       nativeTransportDiagnostic: { failureCode: nativeFailureCode, ...nativeFacts },
@@ -324,6 +326,7 @@ export async function discoveryEngineeringContext(reader: Reader, target: { cour
       implementationRelease: latestLink.releaseSha, executionRuntime: latestLink.runtimeVersion,
       status: validChild.status, outcome: validChild.outcome, attempts: validChild.attempts,
       firstPickedUpAt: validChild.firstPickedUpAt?.toISOString() ?? null, deadlineAt: validChild.deadlineAt?.toISOString() ?? null,
+      completedAt: validChild.completedAt?.toISOString() ?? null,
       diagnosis: discoveryFailureDiagnosis(validChild), evidenceAuthority: false as const } : null,
     instruction: "Use the current owned action plan to investigate and repair the failed learning process end to end. A tooling failure is engineering work, not evidence of inaccessible inventory. Reserve implementation paths, test the observed regression, and prove the exact deployed runtime and normal customer recovery. Keep this original job terminal; recovery after its deadline does not pass the original fifteen-minute contract." };
 }

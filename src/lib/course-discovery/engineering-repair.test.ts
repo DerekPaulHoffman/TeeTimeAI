@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { projectGenericFailureDiagnostic } from "./generic-failure-diagnostic";
 const m = vi.hoisted(() => ({ current: vi.fn(), owner: vi.fn(), report: vi.fn(), simulator: vi.fn(),
   db: { $queryRaw: vi.fn(), $transaction: vi.fn(), courseDiscoveryJob: { findUnique: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
     simulatorSupportIncident: { findUnique: vi.fn() }, courseSupportIncident: { findUnique: vi.fn(), updateMany: vi.fn() } } }));
@@ -329,11 +331,60 @@ describe("private failure evidence", () => {
     const result = JSON.parse(JSON.stringify(sanitizeResponderValue(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint }))));
     expect(result).toMatchObject({ failureCode: code, phase: "GENERIC_FALLBACK", evidenceAuthority: false,
       priorInspection: { failureCode: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", phase: "FIXED_INSPECTION", delegationDiagnostic: { stage: "PROVIDER_BIND" } } });
-    expect(JSON.stringify(result)).not.toMatch(/private|token|PRIVATE/iu);
+    expect(JSON.stringify(result)).not.toMatch(/private\.example|PRIVATE_BODY|PRIVATE_OPERATION/iu);
     if (code === "DISCOVERY_NATIVE_TRANSPORT_FATAL") expect(result).toMatchObject({ category: "BROWSER_TRANSPORT_REJECTED",
       nativeTransportDiagnostic: { failureCode: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "RESPONSE_WAIT", method: "GET", resourceType: "document" } });
     else expect(result).not.toHaveProperty("nativeTransportDiagnostic");
     expect(result).not.toHaveProperty("delegationDiagnostic");
+  });
+  it("retains the exhausted limit and structural tool replies in the owning diagnostic", () => {
+    const checkpoint = { genericGuard: { code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED", limit: "toolOperations",
+      toolOperations: 16, tokenUsage: { totalTokens: 1234 }, limits: { toolOperations: 16 } },
+      genericToolTrace: { entries: [{ action: "BROWSER_INSPECT_ADAPTER", status: "ERROR",
+        errorCode: "UNSUPPORTED_ADAPTER_SOURCE", modelPreviewBytes: 42, previewOmitted: false }], lostEntries: 8 } };
+    const result = sanitizeResponderValue(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint }));
+    expect(result).toMatchObject({ genericFallbackDiagnostic: { limit: "toolOperations", toolOperations: 16,
+      tokenUsage: { totalTokens: 1234 }, limits: { toolOperations: 16 }, traceRetention: "PRESENT",
+      toolTrace: checkpoint.genericToolTrace, evidenceAuthority: false } });
+  });
+  it("projects the actual persisted worker trace under the production tsx loader without tool arguments", () => {
+    const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=commonjs", "-e", `
+      const {createDiscoveryToolTrace}=require('./scripts/automation/course-discovery-worker.mjs');
+      const {projectGenericFailureDiagnostic}=require('./src/lib/course-discovery/generic-failure-diagnostic.ts');
+      const trace=createDiscoveryToolTrace();
+      trace.record('discovery_browser',{action:'inspect_adapter',url:'PRIVATE_CANARY'},'ERROR','UNSUPPORTED_ADAPTER_SOURCE','PRIVATE_CANARY');
+      console.log(JSON.stringify(projectGenericFailureDiagnostic({code:'DISCOVERY_GENERIC_BUDGET_EXHAUSTED',limit:'outputTokens',
+        toolOperations:1,tokenUsage:{outputTokens:8192},limits:{outputTokens:8192}},trace.snapshot())));
+    `], { encoding: "utf8", windowsHide: true });
+    expect(JSON.parse(output)).toMatchObject({ limit: "outputTokens", toolOperations: 1,
+      tokenUsage: { outputTokens: 8192 }, toolTrace: { entries: [{ action: "BROWSER_INSPECT_ADAPTER", status: "ERROR",
+        errorCode: "UNSUPPORTED_ADAPTER_SOURCE" }], lostEntries: 0 }, evidenceAuthority: false });
+    expect(output).not.toContain("PRIVATE_CANARY");
+  });
+  it("caps traces and strips unknown codes, counts and private fields", () => {
+    const entry = { action: "PRIVATE_CANARY", status: "ERROR", errorCode: "PRIVATE_CANARY", url: "PRIVATE_CANARY",
+      modelPreviewBytes: 20, previewOmitted: true, schemaEngine: "PRIVATE_CANARY" };
+    const value = projectGenericFailureDiagnostic({ code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED", limit: "PRIVATE_CANARY",
+      toolOperations: -1, tokenUsage: { totalTokens: Infinity, inputTokens: "123", outputTokens: 12, url: "PRIVATE_CANARY" },
+      limits: { outputTokens: 8192, private: "PRIVATE_CANARY" } },
+    { entries: [null, ...Array.from({ length: 12 }, () => entry)], lostEntries: 2 });
+    expect(value).toMatchObject({ tokenUsage: { outputTokens: 12 }, limits: { outputTokens: 8192 },
+      traceRetention: "PRESENT", toolTrace: { entries: Array.from({ length: 8 }, () => ({ action: "UNKNOWN_TOOL", status: "ERROR",
+        errorCode: "OTHER_TOOL_ERROR", modelPreviewBytes: 20, previewOmitted: true })), lostEntries: 7 } });
+    expect(value).not.toHaveProperty("limit"); expect(value).not.toHaveProperty("toolOperations");
+    expect(JSON.stringify(value)).not.toContain("PRIVATE_CANARY");
+  });
+  it.each([undefined, null, { entries: "PRIVATE", lostEntries: 0 }, { entries: [], lostEntries: -1 },
+    { entries: Array(1025).fill({}), lostEntries: 0 }])("distinguishes unavailable or malformed trace %j without inventing facts", trace => {
+    const value = projectGenericFailureDiagnostic({ code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" }, trace);
+    expect(value?.traceRetention).toBe(trace === undefined ? "NOT_RETAINED" : "INVALID");
+    expect(value).not.toHaveProperty("toolTrace"); expect(value).not.toHaveProperty("limit");
+  });
+  it("rejects arbitrary guard codes and leaves non-tool outcomes alone", () => {
+    expect(projectGenericFailureDiagnostic({ code: "PRIVATE" }, {})).toBeUndefined();
+    expect(discoveryFailureDiagnosis({ outcome: "UNSUPPORTED", checkpoint: {
+      genericGuard: { code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED", limit: "totalTokens" },
+    } })).not.toHaveProperty("genericFallbackDiagnostic");
   });
   it("never promotes an arbitrary guard or native reason into a diagnostic or changes a non-tool outcome", () => {
     const checkpoint = { stagehandFailure: { code: "ADAPTER_TRANSPORT_FAILED" }, genericGuard: {

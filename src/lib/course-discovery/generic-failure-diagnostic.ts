@@ -1,0 +1,48 @@
+const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value)
+  ? value as Record<string, unknown> : {};
+const count = (value: unknown, max = 1_000_000_000_000): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max;
+const budgetKeys = ["toolOperations", "totalTokens", "uncachedInputTokens", "outputTokens"] as const;
+const tokenKeys = ["totalTokens", "inputTokens", "cachedInputTokens", "uncachedInputTokens", "outputTokens", "reasoningOutputTokens"] as const;
+const actions = new Set(["BROWSER_OPEN", "BROWSER_OBSERVE", "BROWSER_CLICK", "BROWSER_SELECT", "BROWSER_FILL", "BROWSER_SCROLL",
+  "BROWSER_INSPECT_ADAPTER", "BROWSER_INSPECT", "BROWSER_FINISH", "BROWSER_UNKNOWN", "SCHEMA", "CHECKPOINT", "PROPOSE_RECIPE", "UNKNOWN_TOOL"]);
+const errors = new Set(["UNSUPPORTED_ADAPTER_SOURCE", "STALE_OR_UNKNOWN_ELEMENT", "STALE_OR_UNKNOWN_CONTROL", "DISCOVERY_RETRY_SAME_ADAPTER",
+  "UNOBSERVED_NAVIGATION", "BROWSER_SESSION_CLOSED", "BROWSER_UNAVAILABLE", "BROWSER_NAVIGATION_FAILED", "DISCOVERY_SOURCE_NOT_OBSERVED",
+  "DISCOVERY_RECIPE_INVALID", "DISCOVERY_REPLAY_INCOMPLETE", "DISCOVERY_PROPOSAL_INVALID", "DISCOVERY_RECIPE_ENGINE_NOT_ALLOWED",
+  "DISCOVERY_BROWSER_ACTION_INVALID", "DISCOVERY_CHECKPOINT_INVALID", "DISCOVERY_ACCESS_NOT_CONFIRMED", "DISCOVERY_NO_BROWSER_PROGRESS",
+  "DISCOVERY_GENERIC_BUDGET_EXHAUSTED", "DISCOVERY_NATIVE_TRANSPORT_FATAL", "DISCOVERY_WORK_DEADLINE", "DISCOVERY_CANCELLED",
+  "DISCOVERY_LEASE_REJECTED", "DISCOVERY_TRANSPORT_FALLBACK_FAILED", "OTHER_TOOL_ERROR"]);
+function counts(value: unknown, keys: readonly string[]) {
+  const input = record(value);
+  return Object.fromEntries(keys.filter(key => count(input[key])).map(key => [key, input[key] as number]));
+}
+type Entry = { action: string; status: string; modelPreviewBytes: number; previewOmitted: boolean; errorCode?: string; schemaEngine?: string };
+
+/** Closed structural projection of already-persisted facts. Never retain page
+ * contents, tool arguments, selectors, URLs or free-form errors. No authority. */
+export function projectGenericFailureDiagnostic(guardValue: unknown, traceValue: unknown) {
+  const guard = record(guardValue);
+  if (guard.code !== "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" && guard.code !== "DISCOVERY_NATIVE_TRANSPORT_FATAL") return;
+  const trace = record(traceValue), entries: Entry[] = [];
+  let lostEntries = count(trace.lostEntries, 999_999) ? trace.lostEntries : 0;
+  const validTrace = Array.isArray(trace.entries) && trace.entries.length <= 1024 && count(trace.lostEntries, 999_999);
+  if (validTrace) for (const value of trace.entries as unknown[]) {
+    const entry = record(value);
+    if (entries.length >= 8 || !["SUCCESS", "ERROR", "NO_REPLY"].includes(String(entry.status)) ||
+        !count(entry.modelPreviewBytes, 99_999_999) || typeof entry.previewOmitted !== "boolean") {
+      lostEntries = Math.min(999_999, lostEntries + 1); continue;
+    }
+    const action = typeof entry.action === "string" && actions.has(entry.action) ? entry.action : "UNKNOWN_TOOL";
+    entries.push({ action, status: entry.status as string, modelPreviewBytes: entry.modelPreviewBytes, previewOmitted: entry.previewOmitted,
+      ...(entry.status === "SUCCESS" ? {} : { errorCode: typeof entry.errorCode === "string" && errors.has(entry.errorCode) ? entry.errorCode : "OTHER_TOOL_ERROR" }),
+      ...(action === "SCHEMA" && ["HTTP_JSON", "BROWSER_DOM", "BROWSER_JSON", "EXISTING_ADAPTER"].includes(String(entry.schemaEngine))
+        ? { schemaEngine: entry.schemaEngine as string } : {}) });
+  }
+  return {
+    ...(guard.code === "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" && budgetKeys.some(key => key === guard.limit) ? { limit: guard.limit as string } : {}),
+    ...(count(guard.toolOperations, 100_000) ? { toolOperations: guard.toolOperations } : {}),
+    tokenUsage: counts(guard.tokenUsage, tokenKeys), limits: counts(guard.limits, budgetKeys),
+    traceRetention: traceValue === undefined ? "NOT_RETAINED" as const : validTrace ? "PRESENT" as const : "INVALID" as const,
+    ...(validTrace ? { toolTrace: { entries, lostEntries } } : {}), evidenceAuthority: false as const,
+  };
+}
