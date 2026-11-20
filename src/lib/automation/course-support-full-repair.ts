@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { readPersistedCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
 
 /** A failed reader is an engineering mission, not a succession of verifier
  * assignments. Negative deployed evidence stays with the same lease owner. */
@@ -48,10 +49,17 @@ export function interruptedRegisteredFullRepairPaths(input: {
   const { summary } = input;
   const provenance = summary.releaseProvenance as Record<string, unknown> | null;
   const paths = summary.plannedPaths;
+  const fence = readPersistedCourseSupportSearchExecutionFence(summary.searchExecutionFence);
+  // A first implementation can retain the empty fence captured at claim time.
+  // Preserve a registered candidate only before any real search execution.
+  const emptyClaimFence = fence?.settled && fence.batchSearchCount === 0 && fence.reasons.length === 0 &&
+    fence.memberships.length === 0 && fence.deletedSearchRefs.length === 0 && fence.probeEvidenceBySearch.length === 0 &&
+    fence.probeEvidenceRefs.length === 0 && fence.providerExecutionAttemptCourseRefs.length === 0 &&
+    fence.searchExecutionMayHaveStartedCourseRefs.length === 0;
   const eligible = input.status === "VERIFYING" && input.result === "PENDING" && input.deployedAt === null &&
     input.leaseExpiresAt <= input.now && input.releaseSha !== input.baseSha && /^[a-f0-9]{40}$/u.test(input.releaseSha ?? "") &&
     input.recheckDispatchKey === null && input.recheckDispatchStartedAt === null && input.recheckDispatchedAt === null &&
-    summary.searchExecutionFence === null && summary.recheckDispatch === null &&
+    (summary.searchExecutionFence === null || emptyClaimFence) && summary.recheckDispatch === null &&
     Array.isArray(paths) && paths.length > 0 && paths.every(path => typeof path === "string" && path.length > 0) &&
     provenance?.schemaVersion === 1 && provenance.descendantVerified === true && provenance.toSha === input.releaseSha &&
     typeof provenance.fromSha === "string" && /^[a-f0-9]{40}$/u.test(provenance.fromSha) && provenance.fromSha !== input.releaseSha &&

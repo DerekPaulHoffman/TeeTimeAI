@@ -35,6 +35,8 @@ import { isGenericCourseName } from "@/lib/places/course-identity";
 
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { appendCourseSupportLineage } from "./course-support-lineage";
+import { readCourseSupportRemediationClaimAttempt } from "./course-support-claim-evidence";
+import { interruptedRegisteredFullRepairPaths } from "./course-support-full-repair";
 import { revalidateCoursesForSourceQueryChange as revalidateSourceQueries } from "./course-support-source-query-revalidation";
 import {
   runCourseSupportBrowserPersistenceWrite,
@@ -144,6 +146,9 @@ export const ACTIVE_HUMAN_RETRY_MS = 6 * 60 * 60 * 1000;
 export const INACTIVE_HUMAN_RETRY_MS = 6 * 60 * 60 * 1000;
 export const ACTIVE_REMINDER_MS = 24 * 60 * 60 * 1000;
 export const INACTIVE_REMINDER_MS = 7 * 24 * 60 * 60 * 1000;
+// Allow two normal ten-minute scheduler ticks to wake the original owner of
+// a registered candidate before the watchdog can close its expired lease.
+const REGISTERED_REPAIR_OWNER_GRACE_MS = 20 * 60 * 1000;
 const DEPLOYMENT_REVALIDATION_PROMPT_VERSION =
   "course-monitoring-deployment-revalidation-v1";
 
@@ -6368,6 +6373,24 @@ function getDeadlineProviderSnapshotFingerprint(
   });
 }
 
+function awaitingRegisteredRepairOwner(batch: DeadlineBatchSnapshot, entry: DeadlineBatchIncidentSnapshot, now: Date) {
+  const summary = asMonitoringJsonRecord(batch.summary);
+  const remediation = asMonitoringJsonRecord(summary.remediation);
+  if (now.getTime() - batch.leaseExpiresAt.getTime() >= REGISTERED_REPAIR_OWNER_GRACE_MS || !batch.ownerThreadId ||
+      batch.incidents.length !== 1 || entry.incident.status !== "AUTO_INVESTIGATING" ||
+      entry.course.monitoringStatus?.state !== "AUTO_INVESTIGATING" ||
+      typeof summary.dispatchAssignmentRef !== "string" || !/^course-assignment-[a-f0-9-]{36}$/u.test(summary.dispatchAssignmentRef) ||
+      remediation.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" || remediation.workMode !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+      !interruptedRegisteredFullRepairPaths({ ...batch, result: entry.result, summary, now }) ||
+      entry.verificationRequests.some(request => ["QUEUED", "CHECKING", "RETRYABLE_FAILED"].includes(request.status))) return false;
+
+  const claim = readCourseSupportRemediationClaimAttempt({ summary, courseId: entry.courseId, expectedAttemptCount: 1 });
+  return Boolean(claim?.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
+    claim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") &&
+    courseSupportFailureFingerprintsMatch(claim.failureFingerprint, entry.incident.failureFingerprint) &&
+    claim.providerSnapshotFingerprint === getDeadlineProviderSnapshotFingerprint(entry.course));
+}
+
 function assessStaleDiscoveryImplementationHandoff(input: {
   batch: DeadlineBatchSnapshot;
   entry: DeadlineBatchIncidentSnapshot;
@@ -6733,6 +6756,9 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       batch,
       now: input.now,
     });
+  if (shouldCloseBatch && freshSuccessProbeByIncidentId.size === 0 && awaitingRegisteredRepairOwner(batch, currentEntry, input.now)) {
+    return { outcome: "OWNED" as const, incidentId: input.currentIncidentId };
+  }
   const currentSearchExecutionFence =
     await readCourseSupportSearchExecutionFence(
       transaction,

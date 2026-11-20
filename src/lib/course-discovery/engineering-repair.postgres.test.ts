@@ -514,7 +514,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     expect(await client.courseMonitoringEvent.count({ where: { incidentId: incident.id, eventType: "REVALIDATION_REQUESTED" } })).toBe(eventCount);
   });
-  it.each(["data-only", "published-code", "unpublished-code", "claimed-path", "pending-stopped", "pending-no-checkpoint", "registered-expired"])("keeps failed verification evidence and offers only its original %s Desktop owner a continuation", async scenario => {
+  it.each(["data-only", "published-code", "unpublished-code", "claimed-path", "pending-stopped", "pending-no-checkpoint", "registered-expired", "registered-watchdog-timeout"])("keeps failed verification evidence and offers only its original %s Desktop owner a continuation", async scenario => {
     const f = await failed();
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
@@ -539,14 +539,14 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     // failed learner clock remain unchanged in this isolated database fixture.
     const code = scenario !== "data-only";
     const claimed = scenario === "claimed-path";
-    const registered = scenario === "registered-expired";
+    const registered = scenario.startsWith("registered-");
     const pending = scenario.startsWith("pending-") || registered;
     const plannedPath = "src/lib/adapters/example.ts";
     await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: claimed ? "IMPLEMENTING" : "VERIFYING", releaseSha: code && !claimed ? "c".repeat(40) : baseSha,
       deployedAt: scenario === "data-only" || scenario === "published-code" || pending && !registered || claimed ? batch.createdAt : null,
       summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: registered
         ? [plannedPath, ...Array.from({ length: 37 }, (_, index) => `src/lib/previous-fix-${index}.ts`)] : code ? [plannedPath] : [],
-        ...(registered ? { searchExecutionFence: null, recheckDispatch: null, releaseProvenance: { schemaVersion: 1,
+        ...(registered ? { recheckDispatch: null, releaseProvenance: { schemaVersion: 1,
           fromSha: baseSha, toSha: "c".repeat(40), branch: (batch.summary as Prisma.JsonObject).branch,
           committedPaths: [plannedPath], descendantVerified: true } } : {}),
         ...(scenario === "pending-stopped" ? { ownerFailureCheckpoints: [{ schemaVersion: 1, stage: "VERIFICATION",
@@ -567,6 +567,13 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       const live = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: parent, baseSha, maxStarts: 1 });
       expect(live).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [] } });
       await client.courseSupportBatch.update({ where: { id: batch.id }, data: { leaseExpiresAt } });
+      await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { escalationDeadlineAt: leaseExpiresAt } });
+      const originalCandidate = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } });
+      expect(originalCandidate.summary).toMatchObject({ searchExecutionFence: { batchSearchCount: 0, memberships: [], settled: true } });
+      const monitoring = await import("@/lib/automation/course-monitoring");
+      expect(await monitoring.reconcileCourseMonitoringDeadlines({ courseIds: [f.course.id], source: "RECOVERY_CRON", now: new Date() }))
+        .toMatchObject({ checked: 1, retrying: 0, escalated: 0 });
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } })).toEqual(originalCandidate);
     }
     const nextParent = randomUUID(); batchOwners.push(nextParent);
     const next = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
@@ -667,6 +674,18 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
         .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
     }
     if (registered) {
+      if (scenario === "registered-watchdog-timeout") {
+        const monitoring = await import("@/lib/automation/course-monitoring");
+        const now = new Date(leaseExpiresAt.getTime() + 20 * 60_000);
+        await monitoring.reconcileCourseMonitoringDeadlines({ courseIds: [f.course.id], source: "RECOVERY_CRON", now });
+        expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } })).toMatchObject({
+          status: "RETRYABLE_FAILED", ownerThreadId: owner, releaseSha: "c".repeat(40),
+          summary: { closeout: { reason: "stale_endpoint_ownership_released" } },
+        });
+        expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+          .toMatchObject({ status: "FAILED", firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+        return;
+      }
       const retiredSearch = await client.teeSearch.update({ where: { id: f.search.id },
         data: { status: "COMPLETED", date: new Date(Date.now() - 2 * 86_400_000) }, select: COURSE_DISPATCH_SOURCE_SELECT });
       // Model an alert whose bound date has elapsed; keep its original intent
