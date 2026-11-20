@@ -372,6 +372,11 @@ describe("private failure evidence", () => {
     expect(result?.historicalFailure).toEqual({ feedbackKind: "DISCOVERY_BROWSER_INCOMPLETE" });
     expect(JSON.stringify(result)).not.toContain("PRIVATE_CANARY");
   });
+  it.each(["FIRST_TWO_AND_LATEST_SIX", "PRIVATE_CANARY", undefined])("retains only the closed trace layout %s", retention => {
+    const result = projectGenericFailureDiagnostic({ code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" }, { entries: [], lostEntries: 4, retention });
+    if (retention === "FIRST_TWO_AND_LATEST_SIX") expect(result?.toolTrace?.retention).toBe(retention);
+    else expect(result?.toolTrace).not.toHaveProperty("retention");
+  });
   it("projects the actual persisted worker trace under the production tsx loader without tool arguments", () => {
     const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=commonjs", "-e", `
       const {createDiscoveryToolTrace}=require('./scripts/automation/course-discovery-worker.mjs');
@@ -385,6 +390,19 @@ describe("private failure evidence", () => {
     expect(JSON.parse(output)).toMatchObject({ limit: "outputTokens", toolOperations: 1,
       tokenUsage: { outputTokens: 8192 }, toolTrace: { entries: [{ action: "BROWSER_INSPECT_ADAPTER", status: "ERROR",
         errorCode: "UNSUPPORTED_ADAPTER_SOURCE" }], lostEntries: 0 }, historicalFailure: { action: "click", staleControlReason: "CONTROL_SIGNATURE_CHANGED" }, evidenceAuthority: false });
+    expect(output).not.toContain("PRIVATE_CANARY");
+  });
+  it("keeps the terminal replies through the actual loader and owned projection", () => {
+    const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=commonjs", "-e", `
+      const {createDiscoveryToolTrace}=require('./scripts/automation/course-discovery-worker.mjs');
+      const {projectGenericFailureDiagnostic}=require('./src/lib/course-discovery/generic-failure-diagnostic.ts');
+      const trace=createDiscoveryToolTrace();
+      for(let i=0;i<12;i++)trace.record('discovery_browser',{action:'observe',url:'PRIVATE_CANARY'},'SUCCESS',undefined,'x'.repeat(i));
+      console.log(JSON.stringify(projectGenericFailureDiagnostic({code:'DISCOVERY_GENERIC_BUDGET_EXHAUSTED'},trace.snapshot())));
+    `], { encoding: "utf8", windowsHide: true });
+    const result = JSON.parse(output);
+    expect(result.toolTrace.retention).toBe("FIRST_TWO_AND_LATEST_SIX"); expect(result.toolTrace.lostEntries).toBe(4);
+    expect(result.toolTrace.entries.map((entry: { modelPreviewBytes: number }) => entry.modelPreviewBytes)).toEqual([0, 1, 6, 7, 8, 9, 10, 11]);
     expect(output).not.toContain("PRIVATE_CANARY");
   });
   it("caps traces and strips unknown codes, counts and private fields", () => {

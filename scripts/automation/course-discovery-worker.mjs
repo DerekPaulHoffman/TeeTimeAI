@@ -30,7 +30,10 @@ export function createDiscoveryToolTrace() {
   const entries = []; let lostEntries = 0;
   return {
     record(tool, input, status, errorCode, modelText = "") {
-      if (entries.length >= 8) { lostEntries = Math.min(Number.MAX_SAFE_INTEGER, lostEntries + 1); return; }
+      // Keep the startup pair and latest six replies, rather than discarding
+      // every diagnostic leading into a later failure. The eight-entry bound
+      // and data-free metadata contract remain unchanged.
+      if (entries.length >= 8) { entries.splice(2, 1); lostEntries = Math.min(Number.MAX_SAFE_INTEGER, lostEntries + 1); }
       const action = tool === "discovery_browser" ? BROWSER_ACTIONS.includes(input?.action) ? `BROWSER_${input.action.toUpperCase()}` : "BROWSER_UNKNOWN" :
         tool === "discovery_recipe_schema" ? "SCHEMA" : tool === "discovery_checkpoint" ? "CHECKPOINT" : tool === "discovery_propose_recipe" ? "PROPOSE_RECIPE" : "UNKNOWN_TOOL";
       let previewOmitted = false;
@@ -40,7 +43,8 @@ export function createDiscoveryToolTrace() {
         modelPreviewBytes: typeof modelText === "string" ? Buffer.byteLength(modelText, "utf8") : 0, previewOmitted,
         ...(tool === "discovery_recipe_schema" && ["HTTP_JSON", "BROWSER_DOM", "BROWSER_JSON", "EXISTING_ADAPTER"].includes(input?.engine) ? { schemaEngine: input.engine } : {}) });
     },
-    snapshot: () => ({ entries: entries.map(entry => ({ ...entry })), lostEntries }),
+    snapshot: () => ({ entries: entries.map(entry => ({ ...entry })), lostEntries,
+      ...(lostEntries ? { retention: "FIRST_TWO_AND_LATEST_SIX" } : {}) }),
   };
 }
 function safeObservedUrl(value) {

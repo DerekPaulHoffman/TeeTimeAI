@@ -60,7 +60,8 @@ export function projectGenericFailureDiagnostic(guardValue: unknown, traceValue:
     ...(count(guard.toolOperations, 100_000) ? { toolOperations: guard.toolOperations } : {}),
     tokenUsage: counts(guard.tokenUsage, tokenKeys), limits: counts(guard.limits, budgetKeys),
     traceRetention: traceValue === undefined ? "NOT_RETAINED" as const : validTrace ? "PRESENT" as const : "INVALID" as const,
-    ...(validTrace ? { toolTrace: { entries, lostEntries } } : {}), evidenceAuthority: false as const,
+    ...(validTrace ? { toolTrace: { entries, lostEntries,
+      ...(trace.retention === "FIRST_TWO_AND_LATEST_SIX" ? { retention: "FIRST_TWO_AND_LATEST_SIX" as const } : {}) } } : {}), evidenceAuthority: false as const,
     ...(historicalFailure ? { historicalFailure } : {}), ...(lastFeedback ? { lastFeedback } : {}),
   };
 }

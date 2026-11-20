@@ -42,6 +42,14 @@ describe("model-only discovery context bounds", () => {
     expect(trace.snapshot().entries[0]).toEqual({ action: "UNKNOWN_TOOL", status: "NO_REPLY", errorCode: "OTHER_TOOL_ERROR", modelPreviewBytes: 0, previewOmitted: false });
     expect(JSON.stringify(trace.snapshot())).not.toContain("PRIVATE");
   });
+  it("retains startup and the latest six replies when the eight-entry diagnostic fills", () => {
+    const trace = createDiscoveryToolTrace();
+    for (let index = 0; index < 12; index++) trace.record("discovery_browser", { action: "observe", selector: "PRIVATE" }, "SUCCESS", undefined, "x".repeat(index));
+    expect(trace.snapshot()).toMatchObject({ retention: "FIRST_TWO_AND_LATEST_SIX", lostEntries: 4,
+      entries: [0, 1, 6, 7, 8, 9, 10, 11].map(modelPreviewBytes => ({ modelPreviewBytes })) });
+    expect(trace.snapshot().entries).toHaveLength(8);
+    expect(JSON.stringify(trace.snapshot())).not.toContain("PRIVATE");
+  });
   it("projects only the three precise inspect-stale conjunct reasons", () => {
     for (const staleControlReason of ["ELEMENT_NOT_OBSERVED", "CONTROL_NOT_RENDERED", "CONTROL_SIGNATURE_CHANGED"])
       expect(safeFixedInspectionSourceDiagnostic({ staleControlReason, selector: "PRIVATE", body: "PRIVATE" })).toEqual({ staleControlReason });
