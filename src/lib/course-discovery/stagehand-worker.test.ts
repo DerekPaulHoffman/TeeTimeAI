@@ -1205,6 +1205,26 @@ describe("regular Stagehand source worker", () => {
     expect(t.client.candidate).not.toHaveBeenCalled();
   });
 
+  it("hands a denied native navigation to support without repeating Stagehand discovery", async () => {
+    const t = setup();
+    t.f.report.sourceDiagnostic = sourceFailureDiagnostic({
+      error: new Error("Navigation closed"),
+      phase: "SETTLE", report: t.f.report, startedAt: first,
+      cleanup: { browserClosed: true, modelClosed: true },
+      nativeRouterFailure: { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_OWNER",
+        method: "GET", operation: "REQUEST_METADATA", rootFrame: true, loaderKnown: false,
+        documentCommitted: true, identityFresh: true, documentIntentPresent: false },
+    });
+    Object.assign(t.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null,
+      frameworkFailureCode: "STAGEHAND_SOURCE_DISCOVERY_FAILED" });
+    await expect(t.run()).rejects.toMatchObject({ code: "STAGEHAND_SOURCE_DISCOVERY_FAILED", retryable: false });
+    expect(t.genericWorker).not.toHaveBeenCalled();
+    expect(t.client.candidate).not.toHaveBeenCalled();
+    expect(t.checkpoints[0]).toMatchObject({ stagehandFailure: { entries: [{ diagnostic: {
+      nativeRouterFailure: { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_OWNER" }
+    } }] } });
+  });
+
   it("retains both same-job failure attempts across a fresh lease without reusing diagnostics as routing evidence", async () => {
     const one = setup(); Object.assign(one.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "STAGEHAND_SOURCE_ACTION_UNAVAILABLE" });
     await expect(one.run()).rejects.toThrow("STAGEHAND_SOURCE_ACTION_UNAVAILABLE");

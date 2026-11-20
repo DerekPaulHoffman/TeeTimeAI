@@ -234,7 +234,15 @@ export async function runCourseDiscoveryStagehandWorker({
           const modelFailure = currentSourceModelFailure(report, job, sourceDeadline, now(), started);
           if (modelFailure) metrics.modelFailure = modelFailure;
         }
-        throw discoveryError(sourceFailure);
+        const error = discoveryError(sourceFailure);
+        const diagnostic = projectSourceDiagnostic(report.sourceDiagnostic);
+        if (sourceFailure === "STAGEHAND_SOURCE_DISCOVERY_FAILED" &&
+            diagnostic?.nativeRouterFailure?.code === "NATIVE_REDIRECT_LOADER_MISMATCH") {
+          // The owned browser denied the navigation. An identical Stagehand
+          // retry cannot qualify its route; retain the guard for support.
+          error.retryable = false;
+        }
+        throw error;
       }
       validateStagehandSourceReport(report, job);
       reference = createStagehandSourceCheckpoint(job, report);

@@ -188,7 +188,8 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
           activatedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString(), metrics: outcome.metrics };
         }
       } catch (error) {
-        let retryableFailure = error?.code !== "STAGEHAND_SOURCE_BUDGET_EXHAUSTED" && !DISCOVERY_NONRETRYABLE_GUARD_CODES.includes(error?.code);
+        let retryableFailure = error?.retryable !== false && error?.code !== "STAGEHAND_SOURCE_BUDGET_EXHAUSTED" &&
+          !DISCOVERY_NONRETRYABLE_GUARD_CODES.includes(error?.code);
         if (!execution && !activationAcknowledgedAt && job.attempts === 1 && transientModelFailure(error)) {
           // Delay only the existing retry. Keep this owned lease and heartbeat
           // live; cancellation and the original work deadline still win.

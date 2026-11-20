@@ -39,6 +39,18 @@ describe("discovery activation and heartbeat handoff", () => {
     expect(client.fail).not.toHaveBeenCalled(); expect(JSON.stringify(failWithDiagnostic.mock.calls)).not.toContain("PRIVATE_CANARY");
     await supervisor.stop();
   });
+  it("does not reopen a job after the worker reports a terminal navigation guard", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(originTime);
+    const job = assignedJob(), client = clientFor(job);
+    const startWorker = vi.fn(async () => {
+      throw Object.assign(new Error("Source navigation failed"), { code: "STAGEHAND_SOURCE_DISCOVERY_FAILED", retryable: false });
+    });
+    const supervisor = createCourseDiscoverySupervisor({ client, startWorker });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(0);
+    expect(client.fail).toHaveBeenCalledOnce();
+    expect(client.fail).toHaveBeenCalledWith(job.id, job.leaseToken, "TOOL_FAILURE", false);
+    await supervisor.stop();
+  });
   it.each(["LEASE_EXPIRY", "WORK_DEADLINE"] as const)("does not turn a successful activation ACK into %s during local cleanup", async fence => {
     vi.useFakeTimers(); vi.setSystemTime(originTime);
     const cleanup = deferred<void>();
