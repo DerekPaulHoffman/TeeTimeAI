@@ -95,6 +95,26 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
 describe("unattended direct public protocol inspection", () => {
   const open: Action = { tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } };
   const checkpoint: Action = { tool: "discovery_checkpoint", arguments: { summary: "bounded synthetic observation" } };
+  it.each([
+    { summary: "private-checkpoint-canary", outcome: "TOOL_FAILURE" },
+    { summary: "private-checkpoint-canary", extra: "private-field-canary" },
+    { summary: null },
+  ])("guides a rejected checkpoint back to the closed schema without echoing input (%j)", async arguments_ => {
+    const out = await run({ actions: [
+      { tool: "discovery_checkpoint", arguments: arguments_ }, checkpoint, inspect(), proposal,
+    ] });
+    const reply = out.replies[0] as { result: { success: boolean; contentItems: { text: string }[] } };
+    expect(reply.result.success).toBe(false);
+    const feedback = JSON.parse(reply.result.contentItems[0].text);
+    expect(feedback.error).toBe("DISCOVERY_CHECKPOINT_INVALID");
+    expect(feedback.hint).toContain("omit outcome");
+    expect(feedback.hint).toContain("2000");
+    expect(JSON.stringify(out.replies)).not.toContain("private-checkpoint-canary");
+    expect(JSON.stringify(out.replies)).not.toContain("private-field-canary");
+    expect(out.result.outcome).toBe("activated");
+    expect(out.result.metrics.genericBudget.toolOperations).toBe(4);
+    expect(out.inspectProtocol).toHaveBeenCalledOnce();
+  });
   it("denies the failed inspection on retry while allowing a fresh public observation", async () => {
     const out = await run({
       mutate: value => Object.assign(value, { attempts: 2 }),

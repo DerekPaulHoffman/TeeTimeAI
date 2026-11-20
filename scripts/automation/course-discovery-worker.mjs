@@ -2299,6 +2299,11 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           }
           const modelText = JSON.stringify(previewDiscoverySnapshot({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
             ...(feedback ? { details: feedback.details } : {}),
+            // Return the closed correction contract, never rejected arguments.
+            // An invalid progress report must not invite repeated guesses that
+            // spend the remaining model budget or imply an access verdict.
+            ...(message.params.tool === "discovery_checkpoint" && error?.code === "DISCOVERY_CHECKPOINT_INVALID"
+              ? { hint: "Use only summary (a string of at most 2000 characters) and optional outcome. For an ordinary progress checkpoint omit outcome. The only outcomes are UNSUPPORTED (unverified retryable limitation) and ACCESS_REQUIRED (requires the current observed access wall). Do not report success or tooling failure as an outcome; preserve those facts in summary. The original deadline and all budgets are unchanged." } : {}),
             ...(replayClosedBrowser ? { browserSessionClosed: true,
               hint: "Independent replay closed the discovery browser. Open an already observed public URL to obtain fresh controls before correcting the recipe; the original deadline is unchanged." } : {}),
             ...(error?.code === "DISCOVERY_REPLAY_INCOMPLETE" && error?.details?.reason === "ADAPTER_IDENTITY_MISMATCH"
