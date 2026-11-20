@@ -295,28 +295,34 @@ export async function requestOwnedOutdoorLearningRecovery(input: {
 /** Called under the source lock and the qualified original writer's lease. */
 export async function createOwnedLateLearningJob(tx: Tx, failure: NonNullable<Awaited<ReturnType<typeof currentDiscoveryEngineeringFailure>>>,
   owner: Pick<LearningRepairRecovery, "batchId" | "incidentId" | "ownerThreadId" | "cycle" | "releaseSha" |
-    "runtimeVersion" | "simulatorAssignmentRef">, now: Date) {
+    "runtimeVersion" | "simulatorAssignmentRef">, now: Date, prepared?: {
+      recipe: CourseAccessRecipeData; sourceEvidence: DiscoverySourceEvidence; verificationDurationMinutes?: number;
+    }) {
   const { job: original, request } = failure;
+  if (prepared) bindRecipe(prepared.recipe, failure.source, prepared.sourceEvidence, request);
+  const preparedRecipeHash = prepared ? hashAccessRecipe(prepared.recipe) : undefined;
   const history = readLearningRepairRecoveries(original.result);
   if (!history) return { outcome: "invalid_recovery_history" as const };
-  const prior = history.find(link => link.batchId === owner.batchId && link.releaseSha === owner.releaseSha);
+  const prior = history.find(link => link.batchId === owner.batchId && link.releaseSha === owner.releaseSha &&
+    Boolean(link.preparedRecipeHash) === Boolean(preparedRecipeHash));
   if (prior) {
     const child = await tx.courseDiscoveryJob.findUnique({ where: { id: prior.jobId } });
     if (!child || child.sourceFingerprint !== original.sourceFingerprint || child.targetKey !== original.targetKey ||
-        prior.simulatorAssignmentRef !== owner.simulatorAssignmentRef) conflict();
+        prior.simulatorAssignmentRef !== owner.simulatorAssignmentRef || prior.preparedRecipeHash !== preparedRecipeHash) conflict();
     return { outcome: "existing" as const, jobId: child.id, originalJobId: original.id,
       releaseSha: prior.releaseSha, runtimeVersion: prior.runtimeVersion };
   }
   if (history.length >= MAX_LEARNING_REPAIR_RECOVERIES) return { outcome: "recovery_history_exhausted" as const };
   if (await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: original.targetKey } })) return { outcome: "busy" as const };
   const link = learningRepairRecoverySchema.parse({ ...owner, version: 1, kind: "LATE_ENGINEERING_RECOVERY",
+    ...(preparedRecipeHash ? { preparedRecipeHash } : {}),
     originalJobId: original.id, jobId: randomUUID(), sourceFingerprint: original.sourceFingerprint,
     originalFirstPickedUpAt: original.firstPickedUpAt!.toISOString(), originalDeadlineAt: original.deadlineAt!.toISOString(),
     requestedAt: now.toISOString() });
   const child = await tx.courseDiscoveryJob.create({ data: { id: link.jobId, courseId: original.courseId,
     offeringId: original.offeringId, targetKey: original.targetKey, activeTargetKey: original.targetKey,
     sourceFingerprint: original.sourceFingerprint, baseRecipeId: original.baseRecipeId, request: json(request),
-    result: json({ learningRecoveryOf: link }) } });
+    result: json({ learningRecoveryOf: link, ...(prepared ? { preparedLearningRecipe: prepared } : {}) }) } });
   const parentResult = original.result && typeof original.result === "object" && !Array.isArray(original.result) ? original.result : {};
   const updated = await tx.courseDiscoveryJob.updateMany({ where: { id: original.id, status: original.status,
     sourceFingerprint: original.sourceFingerprint, activeTargetKey: null, updatedAt: original.updatedAt },
@@ -694,6 +700,15 @@ export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, 
   return transaction(async tx => {
     const { job, now, source } = await owned(tx, jobId, leaseToken);
     const request = job.request as unknown as DiscoveryRequest;
+    const recovery = readLearningRepairRecoveryOf(job.result);
+    if (recovery?.preparedRecipeHash) {
+      const prepared = (job.result as Record<string, unknown>).preparedLearningRecipe as {
+        sourceEvidence?: DiscoverySourceEvidence; verificationDurationMinutes?: number;
+      } | undefined;
+      if (!prepared || recovery.preparedRecipeHash !== recipeHash ||
+          canonical(prepared.sourceEvidence) !== canonical(sourceEvidence) ||
+          prepared.verificationDurationMinutes !== selectedDuration) conflict();
+    }
     if (selectedDuration !== undefined && !request.demand) conflict();
     const durationSelection = selectedDuration === undefined ? undefined : durationSelectionSchema.parse({
       searchId: request.demand!.searchId, alertGeneration: request.demand!.alertGeneration, minutes: selectedDuration });

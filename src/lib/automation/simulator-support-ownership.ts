@@ -873,17 +873,46 @@ export function queueSimulatorSupportRechecks(input: Owner) {
 
 /** The original simulator worker returns its registered repair to the normal
  * learner. A live descendant is the execution runtime, never a new repair SHA. */
-export function requestSimulatorLearningRecovery(input: Owner & { runtimeVersion: string; registeredRelease: string }) {
+export function requestSimulatorLearningRecovery(input: Owner & {
+  runtimeVersion: string; registeredRelease: string; preparedMethod?: unknown;
+}) {
   const runtimeVersion = z.string().regex(/^[a-f0-9]{40}$/u).parse(input.runtimeVersion);
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
     await tx.$queryRaw`SELECT "id" FROM "Course" WHERE "id" = ${row.audit.target.courseId} FOR UPDATE`;
     const owned = await loadSimulatorRecoveryClaim(tx, row.runId, now);
     if (!owned || owned.claim.releaseSha !== input.registeredRelease) throw new Error("OWNED_SIMULATOR_LEARNING_REPAIR_REQUIRED");
-    const { createOwnedLateLearningJob } = await import("@/lib/course-discovery/service");
+    const { createOwnedLateLearningJob, discoveryVerificationDurationSchema } = await import("@/lib/course-discovery/service");
+    const prepared = input.preparedMethod === undefined ? undefined : await (async () => {
+      const { parseAccessRecipe } = await import("@/lib/course-discovery/recipe");
+      const manifest = z.object({ recipe: z.unknown(), verificationDurationMinutes: discoveryVerificationDurationSchema.optional() })
+        .strict().parse(input.preparedMethod);
+      const recipe = parseAccessRecipe(manifest.recipe);
+      const research = readSimulatorResearchState(row.audit.simulatorResearch, row.claim.sourceFingerprint);
+      const bookingUrl = recipe.source.bookingUrl;
+      const catalog = /^https:\/\/book\.squareup\.com\/appointments\/[a-z0-9]{1,64}\/location\/[A-Z0-9]{13}\/services$/u;
+      const observed = research.history.filter(entry => entry.sourceFingerprint === row.source.fingerprint &&
+        (entry.requestedUrl === bookingUrl || entry.sourceUrl === bookingUrl)).at(-1);
+      // A prepared simulator may start only at a proven public booking page.
+      // Square's exact same-location service detail is independently checked
+      // by the existing rental, duration and complete-month replay guards.
+      if (recipe.engine !== "BROWSER_DOM" || recipe.target.kind !== "SIMULATOR" ||
+          !observed || !observed.requestId || observed.outcome !== "READ" || observed.failure ||
+          observed.httpStatus < 200 || observed.httpStatus >= 300 ||
+          observed.publicReadEvidence?.sourceFingerprint !== row.source.fingerprint ||
+          !observed.publicReadEvidence.accessControlsObserved || observed.publicReadEvidence.accessControls.length ||
+          Date.parse(observed.observedAt) < Date.parse(row.claim.claimedAt) || Date.parse(observed.observedAt) > now.getTime() ||
+          (recipe.pageUrl !== bookingUrl && (recipe.source.providerFamily !== "SQUARE" ||
+            recipe.availabilityResponse.kind !== "SQUARE_PUBLIC_MONTH" ||
+            !catalog.test(bookingUrl) || !recipe.pageUrl.startsWith(`${bookingUrl}/`) ||
+            !/^[A-Z0-9]{16,32}$/u.test(recipe.pageUrl.slice(bookingUrl.length + 1)))))
+        throw new Error("SIMULATOR_PREPARED_PUBLIC_SOURCE_REQUIRED");
+      return { recipe, sourceEvidence: { officialUrl: recipe.source.officialUrl, observedBookingUrl: bookingUrl },
+        verificationDurationMinutes: manifest.verificationDurationMinutes };
+    })();
     return createOwnedLateLearningJob(tx, owned.failure, { batchId: row.runId, incidentId: row.audit.target.incidentId,
       ownerThreadId: input.ownerThreadId, cycle: row.audit.target.cycle, releaseSha: input.registeredRelease,
-      runtimeVersion, simulatorAssignmentRef: row.audit.assignmentRef }, now);
+      runtimeVersion, simulatorAssignmentRef: row.audit.assignmentRef }, now, prepared);
   });
 }
 

@@ -59,12 +59,19 @@ export async function readOwnedFailedLearningProgress(reader: Pick<Prisma.Transa
     courseId: expected.courseId, offeringId: expected.offeringId ?? null, status: { in: ["FAILED", "TIMED_OUT"] },
     AND: [{ result: { path: ["learningRecoveryOf", "batchId"], equals: expected.batchId } },
       { result: { path: ["learningRecoveryOf", "releaseSha"], equals: expected.releaseSha } }],
-  }, take: 2 });
-  // A registered implementation has at most one reciprocal child. Ambiguity
-  // never manufactures another continuation or selects a convenient failure.
-  if (children.length !== 1) return null;
-  const link = readLearningRepairRecoveryOf(children[0].result);
+  }, take: expected.offeringId ? 3 : 2 });
+  // Simulators can perform a separate independent check of an owner-prepared
+  // method. Prefer that settled evidence only after both links match exactly.
+  const [first, second] = children;
+  if (!first || children.length > (expected.offeringId ? 2 : 1)) return null;
+  const link = readLearningRepairRecoveryOf(first.result);
   if (!link) return null;
   const parent = await reader.courseDiscoveryJob.findUnique({ where: { id: link.originalJobId } });
-  return parent ? projectOwnedFailedLearningProgress(children[0], parent, expected) : null;
+  if (!parent) return null;
+  const originalProgress = projectOwnedFailedLearningProgress(first, parent, expected);
+  if (!second) return originalProgress;
+  const nextLink = readLearningRepairRecoveryOf(second.result);
+  if (!originalProgress || !nextLink || Boolean(link.preparedRecipeHash) === Boolean(nextLink.preparedRecipeHash)) return null;
+  const otherProgress = projectOwnedFailedLearningProgress(second, parent, expected);
+  return otherProgress ? (link.preparedRecipeHash ? originalProgress : otherProgress) : null;
 }

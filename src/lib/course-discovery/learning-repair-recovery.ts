@@ -9,12 +9,13 @@ export const learningRepairRecoverySchema = z.object({
   version: z.literal(1), kind: z.literal("LATE_ENGINEERING_RECOVERY"),
   originalJobId: id, jobId: id, batchId: id, incidentId: id, ownerThreadId: id,
   simulatorAssignmentRef: id.optional(),
+  preparedRecipeHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   cycle: z.number().int().positive(),
   sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
   releaseSha: z.string().regex(/^[a-f0-9]{40}$/u),
   runtimeVersion: z.string().regex(/^[a-f0-9]{40}$/u), requestedAt: z.string().datetime(),
   originalFirstPickedUpAt: z.string().datetime(), originalDeadlineAt: z.string().datetime(),
-}).strict().refine(value => value.originalJobId !== value.jobId &&
+}).strict().refine(value => value.originalJobId !== value.jobId && (!value.preparedRecipeHash || value.simulatorAssignmentRef) &&
   Date.parse(value.originalDeadlineAt) - Date.parse(value.originalFirstPickedUpAt) === 900_000);
 export type LearningRepairRecovery = z.infer<typeof learningRepairRecoverySchema>;
 export const MAX_LEARNING_REPAIR_RECOVERIES = 16;
@@ -25,7 +26,7 @@ export const learningRecipeHandoffSchema = z.object({ version: z.literal(1),
 }).strict();
 const historySchema = z.array(learningRepairRecoverySchema).max(MAX_LEARNING_REPAIR_RECOVERIES)
   .refine(links => new Set(links.map(link => link.jobId)).size === links.length &&
-    new Set(links.map(link => `${link.batchId}:${link.releaseSha}`)).size === links.length);
+    new Set(links.map(link => `${link.batchId}:${link.releaseSha}:${Boolean(link.preparedRecipeHash)}`)).size === links.length);
 const object = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 

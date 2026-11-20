@@ -2,7 +2,7 @@ import "./load-local-env";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { prisma } from "@/lib/prisma";
 import { resolveCodexOwnerThreadId } from "./git-output";
 import { readDispatchGitState } from "./course-support-dispatch";
@@ -44,11 +44,12 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
       repair = true; index -= 1; continue;
     }
     const name = options[index], value = options[index + 1]?.trim();
-    if (!["--assignment-ref", "--token", "--revision", "--path", "--sha", "--retry-minutes", "--manifest", "--source", "--link", "--interactive-channel"].includes(name) || values.has(name) || !value || value.startsWith("--")) throw new Error("Invalid simulator-support option.");
+    if (!["--assignment-ref", "--token", "--revision", "--path", "--sha", "--retry-minutes", "--manifest", "--source", "--link", "--interactive-channel", "--recipe"].includes(name) || values.has(name) || !value || value.startsWith("--")) throw new Error("Invalid simulator-support option.");
     values.set(name, value);
   }
   const allowed = new Set(["--assignment-ref", ...(command !== "claim" ? ["--token", "--revision"] : []),
-    ...(command === "path" ? ["--path"] : []), ...(command === "release" ? ["--sha"] : []), ...(command === "retry" ? ["--retry-minutes"] : []), ...(["configure", "classify"].includes(command) ? ["--manifest"] : []), ...(command === "source-read" ? ["--source", "--link", "--interactive-channel"] : [])]);
+    ...(command === "path" ? ["--path"] : []), ...(command === "release" ? ["--sha"] : []), ...(command === "retry" ? ["--retry-minutes"] : []), ...(["configure", "classify"].includes(command) ? ["--manifest"] : []), ...(command === "source-read" ? ["--source", "--link", "--interactive-channel"] : []),
+    ...(command === "recover-learning" ? ["--recipe"] : [])]);
   if ([...values.keys()].some(value => !allowed.has(value)) || !values.get("--assignment-ref") ||
       /^(?:undefined|null|\[object Object\])$/iu.test(values.get("--assignment-ref")!) ||
       (!["claim", "inspect"].includes(command) && (!values.get("--token") || !/^[1-9][0-9]*$/.test(values.get("--revision") ?? ""))) ||
@@ -62,7 +63,8 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
         (values.has("--source") && !(SIMULATOR_RESEARCH_SOURCE_NAMES as readonly string[]).includes(values.get("--source")!)) ||
         (values.has("--link") && !/^(?:[1-9]|[12][0-9]|30)$/.test(values.get("--link")!))))) throw new Error("Simulator-support command arguments are incomplete.");
   return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as SimulatorResearchSource | undefined,
-    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, interactiveChannel: values.get("--interactive-channel"), rendered: rendered || values.has("--interactive-channel"), apply, repair, fromResearch };
+    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, interactiveChannel: values.get("--interactive-channel"), rendered: rendered || values.has("--interactive-channel"), apply, repair, fromResearch,
+    ...(values.has("--recipe") ? { recipePath: values.get("--recipe") } : {}) };
 }
 
 function git(args: string[]) { return execFileSync("git", args, { encoding: "utf8", windowsHide: true }).trim(); }
@@ -172,11 +174,20 @@ async function main() {
         runtimeVersion !== git(["rev-parse", "origin/main"]))
       throw new Error("CLEAN_PUBLISHED_DESCENDANT_RUNTIME_REQUIRED");
     git(["merge-base", "--is-ancestor", claim.releaseSha, runtimeVersion]);
+    let preparedMethod: unknown;
+    if (input.recipePath) {
+      const path = resolve(input.recipePath);
+      const info = await stat(path);
+      if (!info.isFile() || info.size > 64_000) throw new Error("BOUNDED_SIMULATOR_RECIPE_FILE_REQUIRED");
+      const contents = await readFile(path, "utf8");
+      if (Buffer.byteLength(contents) > 64_000) throw new Error("BOUNDED_SIMULATOR_RECIPE_FILE_REQUIRED");
+      preparedMethod = JSON.parse(contents.replace(/^\uFEFF/u, ""));
+    }
     await prepareCourseSupportRuntime({
       executable: resolve(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
       scriptPath: resolve("scripts/automation/update-course-discovery-runtime.ps1"), runtimeVersion, ownerThreadId,
     });
-    result = await requestSimulatorLearningRecovery({ ...owner, runtimeVersion, registeredRelease: claim.releaseSha });
+    result = await requestSimulatorLearningRecovery({ ...owner, runtimeVersion, registeredRelease: claim.releaseSha, preparedMethod });
   }
   else if (input.command === "retire") result = await retireSimulatorSupport(owner);
   else if (input.command === "source-read") result = await readSimulatorSupportSource({ ...owner, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered, interactiveChannel: input.interactiveChannel });

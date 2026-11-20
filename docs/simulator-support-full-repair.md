@@ -27,6 +27,17 @@ owner once for the new diagnosis. Read the linked result and previously
 collected evidence before claiming paths for a different correction. The wake
 adds no provider reads and grants no repeat of that learner or budget.
 
+When the original native investigation has already established a method,
+pass a private data-only manifest with `recover-learning --recipe <file>`.
+Its fields are `recipe` and optional `verificationDurationMinutes` for
+Any-duration demand. The recipe uses the existing `BROWSER_DOM` schema.
+The server binds its booking URL to captured signed-out evidence on the same
+offering and verifies its venue, route and original demand. The local runtime
+skips new model discovery and runs both independent challenges, with the same
+access, safety, duration and completeness checks as normal activation. A
+manifest supplies a candidate, never availability evidence. Keep the file
+private. A repeated submission of that method returns the same late job.
+
 Read `discoveryEngineeringFailure`, retained research history and failed routes
 before choosing a different approach. Keep a private hypothesis, evidence,
 correction and regression receipt. Spending a research budget does not establish

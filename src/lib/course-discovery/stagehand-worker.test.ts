@@ -92,6 +92,37 @@ function setup() {
     client, cwd: process.cwd(), now: () => f.clock, sourceDiscover, browserFactory, validateRecipe, executeRecipe, genericWorker, beforeActivate, afterActivate, ...extra });
   return { f, events, checkpoints, sourceCalls, request, close, browserFactory, sourceDiscover, client, validateRecipe, executeRecipe, genericWorker, beforeActivate, afterActivate, run };
 }
+
+it("uses the original owner's prepared public method only through two independent replays", async () => {
+  const t = setup(), target = { courseId: "unseen-course", offeringId: "simulator", kind: "SIMULATOR" };
+  const sourceEvidence = { officialUrl: official, observedBookingUrl: booking };
+  const recipe = { schemaVersion: 1, engine: "BROWSER_DOM", target, pageUrl: booking, steps: [],
+    source: { venueName: t.f.job.request.identity.name, officialUrl: official, bookingUrl: booking, timeZone: "UTC", providerFamily: "PUBLIC_SAMPLE" },
+    permittedRoutes: [
+      { origin: new URL(booking).origin, path: "/public", methods: ["GET"], queryKeys: ["view"] },
+      { origin: new URL(booking).origin, path: "/availability", methods: ["GET"], queryKeys: ["date"] },
+    ],
+    availabilityResponse: { url: `${new URL(booking).origin}/availability?date={{date}}`, method: "GET", date: { source: "QUERY", path: "date" } },
+    proof: { venue: { selector: "h1" }, date: { selector: "#date" }, complete: { selector: "#loaded" }, durationMinutes: { selector: "#duration" } },
+    slots: { scope: { selector: "article.resource", label: { selector: "h2" }, expectedLabel: "Golf Simulator" },
+      collection: { selector: ".slot" }, startsAt: { selector: ".start" }, endsAt: { derive: "ADD_REQUESTED_DURATION" } } };
+  const input = { ...t.f.job.request.input, durationMinutes: 60 };
+  const job = { ...t.f.job, request: { ...t.f.job.request, target, input },
+    result: { learningRecoveryOf: { simulatorAssignmentRef: "owner-assignment", preparedRecipeHash: "b".repeat(64) },
+      preparedLearningRecipe: { recipe, sourceEvidence } } };
+  t.client.candidate.mockImplementationOnce(async () => ({ recipeHash: "b".repeat(64), challenges: [
+    { id: "one", recipeHash: "b".repeat(64), input },
+    { id: "two", recipeHash: "b".repeat(64), input: { ...input, date: "2030-01-04" } },
+  ] }));
+  expect(await t.run({ job })).toMatchObject({ outcome: "activated", metrics: {
+    frameworkRole: "ORIGINAL_OWNER_PREPARED_REPLAY", modelCalls: 0, replayModelCalls: 0,
+  } });
+  expect(t.client.candidate).toHaveBeenCalledWith(job.id, job.leaseToken, recipe, undefined, sourceEvidence);
+  expect(t.executeRecipe).toHaveBeenCalledTimes(2);
+  expect(t.client.verification).toHaveBeenCalledTimes(2);
+  expect(t.client.activate).toHaveBeenCalledTimes(1);
+  for (const untouched of [t.sourceDiscover, t.genericWorker, t.browserFactory]) expect(untouched).not.toHaveBeenCalled();
+});
 function modelFailureReport(t: ReturnType<typeof setup>) {
   Object.assign(t.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "LOCAL_MODEL_TURN_FAILED" });
   const diagnostic = sourceFailureDiagnostic({ error: Object.assign(Error("PRIVATE_PROVIDER_TEXT"), { code: "LOCAL_MODEL_TURN_FAILED" }),
