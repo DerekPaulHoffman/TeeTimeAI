@@ -2,6 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { projectGenericFailureDiagnostic } from "./generic-failure-diagnostic";
+import { makeWorkerTerminalDiagnostic, parseWorkerTerminalDiagnostic } from "../../../scripts/automation/course-discovery-terminal-diagnostic.mjs";
+import { createCourseDiscoveryClient } from "../../../scripts/automation/course-discovery-client.mjs";
 const m = vi.hoisted(() => ({ current: vi.fn(), owner: vi.fn(), report: vi.fn(), simulator: vi.fn(),
   db: { $queryRaw: vi.fn(), $transaction: vi.fn(), courseDiscoveryJob: { findUnique: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
     simulatorSupportIncident: { findUnique: vi.fn() }, courseSupportIncident: { findUnique: vi.fn(), updateMany: vi.fn() } } }));
@@ -46,6 +48,42 @@ beforeEach(() => {
   m.report.mockResolvedValue({ incidentId: "incident1", status: "AUTO_INVESTIGATING" });
 });
 afterEach(() => vi.unstubAllEnvs());
+describe("durable terminal worker diagnostics", () => {
+  const diagnostic = { version: 1 as const, failureCode: "DISCOVERY_MODEL_CATALOG_UNAVAILABLE", frameworkPhase: "GENERIC_FALLBACK" as const, errorName: "Error" };
+  const failureRecord = () => ({ version: 1, attempt: 2, terminal: true, observedAt: "2030-01-01T12:01:00.000Z", diagnostic });
+  it.each(["early", "after-checkpoint"])("reports the actual terminal code after %s failure instead of prior fixed inspection", mode => {
+    const job = { ...fixture().job, result: { workerFailure: failureRecord() }, checkpoint: {
+      stagehandFailure: { code: "UNSUPPORTED_ADAPTER_SOURCE" }, stagehandProgress: { phase: "FIXED_INSPECTION" },
+      ...(mode === "after-checkpoint" ? { genericToolTrace: { entries: [], lostEntries: 0 }, controller: { version: 1 } } : {}),
+    } };
+    expect(discoveryFailureDiagnosis(job)).toMatchObject({ failureCode: diagnostic.failureCode, phase: "GENERIC_FALLBACK",
+      terminalWorkerDiagnostic: { ...diagnostic, attempt: 2 }, priorInspection: { failureCode: "UNSUPPORTED_ADAPTER_SOURCE" }, evidenceAuthority: false });
+  });
+  it.each(["attempt", "pending", "early", "late", "unknown", "private-field", "invalid-clock"])("ignores unbound or malformed terminal metadata: %s", mode => {
+    const record = failureRecord();
+    if (mode === "attempt") record.attempt = 1;
+    if (mode === "pending") record.terminal = false;
+    if (mode === "early") record.observedAt = "2029-12-31T23:00:00.000Z";
+    if (mode === "late") record.observedAt = "2030-01-01T12:03:00.000Z";
+    if (mode === "unknown") record.diagnostic = { ...diagnostic, failureCode: "PRIVATE_CANARY" };
+    if (mode === "private-field") Object.assign(record.diagnostic = { ...diagnostic }, { message: "PRIVATE_CANARY" });
+    const value = discoveryFailureDiagnosis({ ...fixture().job, ...(mode === "invalid-clock" ? { deadlineAt: new Date("invalid") } : {}), result: { workerFailure: record } });
+    expect(value).not.toHaveProperty("terminalWorkerDiagnostic"); expect(JSON.stringify(value)).not.toContain("PRIVATE_CANARY");
+  });
+  it("normalizes unknown error codes without retaining error prose", () => {
+    const value = makeWorkerTerminalDiagnostic(Object.assign(new Error("PRIVATE_CANARY"), { code: "PRIVATE_CANARY", url: "PRIVATE_CANARY" }));
+    expect(value).toEqual({ version: 1, failureCode: "UNKNOWN_WORKER_FAILURE", frameworkPhase: "WORKER", errorName: "Error" });
+    expect(parseWorkerTerminalDiagnostic({ ...value, message: "PRIVATE_CANARY" })).toBeUndefined();
+  });
+  it("sends the closed diagnostic through the signed client and rejects invalid payloads before network I/O", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { headers: { "content-type": "application/json" } }));
+    const client = createCourseDiscoveryClient({ baseUrl: "https://fixture.example/", deviceToken: "fixture-only-device-token", fetchImpl });
+    await client.failWithDiagnostic("fixture-job", "owned-lease", "TOOL_FAILURE", false, diagnostic);
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ leaseToken: "owned-lease", reason: "TOOL_FAILURE", retryable: false, terminalDiagnostic: diagnostic });
+    expect(() => client.failWithDiagnostic("fixture-job", "owned-lease", "TOOL_FAILURE", false, { ...diagnostic, failureCode: "PRIVATE_CANARY" })).toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
 describe("terminal learner to coding responder", () => {
   it.each(["owned", "foreign-owner", "foreign-batch", "cycle-drift", "source-drift", "runtime-drift", "unlinked-child",
     "late-observation", "early-observation", "digest-drift", "request-drift", "checkpoint-job-drift", "omitted", "unsafe-input"].flatMap(scenario => ["names", "availability"].map(kind => ({ scenario, kind }))))(

@@ -463,6 +463,33 @@ describe("bounded course discovery persistence", () => {
     expect(mocks.db.courseAccessRecipe.update).not.toHaveBeenCalled();
     expect(job).toEqual(exhausted);
   });
+  it("retains a closed worker failure through retry and terminal failure without replacing checkpoint evidence or clocks", async () => {
+    await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    const first = (await claimNextDiscoveryJob("diagnostic-one"))!;
+    const checkpoint = { controller: { version: 1 }, genericToolTrace: { entries: [], lostEntries: 0 } };
+    await checkpointDiscoveryJob(first.id, first.leaseToken!, checkpoint);
+    job!.result = { legacy: { preserved: true } };
+    const diagnostic = { version: 1, failureCode: "DISCOVERY_MODEL_CATALOG_UNAVAILABLE", frameworkPhase: "GENERIC_FALLBACK", errorName: "Error" };
+    await failDiscoveryJob(first.id, first.leaseToken!, "TOOL_FAILURE", true, diagnostic);
+    expect(job).toMatchObject({ status: "QUEUED", checkpoint, result: { legacy: { preserved: true }, workerFailure: {
+      attempt: 1, terminal: false, diagnostic, observedAt: now.toISOString() } } });
+    const second = (await claimNextDiscoveryJob("diagnostic-two"))!;
+    await failDiscoveryJob(second.id, second.leaseToken!, "TOOL_FAILURE", true, diagnostic);
+    expect(job).toMatchObject({ status: "FAILED", attempts: 2, checkpoint, firstPickedUpAt: first.firstPickedUpAt,
+      deadlineAt: first.deadlineAt, result: { legacy: { preserved: true }, workerFailure: { attempt: 2, terminal: true, diagnostic } } });
+  });
+  it.each(["invalid diagnostic", "wrong lease", "changed source", "ended demand"])("does not persist a diagnostic or fail a job across %s", async mode => {
+    await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    const owner = (await claimNextDiscoveryJob("diagnostic-fenced"))!;
+    const before = structuredClone(job);
+    const diagnostic = { version: 1, failureCode: "DISCOVERY_MODEL_CATALOG_UNAVAILABLE", frameworkPhase: "GENERIC_FALLBACK", errorName: "Error" };
+    if (mode === "invalid diagnostic") diagnostic.failureCode = "PRIVATE_CANARY";
+    if (mode === "changed source") course.website = "https://changed.example/";
+    if (mode === "ended demand") (preferences[0] as { teeSearch: Record<string, unknown> }).teeSearch.status = "PAUSED";
+    mocks.db.courseDiscoveryJob.update.mockClear();
+    await expect(failDiscoveryJob(owner.id, mode === "wrong lease" ? "wrong-lease" : owner.leaseToken!, "TOOL_FAILURE", false, diagnostic)).rejects.toThrow();
+    expect(job).toEqual(before); expect(mocks.db.courseDiscoveryJob.update).not.toHaveBeenCalled();
+  });
 
   it.each(["another-recipe", ""])("rejects stale failed-version admission %s without touching the current recipe", async failedRecipeId => {
     const stored = await activeMethod();

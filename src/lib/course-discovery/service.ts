@@ -14,6 +14,7 @@ import { hasLearningRepairRecoveryMarker, learningRepairRecoverySchema, loadOwne
   readLearningExecutionRuntime, loadOwnedOutdoorRepairBatch, learningRepairReadOwner,
   hasReciprocalLearningRepairLink, learningRecipeHandoffSchema, readLearningRecipeHandoff, type LearningRepairRecovery } from "./learning-repair-recovery";
 import { isReaderObservationCurrent } from "./observation-clock";
+import { parseWorkerTerminalDiagnostic } from "../../../scripts/automation/course-discovery-terminal-diagnostic.mjs";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
 import { isYouCanBookRecipeSlotLink } from "./youcanbook-public";
@@ -536,15 +537,21 @@ export async function checkpointDiscoveryJob(jobId: string, leaseToken: string, 
     return tx.courseDiscoveryJob.update({ where: { id: job.id }, data: { checkpoint: checkpoint === null ? Prisma.JsonNull : json(checkpoint) } });
   });
 }
-export async function failDiscoveryJob(jobId: string, leaseToken: string, reason: string, retryable = false) {
+export async function failDiscoveryJob(jobId: string, leaseToken: string, reason: string, retryable = false, terminalDiagnostic?: unknown) {
   z.enum(["TOOL_FAILURE", "UNSUPPORTED", "ACCESS_REQUIRED", "DEADLINE", "CANCELLED"]).parse(reason);
+  const diagnostic = terminalDiagnostic === undefined ? undefined : parseWorkerTerminalDiagnostic(terminalDiagnostic);
+  if (terminalDiagnostic !== undefined && !diagnostic) throw new Error("Invalid terminal diagnostic.");
   return transaction(async tx => {
     const { job, now } = await owned(tx, jobId, leaseToken);
     const retry = retryable && reason === "TOOL_FAILURE" && job.attempts < DISCOVERY_MAX_ATTEMPTS;
+    const previousResult = job.result === null ? {} : job.result && typeof job.result === "object" && !Array.isArray(job.result) ? job.result : null;
     return tx.courseDiscoveryJob.update({ where: { id: job.id }, data: {
       status: retry ? "QUEUED" : reason === "CANCELLED" ? "CANCELLED" : reason === "DEADLINE" ? "TIMED_OUT" : "FAILED",
       activeTargetKey: retry ? job.activeTargetKey : null, leaseToken: null, leaseExpiresAt: null,
       outcome: reason, completedAt: retry ? null : now,
+      ...(diagnostic && previousResult ? { result: json({ ...previousResult, workerFailure: {
+        version: 1, attempt: job.attempts, terminal: !retry, observedAt: now.toISOString(), diagnostic,
+      } }) } : {}),
     } });
   });
 }

@@ -6,6 +6,7 @@ import { noVerifiedRecipeDiagnostic, DISCOVERY_NONRETRYABLE_GUARD_CODES } from "
 import { createCourseDiscoveryHandlers, DISCOVERY_WORKER_MODES } from "./course-discovery-handlers.mjs";
 import { STAGEHAND_SOURCE_BUDGET_MS } from "./course-discovery-stagehand-source.mjs";
 import { createRuntimeDrainReader } from "./course-discovery-runtime-drain.mjs";
+import { makeWorkerTerminalDiagnostic } from "./course-discovery-terminal-diagnostic.mjs";
 
 export const DISCOVERY_POLL_MS = 15_000;
 export const DISCOVERY_HEARTBEAT_MS = 15_000;
@@ -217,7 +218,12 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
           if (!execution && !stopped && !["DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED"].includes(error?.code)) {
             if (error?.code === "DISCOVERY_ACCESS_REQUIRED") failureReason = "ACCESS_REQUIRED";
             else if (error?.code === "DISCOVERY_UNSUPPORTED") failureReason = "UNSUPPORTED";
-            try { await client.fail(job.id, job.leaseToken, failureReason, failureReason === "TOOL_FAILURE" && retryableFailure); }
+            try {
+              const retryable = failureReason === "TOOL_FAILURE" && retryableFailure;
+              if (typeof client.failWithDiagnostic === "function")
+                await client.failWithDiagnostic(job.id, job.leaseToken, failureReason, retryable, makeWorkerTerminalDiagnostic(error));
+              else await client.fail(job.id, job.leaseToken, failureReason, retryable);
+            }
             catch { /* A stale lease must never be rebound or retried locally. */ }
           }
           endedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString(),

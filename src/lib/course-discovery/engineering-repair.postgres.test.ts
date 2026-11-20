@@ -781,7 +781,14 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const pickedUp = await service.claimNextDiscoveryJob("fixture-sol-simulator", runtimeVersion);
     expect(pickedUp).toMatchObject({ id: admitted.value.jobId, offeringId: f.offering!.id, attempts: 1 });
     if (scenario === "failed") {
-      await service.failDiscoveryJob(pickedUp!.id, pickedUp!.leaseToken!, "TOOL_FAILURE", false);
+      const beforeFailure = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: pickedUp!.id } });
+      const terminalDiagnostic = { version: 1, failureCode: "DISCOVERY_MODEL_CATALOG_UNAVAILABLE", frameworkPhase: "GENERIC_FALLBACK", errorName: "Error" };
+      await service.failDiscoveryJob(pickedUp!.id, pickedUp!.leaseToken!, "TOOL_FAILURE", false, terminalDiagnostic);
+      const afterFailure = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: pickedUp!.id } });
+      expect(afterFailure.checkpoint).toEqual(beforeFailure.checkpoint);
+      expect(afterFailure.firstPickedUpAt).toEqual(beforeFailure.firstPickedUpAt); expect(afterFailure.deadlineAt).toEqual(beforeFailure.deadlineAt);
+      expect(afterFailure.result).toMatchObject({ ...(beforeFailure.result as object), workerFailure: { terminal: true, diagnostic: terminalDiagnostic } });
+      expect(engineering.discoveryFailureDiagnosis(afterFailure)).toMatchObject({ failureCode: terminalDiagnostic.failureCode, phase: "GENERIC_FALLBACK" });
       expect(await lane.requestSimulatorLearningRecovery(owner)).toMatchObject({ acquired: true,
         value: { outcome: "existing", jobId: pickedUp!.id } });
       const settled = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });

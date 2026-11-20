@@ -21,6 +21,7 @@ import { safeOfficialSourceDiagnostic, navigationFailureKinds } from "./official
 import { readPrivateCourseNameComparison } from "./cps-course-name-comparison-evidence";
 import { readPrivateCpsAvailabilityStructure } from "./cps-availability-structure";
 import { projectGenericFailureDiagnostic } from "./generic-failure-diagnostic";
+import { parseWorkerTerminalDiagnostic } from "../../../scripts/automation/course-discovery-terminal-diagnostic.mjs";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -153,7 +154,8 @@ const inspectionExecutionSchema = z.object({
     "FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID", "FIXED_INSPECTION_FRAME_SCOPE_INVALID"]),
 }).refine(row => (row.actionIndex === 0) === (row.action === null) && (!row.snapshotReturned || row.actionIndex > 0) && (!row.browserClosed || row.browserCreated));
 
-export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpoint: unknown }, includeBookingEdgeEvidence = false) {
+export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpoint: unknown; result?: unknown; status?: string; attempts?: number;
+  firstPickedUpAt?: Date | null; deadlineAt?: Date | null; completedAt?: Date | null }, includeBookingEdgeEvidence = false) {
   const checkpoint = object(job.checkpoint), progress = object(checkpoint.stagehandProgress), failure = object(checkpoint.stagehandFailure);
   // The native worker writes a bounded attempt history, not a flat code. Do
   // not turn arbitrary checkpoint prose into a repair instruction.
@@ -224,7 +226,7 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
     (guard.code === "DISCOVERY_NATIVE_TRANSPORT_FATAL" || guard.code === "DISCOVERY_GENERIC_BUDGET_EXHAUSTED") ? guard.code : null;
   const fatal = object(guard.nativeFirstFatal);
   const { code: nativeFailureCode, ...nativeFacts } = projectStagehandNativeRouterFailure(fatal.code, fatal);
-  return { ...inspection, ...(guardCode ? {
+  const projected = { ...inspection, ...(guardCode ? {
     category: guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? "BROWSER_TRANSPORT_REJECTED" : "READER_OR_RUNTIME_FAILURE",
     code: guardCode, failureCode: guardCode, phase: "GENERIC_FALLBACK",
     genericFallbackDiagnostic: projectGenericFailureDiagnostic(guard, checkpoint.genericToolTrace, checkpoint.controller),
@@ -233,6 +235,16 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
       nativeTransportDiagnostic: { failureCode: nativeFailureCode, ...nativeFacts },
     } : {}),
   } : {}) };
+  const retained = object(object(job.result).workerFailure), terminal = parseWorkerTerminalDiagnostic(retained.diagnostic);
+  const observed = typeof retained.observedAt === "string" ? Date.parse(retained.observedAt) : NaN;
+  const start = job.firstPickedUpAt?.getTime(), end = Math.min(job.deadlineAt?.getTime() ?? NaN, job.completedAt?.getTime() ?? NaN);
+  if (!terminal || job.status !== "FAILED" || job.outcome !== "TOOL_FAILURE" || retained.version !== 1 || retained.terminal !== true ||
+      ![1, 2].includes(retained.attempt as number) || retained.attempt !== job.attempts || !job.firstPickedUpAt || !job.deadlineAt || !job.completedAt ||
+      !Number.isFinite(observed) || !Number.isFinite(start) || !Number.isFinite(end) || observed < start! || observed > end) return projected;
+  return { ...projected, category: "READER_OR_RUNTIME_FAILURE", code: terminal.failureCode, failureCode: terminal.failureCode,
+    phase: terminal.frameworkPhase, priorInspection: inspection,
+    terminalWorkerDiagnostic: { ...terminal, attempt: retained.attempt as number, observedAt: retained.observedAt as string },
+  };
 }
 
 /** Only the same live, source-bound repair owner's reciprocal failed child.

@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { parseWorkerTerminalDiagnostic } from "./course-discovery-terminal-diagnostic.mjs";
 
 const PREFIX = "/api/course-discovery/jobs";
 const ID = /^[A-Za-z0-9_-]{1,200}$/u;
@@ -76,5 +77,10 @@ export function createCourseDiscoveryClient({ baseUrl, deviceToken, browserTrans
     verification: (id, challengeId, leaseToken, proof, signal) => jobPost(id, `verification/${identifier(challengeId)}`, { leaseToken, ...proof }, signal),
     activate: (id, leaseToken, signal) => jobPost(id, "activate", { leaseToken }, signal),
     fail: (id, leaseToken, reason, retryable = true, signal) => jobPost(id, "fail", { leaseToken, reason, retryable }, signal),
+    failWithDiagnostic: (id, leaseToken, reason, retryable, diagnostic, signal) => {
+      const terminalDiagnostic = parseWorkerTerminalDiagnostic(diagnostic);
+      if (!terminalDiagnostic) throw discoveryError("INVALID_TERMINAL_DIAGNOSTIC");
+      return jobPost(id, "fail", { leaseToken, reason, retryable, terminalDiagnostic }, signal);
+    },
   };
 }

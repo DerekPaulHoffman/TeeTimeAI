@@ -26,6 +26,19 @@ const clientFor = (job: ReturnType<typeof assignedJob>, heartbeat: () => Promise
 afterEach(() => { vi.useRealTimers(); });
 
 describe("discovery activation and heartbeat handoff", () => {
+  it("reports an early fallback failure through the diagnostic-capable client without leaking error prose", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(originTime);
+    const job = assignedJob(), failWithDiagnostic = vi.fn(async () => ({}));
+    const client = { ...clientFor(job), failWithDiagnostic };
+    const startWorker = vi.fn(async () => { throw Object.assign(new Error("PRIVATE_CANARY"), {
+      code: "DISCOVERY_MODEL_CATALOG_UNAVAILABLE", discoveryMetrics: { framework: "Stagehand", genericFallback: { trigger: "FIXED_INSPECTION" } } }); });
+    const supervisor = createCourseDiscoverySupervisor({ client, startWorker });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(0);
+    expect(failWithDiagnostic).toHaveBeenCalledWith(job.id, job.leaseToken, "TOOL_FAILURE", true, {
+      version: 1, failureCode: "DISCOVERY_MODEL_CATALOG_UNAVAILABLE", frameworkPhase: "GENERIC_FALLBACK", errorName: "Error" });
+    expect(client.fail).not.toHaveBeenCalled(); expect(JSON.stringify(failWithDiagnostic.mock.calls)).not.toContain("PRIVATE_CANARY");
+    await supervisor.stop();
+  });
   it.each(["LEASE_EXPIRY", "WORK_DEADLINE"] as const)("does not turn a successful activation ACK into %s during local cleanup", async fence => {
     vi.useFakeTimers(); vi.setSystemTime(originTime);
     const cleanup = deferred<void>();
