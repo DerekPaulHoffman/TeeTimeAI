@@ -87,6 +87,34 @@ describe("source reconciliation observes current canonical deployments", () => {
 });
 
 describe("original Desktop full-repair continuation", () => {
+  it("returns an unpublished simulator repair to its original clean worker for release only", async () => {
+    const f = fixture(), candidate = "c".repeat(40), fingerprint = "a".repeat(64);
+    const path = "src/lib/course-discovery/owned-reader.ts";
+    const item = { mode: "SIMULATOR", simulatorRegisteredRelease: true, assignmentRef: REF, threadId: CHILD, branch: f.launcher.branch,
+      baseSha: BEFORE, launcherReceiptPath: f.launcherPath, sourceFingerprint: fingerprint, claimToken: TURN,
+      claimRevision: 9, plannedPaths: [path], releaseSha: candidate, expectedNativeContinuation: null,
+      checkpoint: { kind: "EXPIRED_OWNED_STAGE", claimLeaseExpired: true, providerReadInFlight: false, ownedStage: {
+        phase: "VERIFYING", sourceFingerprint: fingerprint, branch: f.launcher.branch, leaseExpiresAt: "2029-12-31T23:59:00.000Z",
+        releaseSha: candidate, deployment: null, recheckQueuedAt: null, verificationCycle: 0,
+        fullRepair: { kind: "FAILED_LEARNER_FULL_REPAIR", offeringSourceFingerprint: fingerprint },
+      } } };
+    const previousGit = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => {
+      if (cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD") return candidate;
+      if (args[0] === "merge-base" && args[1] === "--all") return BEFORE;
+      if (args[0] === "diff") return `${path}\0`;
+      return previousGit(cwd, args);
+    });
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ threadId: CHILD, model: "gpt-6.1-sol", messageRequired: true,
+      prompt: expect.stringContaining("Continue its release using the existing exact-head CI run") });
+    expect(result.receiptPath).toContain("desktop-simulator-registered-");
+    expect(result.prompt).toContain("Do not replay any failed source read");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
+  });
+
   it("wakes the original waiting simulator Desktop chat with actual native completion proof", async () => {
     const f = fixture();
     const fingerprint = "a".repeat(64), expired = "2029-12-31T23:59:00.000Z";

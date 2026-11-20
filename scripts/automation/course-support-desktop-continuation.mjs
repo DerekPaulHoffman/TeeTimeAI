@@ -82,16 +82,19 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (!SHA.test(currentSha) || currentSha !== execute(selected, ["rev-parse", "origin/main"]) || execute(selected, ["status", "--porcelain"])) fail("SELECTED_CHECKOUT_CHANGED");
   const simulator = item?.mode === "SIMULATOR";
   const simulatorLearning = simulator && item.simulatorLearningRecovery === true;
+  const simulatorRelease = simulator && item.simulatorRegisteredRelease === true;
   const simulatorStage = item?.checkpoint?.ownedStage;
   if (simulator && (item.checkpoint?.kind !== "EXPIRED_OWNED_STAGE" ||
-      simulatorStage?.phase !== (simulatorLearning ? "VERIFYING" : "WAITING_IMPLEMENTATION") ||
+      simulatorLearning && simulatorRelease ||
+      simulatorStage?.phase !== (simulatorLearning || simulatorRelease ? "VERIFYING" : "WAITING_IMPLEMENTATION") ||
       item.checkpoint.claimLeaseExpired !== true || item.checkpoint.providerReadInFlight !== false ||
       item.checkpoint.ownedStage.sourceFingerprint !== item.sourceFingerprint ||
       item.checkpoint.ownedStage.branch !== item.branch ||
       !Number.isSafeInteger(item.claimRevision) || item.claimRevision < 1 ||
       !UUID.test(item.claimToken ?? "") || !/^[a-f0-9]{64}$/u.test(item.sourceFingerprint ?? "") ||
-      (simulatorLearning ? !validPaths(item.plannedPaths) || !SHA.test(item.releaseSha ?? "") || item.releaseSha === item.baseSha ||
-        simulatorStage.releaseSha !== item.releaseSha || simulatorStage.deployment?.commitSha !== item.releaseSha ||
+      (simulatorLearning || simulatorRelease ? !validPaths(item.plannedPaths) || !SHA.test(item.releaseSha ?? "") || item.releaseSha === item.baseSha ||
+        simulatorStage.releaseSha !== item.releaseSha || (simulatorRelease ? simulatorStage.deployment !== null ||
+          simulatorStage.recheckQueuedAt !== null || simulatorStage.verificationCycle !== 0 : simulatorStage.deployment?.commitSha !== item.releaseSha) ||
         simulatorStage.fullRepair?.kind !== "FAILED_LEARNER_FULL_REPAIR" ||
         simulatorStage.fullRepair.offeringSourceFingerprint !== item.sourceFingerprint
         : !Array.isArray(item.plannedPaths) || item.plannedPaths.length || item.releaseSha !== null) ||
@@ -101,7 +104,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       Date.parse(item.checkpoint.ownedStage.leaseExpiresAt) > now)) fail("DESKTOP_SIMULATOR_WAIT_REQUIRED");
   const publishedImplementation = item?.continuationMode === "PUBLISHED_IMPLEMENTATION";
   const claimedImplementation = item?.continuationMode === "CLAIMED_IMPLEMENTATION";
-  const registeredImplementation = item?.continuationMode === "REGISTERED_IMPLEMENTATION";
+  const registeredImplementation = item?.continuationMode === "REGISTERED_IMPLEMENTATION" || simulatorRelease;
   const sourceReconciliationOnly = item?.sourceReconciliationOnly === true;
   const expiredDemandRecoveryOnly = item?.expiredDemandRecoveryOnly === true;
   if (item?.expiredDemandRecoveryOnly !== undefined &&
@@ -113,7 +116,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     fail("DATA_ONLY_SOURCE_RECONCILIATION_REQUIRED");
   }
   if (![undefined, "DATA_ONLY", "PUBLISHED_IMPLEMENTATION", "CLAIMED_IMPLEMENTATION", "REGISTERED_IMPLEMENTATION"].includes(item?.continuationMode)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
-  if ((claimedImplementation || registeredImplementation) && (item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths))) fail("ORIGINAL_CLAIMED_PATHS_REQUIRED");
+  if (!simulator && (claimedImplementation || registeredImplementation) && (item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths))) fail("ORIGINAL_CLAIMED_PATHS_REQUIRED");
   if (![undefined, "UNFINISHED_FULL_REPAIR"].includes(item?.continuationTrigger)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
   if ((!simulator && item?.kind !== "OWNED_OUTDOOR_FULL_REPAIR") || !UUID.test(item.threadId ?? "") || item.threadId === environment.CODEX_THREAD_ID ||
       !/^course-assignment-[a-f0-9-]{36}$/u.test(item.assignmentRef ?? "") ||
@@ -132,14 +135,16 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const workerHead = execute(worker, ["rev-parse", "HEAD"]);
   const progress = readFailedLearningProgress(item, now, simulatorLearning);
   const originalSimulatorAdmittedHere = simulatorLearning && progress?.simulatorExecutionRuntime === workerHead;
-  const primaryMarker = join(selected, ".codex-artifacts", simulatorLearning
+  const primaryMarker = join(selected, ".codex-artifacts", simulatorRelease
+    ? `desktop-simulator-registered-${item.assignmentRef}-${item.releaseSha}.private.json`
+    : simulatorLearning
     ? `desktop-simulator-learning-${item.assignmentRef}-${item.releaseSha}.private.json`
     : simulator
     ? `desktop-simulator-wait-${item.assignmentRef}-${item.claimRevision}.private.json`
     : registeredImplementation
     ? `desktop-repair-${expiredDemandRecoveryOnly ? "expired-demand" : "registered"}-${item.assignmentRef}-${item.releaseSha}.private.json`
     : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
-  if (simulator && workerHead !== (simulatorLearning ? item.releaseSha : item.baseSha)) {
+  if (simulator && workerHead !== (simulatorLearning || simulatorRelease ? item.releaseSha : item.baseSha)) {
     if (!originalSimulatorAdmittedHere) fail("ORIGINAL_SIMULATOR_WAIT_CHECKOUT_CHANGED");
     execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, workerHead]);
   }
@@ -281,7 +286,9 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     const simulatorPurpose = progress
       ? "A linked late learner just failed. Recover only your original lease, then inspect the new owned diagnostics and your prior evidence. If your own investigation already established an exact public browser method, prepare a data-only recipe and use recover-learning --recipe for independent verification. See the simulator full-repair guide for the source proof and replay contract. Otherwise diagnose the failure and claim only the reusable tooling paths needed for a new, tested correction. This wake grants no provider reads; retain the existing source, budget and access checks. Do not repeat the failed learner or send email."
       : "Recover only your original lease, then use the simulator-support recover-learning command. It delegates one separate late job to the normal learner with independent replay and keeps the old failed pickup/deadline. Do not supply route hints, read a provider yourself, edit configuration, request another check, or send email. A queued result is evidence of admission only.";
-    const message = buildWorkerFirstTurnPrompt(simulatorLearning
+    const message = buildWorkerFirstTurnPrompt(simulatorRelease
+      ? `Resume only your SAME original simulator Desktop assignment ${item.assignmentRef}, with expired VERIFYING revision ${item.claimRevision}. Your preserved, registered candidate is ${item.releaseSha}. Revalidate your native identity and current original lease, source and planned paths before any writes. Continue its release using the existing exact-head CI run, ownership and production proof commands. If that CI failed, correct the proven defect within your existing claimed paths and qualify the new exact head. If main advanced, preserve committed code, merge the qualified main in your same branch, re-register the exact reviewed result and validate it. Verify First user Chrome. Do not replay any failed source read or run a second build of the same healthy candidate. This wake grants no provider reads, source changes, new claims, or email. After the existing release is qualified, hand a reusable method to independent replay only under the simulator full-repair guide.${commonInstruction}`
+      : simulatorLearning
       ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at expired VERIFYING revision ${item.claimRevision}. The human authorized your original Sol/ChatGPT Desktop continuation. Your exact own deployed repair is ${item.releaseSha}. On your clean original branch fast-forward to the exact reviewed main while preserving that registered SHA. Verify First user Chrome, then re-read the current owner, source and revision. ${simulatorPurpose} Stop on any changed claim, denied command or unverified runtime.${commonInstruction}`
       : simulator
       ? `Resume your SAME original simulator Desktop assignment ${item.assignmentRef}, at durable WAITING_IMPLEMENTATION revision ${item.claimRevision}. The human authorized your original Sol/ChatGPT Desktop continuation. Implementation capacity was available at planning. Use First user Chrome if needed. On your original clean branch fast-forward to the exact reviewed main. Revalidate your existing claim, source, expired lease and pending path with the normal simulator commands, recover only that original owner, and request only the saved pending implementation path. This wake grants no path, provider read, source change or additional learning attempt. Stop on a changed claim or a fresh busy result. Continue the full original mission after an actual path grant.${commonInstruction}`
@@ -290,7 +297,8 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       parentThreadId: environment.CODEX_THREAD_ID, childThreadId: item.threadId, assignmentRef: item.assignmentRef,
       batchReference: item.batchReference ?? null, priorTurnId: turn.id, priorTurnStatus: turn.status, priorTurnError: turn.error,
       runtimeSha: currentSha, continuationTrigger: item.continuationTrigger ?? null,
-      continuationMode: simulatorLearning ? "SIMULATOR_LEARNING_RECOVERY" : simulator ? "SIMULATOR_WAITING_IMPLEMENTATION" : item.continuationMode ?? "DATA_ONLY",
+      continuationMode: simulatorRelease ? "SIMULATOR_REGISTERED_RELEASE" : simulatorLearning ? "SIMULATOR_LEARNING_RECOVERY" :
+        simulator ? "SIMULATOR_WAITING_IMPLEMENTATION" : item.continuationMode ?? "DATA_ONLY",
       plannedPathCount: claimedImplementation ? item.plannedPaths.length : 0,
       ...(simulator ? { claimRevision: item.claimRevision } : {}),
       ...(sourceReconciliationOnly ? { sourceReconciliationOnly: true } : {}),

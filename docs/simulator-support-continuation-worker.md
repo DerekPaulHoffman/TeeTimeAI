@@ -16,6 +16,15 @@ before handing it to the usual workflow. Admission does not prove replay,
 matching times or delivery. Keep the same owner and stop on any changed source,
 unsettled operation or unqualified runtime.
 
+A registered-release reconciliation wake resumes only the original, clean,
+committed candidate whose deployment proof is still absent. Use the existing
+CI evidence for that exact candidate. Preserve its commits if main advanced,
+merge only the qualified upstream on your original branch, re-register the
+exact reviewed result and complete its normal release gates. An interrupted
+read or ambiguous operation remains fenced. A local parser failure that
+provably happened before any source read or external operation is an offline
+tooling failure. Verify and correct the local helper without a provider request.
+
 After the normal original-owner continuation is independently admitted, use the production wrapper's private `workerProductionOutput` receipt and complete retained payload for every new production result. Verify the private paths, original native identity, script/argument hash and terminal exit; read bounded fields without product credentials. Console truncation is not a failed retained payload. For an earlier uncaptured `inspect` that exited zero and stopped only because its display was shortened, one fresh read-only inspection of this same assignment is allowed through the verified wrapper after the existing identity/checkout/lease checks. It spends no provider source read and changes no product state. Do not replay source reads, claims, configuration, release, deployment, completion or other mutations; unavailable/invalid full payloads, nonzero exits and uncertain effects retain their stop rules. This does not admit or wake a continuation by itself.
 
 For every identity, setup, local verification and production command, retain its returned session or process handle. A yielded call, `inProgress` status or temporarily empty output means the command is unfinished. Poll that same supported handle until terminal exit, then inspect the actual required result. Never finalize while it runs, restart an unfinished command or duplicate a mutation. Stop for a concrete timeout, permission denial, missing or malformed terminal result, or lost source/ownership/lease authority. Classify a terminal nonzero by the operation: native identity, setup, production/API, provider research or source-evidence read, assignment or claim, ownership, lease and access operations stop, as do unknown failures or possible side effects; completed credential-free local verification and ordinary repository lookup diagnostics follow the scoped rules below. Preserve all existing protected-operation stops and evidence. Waiting does not authorize email, another worker or a new operation.
