@@ -1511,6 +1511,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       expect(claim.research.bookingLinks).toContain(root);
       expect(claim.research.history[0]).toMatchObject({ collectorObservedAt: collectorTime,
         observedAt: read.value.publicSource.observedAt, sourceFingerprint: f.fingerprint });
+      expect(read.value.sourceReadReceipt).toEqual({ requestId: claim.research.history[0]?.requestId,
+        settledAt: read.value.publicSource.observedAt, collectorObservedAt: collectorTime });
+      expect(read.value.sourceReadReceipt.requestId).toMatch(/^[a-f0-9-]+$/);
       expect(Date.parse(read.value.publicSource.observedAt)).toBeLessThan(Date.parse(collectorTime));
       expect(claim.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
       expect(coreMocks.fetch).not.toHaveBeenCalled();

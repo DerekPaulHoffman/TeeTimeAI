@@ -512,7 +512,9 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
     await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit, simulatorClaim: { ...row.claim, revision: saved.revision, leaseExpiresAt: saved.leaseExpiresAt }, simulatorResearch: research } as unknown as Prisma.InputJsonValue } });
     const configurationCandidate = buildSimulatorResearchConfigurationCandidate({ course: row.source.offering.course, research,
       sourceFingerprint: row.source.fingerprint, offeringRevision: row.source.offering.monitoringRevision, claimedAt: row.claim.claimedAt, now });
-    return { ...saved, publicSource: read, researchOutcome: outcome, ...(failureCode ? { failureCode } : {}),
+    return { ...saved, publicSource: read, researchOutcome: outcome,
+      sourceReadReceipt: { requestId: before.value.requestId, settledAt: read.observedAt, collectorObservedAt },
+      ...(failureCode ? { failureCode } : {}),
       ...(configurationCandidate ? { configurationCandidate } : {}), readsRemaining: 6 - research.readCount };
   });
 }

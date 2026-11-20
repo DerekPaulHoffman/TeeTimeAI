@@ -38,6 +38,19 @@ access, safety, duration and completeness checks as normal activation. A
 manifest supplies a candidate, never availability evidence. Keep the file
 private. A repeated submission of that method returns the same late job.
 
+To qualify a retained successful source-read reply, first verify its private
+execution receipt and fresh inspection of the same owner, assignment, and source
+fingerprint. Match `sourceReadReceipt.requestId` and `sourceReadReceipt.settledAt`
+against exactly one research history entry's `requestId` and `observedAt`. Older
+replies have no source-read receipt: match `publicSource.observedAt` with the
+history's `observedAt`, along with both exact requested and final URLs and
+the same source fingerprint. In both cases require a successful, signed-out
+public read with no access controls. The collector clock is diagnostic and
+is saved separately as `collectorObservedAt`. A local join that compared the
+database settlement time with the collector clock can be corrected offline
+after revalidating these bindings. A missing, changed, or ambiguous binding
+still stops. This does not open or repeat any provider operation.
+
 Read `discoveryEngineeringFailure`, retained research history and failed routes
 before choosing a different approach. Keep a private hypothesis, evidence,
 correction and regression receipt. Spending a research budget does not establish
