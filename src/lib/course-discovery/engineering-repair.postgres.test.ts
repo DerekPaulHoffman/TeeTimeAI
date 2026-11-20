@@ -737,7 +737,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       branch: "automation/course-support-discovery-claim" }) };
   }
 
-  it.each(["replayed", "failed", "prepared"])("keeps the same original deployed simulator owner through a %s late learner", async scenario => {
+  it.each(["replayed", "failed", "prepared", "registered"])("keeps the same original simulator owner through a %s repair", async scenario => {
     const f = await boundSimulatorHandoff(true);
     const lane = await import("@/lib/automation/simulator-support-ownership");
     const { parseCourseDispatchAudit, planCourseSupportCourseDispatch } = await import("@/lib/automation/course-support-course-dispatch");
@@ -751,13 +751,23 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     Object.assign(audit.simulatorClaim!, { phase: "VERIFYING", releaseSha: registeredRelease,
       leaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
       plannedPaths: ["src/lib/course-discovery/test-reader.ts"],
-      deployment: { source: "git", state: "READY", branch: "main", commitSha: registeredRelease,
+      deployment: scenario === "registered" ? null : { source: "git", state: "READY", branch: "main", commitSha: registeredRelease,
         deploymentId: "dpl_fixture", deploymentUrl: "https://fixture.vercel.app",
         aliases: ["teetimespot.com", "www.teetimespot.com"], deployedAt: new Date().toISOString() } });
     await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
     const scheduler = `recovery-parent-${randomUUID()}`;
     batchOwners.push(scheduler);
     const plan = await planCourseSupportCourseDispatch({ ownerThreadId: scheduler, baseSha: runtimeVersion, maxStarts: 1 });
+    if (scenario === "registered") {
+      expect(plan).toMatchObject({ acquired: true, value: { continuationItems: [{
+        assignmentRef: f.assignmentRef, threadId: f.child, simulatorRegisteredRelease: true, releaseSha: registeredRelease,
+        checkpoint: { kind: "EXPIRED_OWNED_STAGE", providerReadInFlight: false, ownedStage: {
+          phase: "VERIFYING", deployment: null, leaseExpiresAt: audit.simulatorClaim!.leaseExpiresAt, fullRepair: { failedJobId: f.job.id },
+        } },
+      }], launchItems: [] } });
+      expect(await client.courseDiscoveryJob.count({ where: { offeringId: f.offering!.id } })).toBe(1);
+      return;
+    }
     expect(plan).toMatchObject({ acquired: true, value: {
       continuationItems: [{ assignmentRef: f.assignmentRef, threadId: f.child, simulatorLearningRecovery: true,
         checkpoint: { kind: "EXPIRED_OWNED_STAGE", providerReadInFlight: false, ownedStage: {

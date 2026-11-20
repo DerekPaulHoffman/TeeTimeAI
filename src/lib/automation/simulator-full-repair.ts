@@ -43,7 +43,7 @@ export async function hasConsumedSimulatorFullRepair(tx: Prisma.TransactionClien
  * Revalidate the native owner, offering and original demand on each use. */
 export async function loadSimulatorRecoveryClaim(tx: Pick<Prisma.TransactionClient, "automationRun" | "simulatorSupportIncident" |
   "courseDiscoveryJob" | "course" | "courseOffering" | "teeSearch" | "coursePreference" | "courseDiscoveryPilotEnrollment" | "courseProbe">,
-  runId: string, now: Date, allowExpiredDelegation = false) {
+  runId: string, now: Date, allowExpiredDelegation = false, deploymentPending = false) {
   const run = await tx.automationRun.findUnique({ where: { id: runId } });
   if (!run || run.status !== "RUNNING" || run.promptVersion !== "course-support-course-dispatch-v1") return null;
   const { parseCourseDispatchAudit } = await import("./course-support-course-dispatch");
@@ -52,12 +52,13 @@ export async function loadSimulatorRecoveryClaim(tx: Pick<Prisma.TransactionClie
   const repair = readSimulatorFullRepair(audit?.target.fullRepair);
   if (!audit || audit.state !== "CONSUMED" || !audit.childThreadId || audit.target.mode !== "SIMULATOR" ||
       audit.controlledRetryOf || audit.target.engineeringAuthority || !repair || !claim ||
-      claim.phase !== "VERIFYING" || !claim.releaseSha || claim.releaseSha === audit.baseSha || !claim.deployment ||
+      claim.phase !== "VERIFYING" || !claim.releaseSha || claim.releaseSha === audit.baseSha ||
+      (deploymentPending ? Boolean(claim.deployment || claim.recheckQueuedAt || claim.verificationCycle) : !claim.deployment) ||
       !claim.plannedPaths.length || (!allowExpiredDelegation && Date.parse(claim.leaseExpiresAt) <= now.getTime()) ||
       (audit as { simulatorRepairPending?: unknown }).simulatorRepairPending ||
       readSimulatorResearchState(audit.simulatorResearch, claim.sourceFingerprint).inFlight ||
       repair.offeringSourceFingerprint !== claim.sourceFingerprint || audit.target.incidentId !== repair.incidentId) return null;
-  try { assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, now); }
+  try { if (claim.deployment) assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, now); }
   catch { return null; }
   const { currentDiscoveryEngineeringFailure } = await import("@/lib/course-discovery/service");
   const { discoveryEngineeringReceipt } = await import("@/lib/course-discovery/engineering-repair");

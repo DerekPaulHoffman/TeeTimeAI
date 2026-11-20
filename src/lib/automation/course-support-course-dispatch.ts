@@ -991,6 +991,7 @@ async function collectCourseSupportContinuationCandidates(input: {
     launcherReceiptPath?: string; claimToken?: string; claimRevision?: number; sourceFingerprint?: string;
     plannedPaths?: string[]; releaseSha?: string | null; checkpoint?: CourseSupportContinuationCheckpoint;
     simulatorLearningRecovery?: true;
+    simulatorRegisteredRelease?: true;
     failedLearningProgress?: NonNullable<Awaited<ReturnType<typeof readOwnedFailedLearningProgress>>>;
     expectedNativeContinuation?: { turnId: string; key: string; receiptPath: string } | null }> = [];
   let attentionCount = 0;
@@ -1014,21 +1015,22 @@ async function collectCourseSupportContinuationCandidates(input: {
       const expiredPublishedRepair = context.checkpoint.kind === "EXPIRED_OWNED_STAGE" &&
         context.checkpoint.ownedStage?.phase === "VERIFYING" && context.providerReadInFlight === false &&
         audit.target.fullRepair && !latestConfirmedNativeContinuation(ledger);
+      const deploymentPending = expiredPublishedRepair && audit.simulatorClaim!.deployment === null;
       const recovery = expiredPublishedRepair
-        ? await (await import("./simulator-full-repair")).loadSimulatorRecoveryClaim(input.tx, run.id, input.now, true)
+        ? await (await import("./simulator-full-repair")).loadSimulatorRecoveryClaim(input.tx, run.id, input.now, true, Boolean(deploymentPending))
         : null;
       const history = recovery
         ? (await import("@/lib/course-discovery/learning-repair-recovery")).readLearningRepairRecoveries(recovery.failure.job.result)
         : null;
       const priorRecovery = recovery && history?.some(link => link.batchId === run.id && link.releaseSha === recovery.claim.releaseSha);
-      const failedLearningProgress = recovery && priorRecovery ? await readOwnedFailedLearningProgress(input.tx, {
+      const failedLearningProgress = recovery?.claim.deployment && priorRecovery ? await readOwnedFailedLearningProgress(input.tx, {
         batchId: run.id, batchReference: audit.assignmentRef, ownerThreadId: audit.childThreadId,
         releaseSha: recovery.claim.releaseSha!, deployedAt: new Date(recovery.claim.deployment!.deployedAt),
         courseId: audit.target.courseId, offeringId: audit.target.offeringId, simulatorAssignmentRef: audit.assignmentRef,
         incidentId: audit.target.incidentId, cycle: audit.target.cycle, sourceFingerprint: recovery.failure.job.sourceFingerprint,
         searchRefs: audit.target.searchRefs, now: input.now,
       }) : null;
-      const simulatorLearningRecovery = recovery && history && (!priorRecovery || failedLearningProgress) &&
+      const simulatorContinuation = recovery && history && (deploymentPending || !priorRecovery || failedLearningProgress) &&
         !await hasSimulatorSupportImplementationOwnership(input.tx, audit.assignmentRef);
       continuationItems.push({ mode: "SIMULATOR", assignmentRef: audit.assignmentRef, threadId: audit.childThreadId,
         originalParentThreadId: audit.ownerThreadId, branch: audit.simulatorClaim!.branch, baseSha: audit.baseSha,
@@ -1037,10 +1039,11 @@ async function collectCourseSupportContinuationCandidates(input: {
           claimRevision: audit.simulatorClaim!.revision, sourceFingerprint: audit.simulatorClaim!.sourceFingerprint,
           plannedPaths: audit.simulatorClaim!.plannedPaths, releaseSha: audit.simulatorClaim!.releaseSha,
           expectedNativeContinuation: latestConfirmedNativeContinuation(ledger),
-          ...(simulatorLearningRecovery ? { simulatorLearningRecovery: true as const } : {}),
-          ...(simulatorLearningRecovery && failedLearningProgress ? { failedLearningProgress } : {}),
+          ...(simulatorContinuation ? (deploymentPending ? { simulatorRegisteredRelease: true as const }
+            : { simulatorLearningRecovery: true as const }) : {}),
+          ...(simulatorContinuation && failedLearningProgress ? { failedLearningProgress } : {}),
           checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight,
-            ...(simulatorLearningRecovery ? { ownedStage: {
+            ...(simulatorContinuation ? { ownedStage: {
               ...context.checkpoint.ownedStage!, leaseExpiresAt: audit.simulatorClaim!.leaseExpiresAt,
               fullRepair: audit.target.fullRepair,
             } } : {}),
