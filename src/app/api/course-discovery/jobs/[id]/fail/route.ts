@@ -2,7 +2,8 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { failDiscoveryJob } from "@/lib/course-discovery/service";
 import { discoveryRequest, jobIdSchema, leaseBodySchema } from "../../../_shared";
-import { parseWorkerTerminalDiagnostic, type WorkerTerminalDiagnostic } from "../../../../../../../scripts/automation/course-discovery-terminal-diagnostic.mjs";
+import { parseWorkerTerminalDiagnostic } from "../../../../../../../scripts/automation/course-discovery-terminal-diagnostic.mjs";
+import type { WorkerTerminalDiagnostic } from "../../../../../../../scripts/automation/course-discovery-terminal-diagnostic.d.mts";
 
 const schema = leaseBodySchema.extend({ reason: z.enum(["TOOL_FAILURE", "UNSUPPORTED", "ACCESS_REQUIRED", "DEADLINE", "CANCELLED"]), retryable: z.boolean().default(false),
   terminalDiagnostic: z.custom<WorkerTerminalDiagnostic>(value => Boolean(parseWorkerTerminalDiagnostic(value))).optional() }).strict();
