@@ -119,6 +119,8 @@ export const recipeResourceScopeSchema = z.object({
   label: recipeFieldSchema,
   expectedLabel: z.string().trim().min(2).max(200).refine(isPublicRentalLabel, "Use a public golf rental resource"),
 }).strict().describe("SIMULATOR DOM only: reusable selector matching resource cards, a visible label reader relative to each card, and its exact observed public rental label. The executor chooses the unique matching card and reads slots and proof.empty only inside it; card order is not identity. Venue/date/duration/complete proof stays global.");
+const squareSinglePracticeLabel = z.string().regex(/^[1-8] hours? practice\/play(?: after ([1-9]|1[0-2])(am|pm) and weekends)?$/iu);
+const squareSinglePracticeScope = recipeResourceScopeSchema.safeExtend({ expectedLabel: squareSinglePracticeLabel });
 const routeOrigin = safeUrl.refine(value => new URL(value).origin === value, "Use an exact origin");
 const routeQueryKeys = z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]);
 const legacyRecipeRouteSchema = z.object({
@@ -250,7 +252,7 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     proof: z.object({ venue: z.object({ publicVenueMetadata: z.literal(true) }).strict(), date: z.object({ availabilityDateKey: z.literal(true) }).strict(),
       complete: z.object({ availabilityResponse: z.literal(true) }).strict() }).strict(),
   }).strict()]),
-  z.object({ ...common, proof: common.proof.extend({ venue: venueProofFieldSchema }), engine: z.literal("BROWSER_DOM"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
+  z.object({ ...common, slots: common.slots.extend({ scope: z.union([recipeResourceScopeSchema, squareSinglePracticeScope]).optional() }), proof: common.proof.extend({ venue: venueProofFieldSchema }), engine: z.literal("BROWSER_DOM"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
     availabilityResponse: availabilityResponseSchema, steps: z.array(stepSchema).max(32) }).strict(),
   z.discriminatedUnion("requestBinding", [z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source, permittedRoutes: common.permittedRoutes,
     engine: z.literal("BROWSER_JSON"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
@@ -385,6 +387,18 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
   if ("availabilityResponse" in recipe && recipe.availabilityResponse.date.format === "SQUARE_PUBLIC_MONTH_RANGE" &&
       (recipe.engine !== "BROWSER_DOM" || recipe.target.kind !== "SIMULATOR"))
     ctx.addIssue({ code: "custom", message: "Public Square month evidence requires a simulator DOM recipe" });
+  if (recipe.engine === "BROWSER_DOM" && recipe.slots.scope && !isPublicRentalLabel(recipe.slots.scope.expectedLabel)) {
+    // This alternative is unavailable to HTTP/JSON readers and ordinary DOM
+    // scopes. The runtime still requires its private consumed Add/Next proof.
+    const catalog = /^https:\/\/book\.squareup\.com\/appointments\/[a-z0-9]{1,64}\/location\/[A-Z0-9]{13}\/services$/u;
+    const prefix = `${recipe.source.bookingUrl}/`;
+    if (recipe.target.kind !== "SIMULATOR" || recipe.source.providerFamily !== "SQUARE" ||
+        recipe.availabilityResponse.kind !== "SQUARE_PUBLIC_MONTH" || !catalog.test(recipe.source.bookingUrl) ||
+        !recipe.pageUrl.startsWith(prefix) || !/^[A-Z0-9]{16,32}$/u.test(recipe.pageUrl.slice(prefix.length)) ||
+        !recipe.steps.some(step => step.action === "selectProduct") ||
+        !recipe.steps.some(step => step.action === "continueToAvailability" && step.mode === "SQUARE_SERVICE"))
+      ctx.addIssue({ code: "custom", message: "Single practice services require the exact public Square rental selection and month response" });
+  }
   if (recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "MEMBERSPORTS_PUBLIC_TEE_SHEET") {
     const fence = recipe.availabilityResponse;
     const opening = recipe.steps.findIndex(step => step.action === "openOfficialBooking");

@@ -351,7 +351,7 @@ async function domDateParts(root: Locator, field: RecipeDateParts) {
   return parseObservedCalendarDate(await domField(root, field.monthYear), await domField(root, field.day));
 }
 async function extractDom(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, root: Locator,
-  selectedRentalService?: PublicRentalServiceSelection, durationMinutes?: number): Promise<Extracted> {
+  selectedRentalService?: PublicRentalServiceSelection, durationMinutes?: number, date?: string): Promise<Extracted> {
   const p = recipe.proof;
   const rows: Extracted["rows"] = [];
   if (!("selector" in recipe.slots.collection)) throw new Error("INVALID_COLLECTION");
@@ -370,7 +370,7 @@ async function extractDom(recipe: Extract<CourseAccessRecipeData, { engine: "BRO
       const label = clean(await domField(group, scope.label));
       if (label === clean(scope.expectedLabel)) {
         const typedSquareScope = recipe.availabilityResponse.kind === "SQUARE_PUBLIC_MONTH" && "selector" in scope.label &&
-          await inspectSquareAvailabilityScope(group, selectedRentalService, scope.label.selector, recipe.slots.collection.selector, durationMinutes);
+          await inspectSquareAvailabilityScope(group, selectedRentalService, scope.label.selector, recipe.slots.collection.selector, durationMinutes, date);
         if (!("selector" in scope.label) || !typedSquareScope && !await group.evaluate((element, selector) => {
           const labels = element.querySelectorAll(selector);
           return labels.length === 1 && labels[0].parentElement === element;
@@ -1061,7 +1061,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
       if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
       const extract = async (): Promise<Extracted> => {
-        if (recipe.engine === "BROWSER_DOM") return extractDom(recipe, page.locator("body"), selectedRentalService, input.durationMinutes);
+        if (recipe.engine === "BROWSER_DOM") return extractDom(recipe, page.locator("body"), selectedRentalService, input.durationMinutes, input.date);
         if (recipe.requestBinding === "MEMBERSPORTS_PUBLIC_TEE_SHEET") {
           const current = memberSportsRead, identity = memberSportsIdentity;
           if (!current || !identity || current.generation !== mutationGeneration || current.documentSequence !== mainDocumentSequence ||

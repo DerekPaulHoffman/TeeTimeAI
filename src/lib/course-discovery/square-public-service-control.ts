@@ -1,8 +1,8 @@
 import type { ElementHandle, Locator, Page } from "@playwright/test";
 
-export type SquareRentalProof = { selector: string; durationMinutes: number; squareService: true; label: string; option: string };
+export type SquareRentalProof = { selector: string; durationMinutes: number; squareService: true; label: string; option: string | null; weekdayStartMinutes?: number };
 export type SquareRentalSelection = Readonly<{ label: string }>;
-export type SquareRentalVariantProof = Omit<SquareRentalProof, "squareService"> & { squareVariant: true };
+export type SquareRentalVariantProof = Omit<SquareRentalProof, "squareService" | "option"> & { squareVariant: true; option: string };
 const selections = new WeakMap<SquareRentalSelection, { page: Page; document: ElementHandle<Element>; catalogUrl: string; proof: SquareRentalProof; used: boolean }>();
 
 /** A selector is evidence, not permission. Scope the already-proved public
@@ -109,12 +109,29 @@ export function inspectSquareRentalAddElement(element: Element): SquareRentalPro
       host.hasAttribute("disabled") || host.getAttribute("aria-disabled") === "true" || host.hasAttribute("onclick") || host.closest("form,a[href]")) return;
   const section = host.closest('section[aria-label="Main content"]');
   if (!section || document.querySelectorAll('section[aria-label="Main content"]').length !== 1 || section.querySelectorAll("*").length > 1500 ||
-      section.querySelector('form,input,select,textarea,[role="grid"],[role="gridcell"],time,[data-slot-id],[data-start-time]')) return;
+      section.querySelector('form,input,select,textarea,[contenteditable],[role="grid"],[role="gridcell"],time,[data-slot-id],[data-start-time]')) return;
   const headings = Array.from(section.querySelectorAll("h2")).filter(check.visible);
   if (headings.length !== 1) return;
   const label = check.text(headings[0]);
-  if (label.length > 160 || !/\b(?:golf\s+simulator|simulator\s+(?:rental|bay|time|room)|golf\s+(?:rental|bay)|(?:bay|room)\s+rental)\b/iu.test(label) ||
+  const single = /^(\d{1,2}) hours? practice\/play(?: after ([1-9]|1[0-2])(am|pm) and weekends)?$/iu.exec(label);
+  if (label.length > 160 || (!single && !/\b(?:golf\s+simulator|simulator\s+(?:rental|bay|time|room)|golf\s+(?:rental|bay)|(?:bay|room)\s+rental)\b/iu.test(label)) ||
       /\b(?:lesson|coaching|fitting|league|event|member|package|pass|sponsorship|drive)\b/iu.test(label)) return;
+  // A single published practice/play service has no Options list. Preserve
+  // that absence as null; never manufacture a selected Regular variant.
+  if (single && section.querySelector('market-list,[role="listbox"],[role="option"]')) return;
+  if (single) {
+    const summaries = section.querySelectorAll('[data-testid="variation-details-summary"]');
+    if (summaries.length !== 1 || !check.visible(summaries[0])) return;
+    const prices = summaries[0].querySelectorAll("span");
+    if (prices.length !== 1 || prices[0].children.length || !check.visible(prices[0])) return;
+    const price = /^\$\d{1,5}(?:\.\d{2})?\s*[・·]\s*(\d{1,2}) hr$/u.exec(check.text(prices[0]));
+    const minutes = Number(single[1]) * 60;
+    const actions = Array.from(section.querySelectorAll("market-button")).filter(check.visible);
+    if (!price || Number(price[1]) * 60 !== minutes || minutes < 15 || minutes > 480 || actions.length !== 1 || actions[0] !== host) return;
+    const weekdayStartMinutes = single[2] ? (Number(single[2]) % 12 + (single[3].toLowerCase() === "pm" ? 12 : 0)) * 60 : undefined;
+    return { selector: 'section[aria-label="Main content"]', durationMinutes: minutes, squareService: true, label, option: null,
+      ...(weekdayStartMinutes === undefined ? {} : { weekdayStartMinutes }) };
+  }
   const lists = Array.from(section.querySelectorAll('market-list[role="listbox"]')).filter(check.visible);
   if (lists.length !== 1 || check.text(document.getElementById(lists[0].getAttribute("aria-labelledby") ?? "") ?? lists[0]) !== "Options") return;
   const selected = Array.from(lists[0].querySelectorAll('market-row[role="option"][aria-selected="true"]')).filter(check.visible);
@@ -171,7 +188,8 @@ export async function inspectSquareRentalNext(node: Locator, selection: SquareRe
     const rows = Array.from(carts[0].querySelectorAll('[data-testid="service-staff-row"]')).filter(check.visible);
     if (rows.length !== 1) return false;
     const leaves = Array.from(rows[0].querySelectorAll("span")).filter(n => !n.children.length && check.visible(n)).map(check.text).filter(Boolean);
-    if (leaves.length !== 2 || leaves[0] !== args.proof.label || leaves[1] !== args.proof.option) return false;
+    if (leaves.length !== (args.proof.option === null ? 1 : 2) || leaves[0] !== args.proof.label ||
+        args.proof.option !== null && leaves[1] !== args.proof.option) return false;
     const actions = Array.from(carts[0].parentElement!.querySelectorAll("market-button")).filter(check.visible);
     return actions.length === 1 && actions[0] === host;
   }, { document: saved.document, proof: saved.proof }).catch(() => false);
@@ -188,7 +206,7 @@ export async function continueSquareRental(node: Locator, selection: SquareRenta
  * times in day-part groups. Only the private, consumed Add/Next selection can
  * bind this exact layout; a recipe cannot declare a page wrapper a resource. */
 export async function inspectSquareAvailabilityScope(card: Locator, selection: SquareRentalSelection | undefined,
-  labelSelector: string, rowsSelector: string, durationMinutes: number | undefined): Promise<boolean> {
+  labelSelector: string, rowsSelector: string, durationMinutes: number | undefined, date?: string): Promise<boolean> {
   const saved = selection && selections.get(selection);
   if (!saved?.used || saved.page !== card.page() || saved.proof.durationMinutes !== durationMinutes ||
       saved.page.url() !== saved.catalogUrl.replace(/\/services$/u, "/availability") || await card.count() !== 1) return false;
@@ -211,7 +229,8 @@ export async function inspectSquareAvailabilityScope(card: Locator, selection: S
     if (services.length !== 1) return false;
     const identity = [...services[0].querySelectorAll("span")].filter(n => !n.children.length && check.visible(n) && check.text(n));
     const labels = node.querySelectorAll(args.label);
-    if (identity.length !== 2 || check.text(identity[0]) !== args.proof.label || check.text(identity[1]) !== args.proof.option ||
+    if (identity.length !== (args.proof.option === null ? 1 : 2) || check.text(identity[0]) !== args.proof.label ||
+        args.proof.option !== null && check.text(identity[1]) !== args.proof.option ||
         labels.length !== 1 || labels[0] !== identity[0]) return false;
     const sections = [...node.querySelectorAll('section[aria-label="Main content"]')].filter(check.visible);
     const segments = sections.length === 1 ? sections[0].querySelectorAll('[data-testid="availability-segments"]') : [];
@@ -221,9 +240,20 @@ export async function inspectSquareAvailabilityScope(card: Locator, selection: S
         !slot.matches('market-button[type="button"][role="listitem"]') || slot.hasAttribute("disabled") ||
         slot.getAttribute("aria-disabled") === "true" || slot.hasAttribute("href") || slot.hasAttribute("onclick") ||
         !/^(?:[1-9]|1[0-2]):[0-5]\d\s*[AP]M$/u.test(check.text(slot)))) return false;
+    if (args.proof.weekdayStartMinutes !== undefined) {
+      // Contradictory provider starts do not silently become eligible rentals
+      // or an empty day. The independent date/month gates still apply.
+      if (!args.date || !/^20\d{2}-\d{2}-\d{2}$/u.test(args.date)) return false;
+      const day = new Date(`${args.date}T12:00:00Z`);
+      if (!Number.isFinite(day.getTime()) || day.toISOString().slice(0, 10) !== args.date) return false;
+      if (![0, 6].includes(day.getUTCDay()) && all.some(slot => {
+        const time = /^(\d{1,2}):(\d{2})\s*([AP])M$/u.exec(check.text(slot))!;
+        return (Number(time[1]) % 12 + (time[3] === "P" ? 12 : 0)) * 60 + Number(time[2]) < args.proof.weekdayStartMinutes!;
+      })) return false;
+    }
     const groups = [...segments[0].querySelectorAll('[role="list"]')].filter(check.visible);
     return groups.length > 0 && groups.length <= 3 && new Set(groups.map(group => group.getAttribute("aria-label"))).size === groups.length &&
       groups.every(group => /^Available time slots, (?:Morning|Afternoon|Evening), select a time to proceed$/u.test(group.getAttribute("aria-label") ?? "")) &&
       all.every(slot => groups.includes(slot.parentElement!));
-  }, { document: saved.document, proof: saved.proof, label: labelSelector, rows: rowsSelector }).catch(() => false);
+  }, { document: saved.document, proof: saved.proof, label: labelSelector, rows: rowsSelector, date }).catch(() => false);
 }
