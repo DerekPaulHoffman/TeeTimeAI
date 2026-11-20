@@ -9,8 +9,14 @@ handoff, retain the registered repair SHA and fast-forward the original clean
 branch to the exact tested main. Verify First user Chrome, inspect the original
 assignment, and recover the same expired verification lease through the normal
 owner command. Check retained browser evidence first using the full-repair
-guide. Submit an established method with `recover-learning --recipe`. Without an
-established method, plain `recover-learning` is appropriate only when the
+guide. Submit an established method with `recover-learning --recipe`. When the
+deployed repair adds missing browser evidence, use one remaining source read if
+the retained captures are insufficient and the freshly inspected original claim
+explicitly lists that read in `researchGuide.suggestedReads`. Use the returned
+source and mode through the existing assigned browser command. This consumes the
+original budget, preserves its limits and cannot repeat a denied or uncertain
+read. Review the new evidence using the full-repair guide before deciding
+whether it supports a method. Plain `recover-learning` is appropriate only when the
 registered release changes a reader or discovery behavior relevant to a recorded
 failure. An update to error reporting alone calls for using the improved evidence
 to continue diagnosis. The command verifies the managed Sol runtime. Preserve

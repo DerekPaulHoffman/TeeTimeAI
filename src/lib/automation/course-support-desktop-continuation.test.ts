@@ -188,6 +188,8 @@ describe("original Desktop full-repair continuation", () => {
       prompt: expect.stringContaining("recover-learning --recipe for independent verification before considering generic discovery") });
     expect(result.prompt).toContain("First user Chrome");
     expect(result.prompt).toContain("source-read settlement receipt rules");
+    expect(result.prompt).toContain("complete one unspent source-read only if a fresh inspection of your recovered claim explicitly lists it in researchGuide.suggestedReads");
+    expect(result.prompt).toContain("Keep the existing read count, source, access and provider limits");
     expect(result.prompt).toContain("A reporting-only repair does not qualify an unchanged learner");
     expect(result.receiptPath).toContain("desktop-simulator-learning-");
     expect(f.deps.git).toHaveBeenCalledWith(f.selected, ["merge-base", "--is-ancestor", releaseSha, CURRENT]);
@@ -217,6 +219,7 @@ describe("original Desktop full-repair continuation", () => {
     expect(follow.prompt).toContain(jobId);
     expect(follow.prompt).toContain("recover-learning --recipe for independent verification before considering generic discovery");
     expect(follow.prompt).toContain("This wake grants no provider reads");
+    expect(follow.prompt).not.toContain("complete one unspent source-read");
     expect(follow.prompt).not.toContain("use recover-learning without a recipe");
     expect(await prepareOwnedDesktopContinuation({ context: f.context, item: followthrough }, f.deps))
       .toMatchObject({ outcome: "already_requested", messageRequired: false });
