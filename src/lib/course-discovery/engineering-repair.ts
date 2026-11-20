@@ -243,6 +243,11 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
       !Number.isFinite(observed) || !Number.isFinite(start) || !Number.isFinite(end) || observed < start! || observed > end) return projected;
   return { ...projected, category: "READER_OR_RUNTIME_FAILURE", code: terminal.failureCode, failureCode: terminal.failureCode,
     phase: terminal.frameworkPhase, priorInspection: inspection,
+    // This terminal fallback has no budget/native guard. Its already-retained
+    // structural trace is still needed to diagnose the failed extraction. Only
+    // expose it after the same job/attempt/time binding above, never as proof.
+    ...(terminal.frameworkPhase === "GENERIC_FALLBACK" && terminal.failureCode === "DISCOVERY_NO_VERIFIED_RECIPE" && !guardCode
+      ? { genericFallbackDiagnostic: projectGenericFailureDiagnostic({ code: terminal.failureCode }, checkpoint.genericToolTrace, checkpoint.controller) } : {}),
     terminalWorkerDiagnostic: { ...terminal, attempt: retained.attempt as number, observedAt: retained.observedAt as string },
   };
 }

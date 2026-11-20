@@ -70,6 +70,28 @@ describe("durable terminal worker diagnostics", () => {
     const value = discoveryFailureDiagnosis({ ...fixture().job, ...(mode === "invalid-clock" ? { deadlineAt: new Date("invalid") } : {}), result: { workerFailure: record } });
     expect(value).not.toHaveProperty("terminalWorkerDiagnostic"); expect(JSON.stringify(value)).not.toContain("PRIVATE_CANARY");
   });
+  it.each(["valid", "unbound", "absent"])("retains the existing no-recipe fallback trace only behind bound terminal proof: %s", mode => {
+    const record = { ...failureRecord(), diagnostic: { ...diagnostic, failureCode: "DISCOVERY_NO_VERIFIED_RECIPE" } };
+    if (mode === "unbound") record.attempt = 1;
+    const job = { ...fixture().job, result: { workerFailure: record }, checkpoint: {
+      stagehandFailure: { code: "FRAMEWORK_INSPECTION_PATH_STALE" },
+      ...(mode === "absent" ? {} : { genericToolTrace: { entries: [{ action: "BROWSER_INSPECT_ADAPTER", status: "ERROR",
+        errorCode: "UNSUPPORTED_ADAPTER_SOURCE", modelPreviewBytes: 42, previewOmitted: false,
+        url: "PRIVATE_CANARY", arguments: "PRIVATE_CANARY" }], lostEntries: 0 },
+      controller: { lastFailure: { code: "DISCOVERY_BROWSER_INCOMPLETE", details: {
+        action: "inspect_adapter", loading: false, pendingRequestCount: 0, url: "PRIVATE_CANARY" } } } }),
+    } };
+    const value = sanitizeResponderValue(discoveryFailureDiagnosis(job));
+    if (mode === "unbound") expect(value).not.toHaveProperty("genericFallbackDiagnostic");
+    else {
+      expect(value).toMatchObject({ failureCode: "DISCOVERY_NO_VERIFIED_RECIPE", phase: "GENERIC_FALLBACK",
+        genericFallbackDiagnostic: { traceRetention: mode === "absent" ? "NOT_RETAINED" : "PRESENT", evidenceAuthority: false } });
+      if (mode === "valid") expect(value).toMatchObject({ genericFallbackDiagnostic: { toolTrace: { entries: [{
+        action: "BROWSER_INSPECT_ADAPTER", errorCode: "UNSUPPORTED_ADAPTER_SOURCE" }] } } });
+      expect(value).not.toHaveProperty("genericFallbackDiagnostic.limit");
+    }
+    expect(JSON.stringify(value)).not.toContain("PRIVATE_CANARY");
+  });
   it("normalizes unknown error codes without retaining error prose", () => {
     const value = makeWorkerTerminalDiagnostic(Object.assign(new Error("PRIVATE_CANARY"), { code: "PRIVATE_CANARY", url: "PRIVATE_CANARY" }));
     expect(value).toEqual({ version: 1, failureCode: "UNKNOWN_WORKER_FAILURE", frameworkPhase: "WORKER", errorName: "Error" });
@@ -408,6 +430,21 @@ describe("private failure evidence", () => {
       { lastFailure: { code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action: "PRIVATE_CANARY", failure: { code: "PRIVATE_CANARY" },
         staleControlReason: "PRIVATE_CANARY", loading: "PRIVATE_CANARY", pendingRequestCount: -1, url: "PRIVATE_CANARY" } } });
     expect(result?.historicalFailure).toEqual({ feedbackKind: "DISCOVERY_BROWSER_INCOMPLETE" });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_CANARY");
+  });
+  it("projects closed request-failure facts and adapter rejection without exposing requests", () => {
+    const result = projectGenericFailureDiagnostic({ code: "DISCOVERY_NO_VERIFIED_RECIPE" }, undefined, {
+      officialUrl: "https://fixture.example/",
+      lastFailure: { code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action: "inspect_adapter",
+        failure: { code: "ADAPTER_IDENTITY_MISMATCH", url: "PRIVATE_CANARY" }, requests: [
+          { code: "UNSAFE_URL", method: "GET", resourceType: "script", url: "https://fixture.example/path?PRIVATE_CANARY" },
+          { code: "PRIVATE_CANARY", method: "PRIVATE_CANARY", resourceType: "PRIVATE_CANARY" },
+        ] } },
+    });
+    expect(result).toMatchObject({ historicalFailure: { failureCode: "ADAPTER_IDENTITY_MISMATCH", requestFailures: [
+      { failureCode: "UNSAFE_URL", method: "GET", resourceType: "script", originCategory: "OFFICIAL_ORIGIN" },
+      { failureCode: "OTHER_REQUEST_ERROR", originCategory: "UNAVAILABLE" },
+    ] }, traceRetention: "NOT_RETAINED", evidenceAuthority: false });
     expect(JSON.stringify(result)).not.toContain("PRIVATE_CANARY");
   });
   it.each(["FIRST_TWO_AND_LATEST_SIX", "PRIVATE_CANARY", undefined])("retains only the closed trace layout %s", retention => {
