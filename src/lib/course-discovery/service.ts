@@ -12,7 +12,7 @@ import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
 import { hasLearningRepairRecoveryMarker, learningRepairRecoverySchema, loadOwnedOutdoorLearningRepair,
   MAX_LEARNING_REPAIR_RECOVERIES, readLearningRepairRecoveries, readLearningRepairRecoveryOf,
   readLearningExecutionRuntime, loadOwnedOutdoorRepairBatch, learningRepairReadOwner,
-  hasReciprocalLearningRepairLink, learningRecipeHandoffSchema, readLearningRecipeHandoff } from "./learning-repair-recovery";
+  hasReciprocalLearningRepairLink, learningRecipeHandoffSchema, readLearningRecipeHandoff, type LearningRepairRecovery } from "./learning-repair-recovery";
 import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
@@ -286,40 +286,44 @@ export async function requestOwnedOutdoorLearningRecovery(input: {
     const owned = await loadOwnedOutdoorLearningRepair(tx, { batchId: input.batchId, originalJobId, now });
     if (!owned || owned.batch.leaseToken !== input.leaseToken || owned.batch.ownerThreadId !== input.ownerThreadId ||
         owned.batch.releaseSha !== input.releaseSha) conflict();
-    const { job: original, request } = owned.failure;
-    const history = readLearningRepairRecoveries(original.result);
-    if (!history) return { outcome: "invalid_recovery_history" as const };
-    const prior = history.find(link => link.batchId === input.batchId && link.releaseSha === input.releaseSha);
-    if (prior) {
-      const current = await tx.courseDiscoveryJob.findUnique({ where: { id: prior.jobId } });
-      if (!current || current.sourceFingerprint !== original.sourceFingerprint || current.targetKey !== original.targetKey) conflict();
-      return { outcome: "existing" as const, jobId: current.id, originalJobId: original.id,
-        releaseSha: input.releaseSha, runtimeVersion: prior.runtimeVersion };
-    }
-    if (history.length >= MAX_LEARNING_REPAIR_RECOVERIES) return { outcome: "recovery_history_exhausted" as const };
-    if (await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: original.targetKey } })) return { outcome: "busy" as const };
-    const link = learningRepairRecoverySchema.parse({ version: 1, kind: "LATE_ENGINEERING_RECOVERY",
-      originalJobId: original.id, jobId: randomUUID(), batchId: owned.batch.id, incidentId: owned.entry.incidentId,
-      ownerThreadId: owned.batch.ownerThreadId,
-      cycle: owned.entry.cycle, sourceFingerprint: original.sourceFingerprint, releaseSha: input.releaseSha,
-      runtimeVersion: input.runtimeVersion,
-      originalFirstPickedUpAt: original.firstPickedUpAt!.toISOString(), originalDeadlineAt: original.deadlineAt!.toISOString(),
-      requestedAt: now.toISOString() });
-    const child = await tx.courseDiscoveryJob.create({ data: { id: link.jobId, courseId: original.courseId,
-      targetKey: original.targetKey, activeTargetKey: original.targetKey, sourceFingerprint: original.sourceFingerprint,
-      baseRecipeId: original.baseRecipeId, request: json(request), result: { learningRecoveryOf: link } } });
-    const parentResult = original.result && typeof original.result === "object" && !Array.isArray(original.result) ? original.result : {};
-    const updated = await tx.courseDiscoveryJob.updateMany({ where: { id: original.id, status: original.status,
-      sourceFingerprint: original.sourceFingerprint, activeTargetKey: null, updatedAt: original.updatedAt },
-      data: { result: { ...parentResult, learningRecoveries: [...history, link] } as Prisma.InputJsonValue } });
-    if (updated.count !== 1) conflict();
-    // A foreign/malformed legacy owner rolls the entire admission back. The
-    // only exception comes from the now-reciprocal database link, not input.
-    if ((await discoveryJobOwnership(tx, child, now)).blocked) conflict();
-    return { outcome: "created" as const, jobId: child.id, originalJobId: original.id,
-      releaseSha: input.releaseSha, runtimeVersion: input.runtimeVersion };
+    return createOwnedLateLearningJob(tx, owned.failure, { batchId: owned.batch.id, incidentId: owned.entry.incidentId,
+      ownerThreadId: input.ownerThreadId, cycle: owned.entry.cycle, releaseSha: input.releaseSha, runtimeVersion: input.runtimeVersion }, now);
   }));
   return admission.acquired ? admission.value : { outcome: "busy" as const };
+}
+
+/** Called under the source lock and the qualified original writer's lease. */
+export async function createOwnedLateLearningJob(tx: Tx, failure: NonNullable<Awaited<ReturnType<typeof currentDiscoveryEngineeringFailure>>>,
+  owner: Pick<LearningRepairRecovery, "batchId" | "incidentId" | "ownerThreadId" | "cycle" | "releaseSha" |
+    "runtimeVersion" | "simulatorAssignmentRef">, now: Date) {
+  const { job: original, request } = failure;
+  const history = readLearningRepairRecoveries(original.result);
+  if (!history) return { outcome: "invalid_recovery_history" as const };
+  const prior = history.find(link => link.batchId === owner.batchId && link.releaseSha === owner.releaseSha);
+  if (prior) {
+    const child = await tx.courseDiscoveryJob.findUnique({ where: { id: prior.jobId } });
+    if (!child || child.sourceFingerprint !== original.sourceFingerprint || child.targetKey !== original.targetKey ||
+        prior.simulatorAssignmentRef !== owner.simulatorAssignmentRef) conflict();
+    return { outcome: "existing" as const, jobId: child.id, originalJobId: original.id,
+      releaseSha: prior.releaseSha, runtimeVersion: prior.runtimeVersion };
+  }
+  if (history.length >= MAX_LEARNING_REPAIR_RECOVERIES) return { outcome: "recovery_history_exhausted" as const };
+  if (await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: original.targetKey } })) return { outcome: "busy" as const };
+  const link = learningRepairRecoverySchema.parse({ ...owner, version: 1, kind: "LATE_ENGINEERING_RECOVERY",
+    originalJobId: original.id, jobId: randomUUID(), sourceFingerprint: original.sourceFingerprint,
+    originalFirstPickedUpAt: original.firstPickedUpAt!.toISOString(), originalDeadlineAt: original.deadlineAt!.toISOString(),
+    requestedAt: now.toISOString() });
+  const child = await tx.courseDiscoveryJob.create({ data: { id: link.jobId, courseId: original.courseId,
+    offeringId: original.offeringId, targetKey: original.targetKey, activeTargetKey: original.targetKey,
+    sourceFingerprint: original.sourceFingerprint, baseRecipeId: original.baseRecipeId, request: json(request),
+    result: json({ learningRecoveryOf: link }) } });
+  const parentResult = original.result && typeof original.result === "object" && !Array.isArray(original.result) ? original.result : {};
+  const updated = await tx.courseDiscoveryJob.updateMany({ where: { id: original.id, status: original.status,
+    sourceFingerprint: original.sourceFingerprint, activeTargetKey: null, updatedAt: original.updatedAt },
+    data: { result: json({ ...parentResult, learningRecoveries: [...history, link] }) } });
+  if (updated.count !== 1 || (await discoveryJobOwnership(tx, child, now)).blocked) conflict();
+  return { outcome: "created" as const, jobId: child.id, originalJobId: original.id,
+    releaseSha: link.releaseSha, runtimeVersion: link.runtimeVersion };
 }
 
 async function discoveryJobOwnership(tx: Tx, job: Prisma.CourseDiscoveryJobGetPayload<object>, now: Date) {
@@ -812,7 +816,17 @@ export async function activateDiscoveryRecipe(jobId: string, leaseToken: string)
       // idempotent. No operation can renew or write a SUCCEEDED job.
       status: "SUCCEEDED", activeTargetKey: null, leaseExpiresAt: null, completedAt: now, outcome: "RECIPE_READY", result: json(result),
     } });
-    if (recovery && recoveryOwner?.kind === "OWNED_REPAIR") {
+    if (recovery && recoveryOwner?.kind === "OWNED_REPAIR" && recoveryOwner.simulatorOfferingId) {
+      const ownerRun = await tx.automationRun.findUniqueOrThrow({ where: { id: recovery.batchId } });
+      const marker = learningRecipeHandoffSchema.parse({ version: 1, phase: "METHOD_REPLAYED_MONITORING_PENDING",
+        recovery, recipeId: stored.id, recipeHash: stored.hash, sourceFingerprint: adopted.sourceFingerprint,
+        handedOffAt: now.toISOString() });
+      const saved = await tx.automationRun.updateMany({ where: { id: ownerRun.id, status: "RUNNING",
+        audit: { equals: ownerRun.audit as Prisma.InputJsonValue } },
+        data: { status: "COMPLETED", completedAt: now, outcome: "simulator_method_replayed",
+          audit: json({ ...(ownerRun.audit as Record<string, unknown>), learningRecoveryHandoff: marker }) } });
+      if (saved.count !== 1) conflict();
+    } else if (recovery && recoveryOwner?.kind === "OWNED_REPAIR") {
       const codingOwner = await tx.courseSupportBatch.findUnique({ where: { id: recovery.batchId },
         select: { leaseToken: true, ownerThreadId: true } });
       if (!codingOwner || codingOwner.ownerThreadId !== recovery.ownerThreadId ||

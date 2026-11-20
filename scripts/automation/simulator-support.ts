@@ -15,10 +15,12 @@ import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type 
 import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
 import type { VercelDeploymentInspection, VercelDeploymentList } from "@/lib/deployments/vercel-git";
 import { SIMULATOR_ENGINEERING_VERIFICATION_FAILURE_CODES, type SimulatorEngineeringVerificationFailureCode } from "@/lib/automation/simulator-support-engineering-verification-policy";
+import { prepareCourseSupportRuntime } from "@/lib/automation/course-support-runtime-update";
+import { requestSimulatorLearningRecovery } from "@/lib/automation/simulator-support-ownership";
 
 export function readSimulatorSupportArguments(args: readonly string[]) {
   const [command, ...options] = args;
-  if (!["claim", "source-read", "progress", "verify-engineering", "heartbeat", "recover", "retire", "configure", "classify", "path", "adopt-source", "release", "deployed", "recheck", "complete", "retry", "inspect"].includes(command)) throw new Error("Use a supported simulator-support command.");
+  if (!["claim", "source-read", "progress", "verify-engineering", "heartbeat", "recover", "recover-learning", "retire", "configure", "classify", "path", "adopt-source", "release", "deployed", "recheck", "complete", "retry", "inspect"].includes(command)) throw new Error("Use a supported simulator-support command.");
   const values = new Map<string, string>();
   let apply = false;
   let repair = false;
@@ -157,6 +159,25 @@ async function main() {
   }
   else if (input.command === "heartbeat") result = await heartbeatSimulatorSupport(owner);
   else if (input.command === "recover") result = await recoverSimulatorSupport(owner);
+  else if (input.command === "recover-learning") {
+    const claim = await readSimulatorSupportClaim(owner);
+    assertSimulatorSupportInspectionFence(input, claim);
+    if (process.platform !== "win32" || !claim.fullRepair || !claim.releaseSha || !claim.deployment ||
+        claim.phase !== "VERIFYING" || !claim.plannedPaths.length ||
+        Date.parse(claim.leaseExpiresAt) <= Date.now() || claim.research.inFlight)
+      throw new Error("OWNED_SIMULATOR_LEARNING_REPAIR_REQUIRED");
+    git(["fetch", "origin", "main"]);
+    const runtimeVersion = git(["rev-parse", "HEAD"]);
+    if (git(["branch", "--show-current"]) !== claim.branch || git(["status", "--porcelain"]) ||
+        runtimeVersion !== git(["rev-parse", "origin/main"]))
+      throw new Error("CLEAN_PUBLISHED_DESCENDANT_RUNTIME_REQUIRED");
+    git(["merge-base", "--is-ancestor", claim.releaseSha, runtimeVersion]);
+    await prepareCourseSupportRuntime({
+      executable: resolve(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      scriptPath: resolve("scripts/automation/update-course-discovery-runtime.ps1"), runtimeVersion, ownerThreadId,
+    });
+    result = await requestSimulatorLearningRecovery({ ...owner, runtimeVersion, registeredRelease: claim.releaseSha });
+  }
   else if (input.command === "retire") result = await retireSimulatorSupport(owner);
   else if (input.command === "source-read") result = await readSimulatorSupportSource({ ...owner, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered, interactiveChannel: input.interactiveChannel });
   else if (input.command === "configure") {

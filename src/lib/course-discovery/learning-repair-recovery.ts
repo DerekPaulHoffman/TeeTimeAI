@@ -8,6 +8,7 @@ const id = z.string().min(1).max(128);
 export const learningRepairRecoverySchema = z.object({
   version: z.literal(1), kind: z.literal("LATE_ENGINEERING_RECOVERY"),
   originalJobId: id, jobId: id, batchId: id, incidentId: id, ownerThreadId: id,
+  simulatorAssignmentRef: id.optional(),
   cycle: z.number().int().positive(),
   sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
   releaseSha: z.string().regex(/^[a-f0-9]{40}$/u),
@@ -65,6 +66,8 @@ export function hasReciprocalLearningRepairLink(parentResult: unknown, child: Le
 
 type Reader = Pick<Prisma.TransactionClient, "courseDiscoveryJob" | "courseSupportBatch" | "course" |
   "courseOffering" | "teeSearch" | "coursePreference" | "courseDiscoveryPilotEnrollment" | "courseProbe">;
+type OwnedRead = { kind: "OWNED_REPAIR"; batchId: string; ownerThreadId: string; incidentId: string; cycle: number;
+  assignmentRef: string | null; baseSha: string; observedAt: number; simulatorOfferingId?: string };
 
 /** This is only the outdoor coding batch lane. Simulator ownership must use
  * its offering-scoped authority, never an outdoor course exemption. */
@@ -127,19 +130,36 @@ export async function loadOwnedOutdoorLearningRepair(reader: Reader, input: {
 
 /** Call only with the current job row read by claim/owned inside their
  * transaction. A checkpoint or caller-supplied receipt cannot grant this. */
-export async function learningRepairReadOwner(reader: Reader,
+export async function learningRepairReadOwner(reader: Reader & Pick<Prisma.TransactionClient, "automationRun" | "simulatorSupportIncident">,
   job: Pick<CourseDiscoveryJob, "id" | "status" | "attempts" | "firstPickedUpAt" | "deadlineAt" | "result" | "targetKey" | "courseId" | "offeringId" | "sourceFingerprint" | "baseRecipeId">,
   now: Date): Promise<{ kind: "ORDINARY" } | { kind: "INVALID" } |
-    { kind: "OWNED_REPAIR"; batchId: string; ownerThreadId: string; incidentId: string; cycle: number;
-      assignmentRef: string | null; baseSha: string; observedAt: number }> {
+    OwnedRead> {
   if (!hasLearningRepairRecoveryMarker(job.result)) return { kind: "ORDINARY" };
   const link = readLearningRepairRecoveryOf(job.result);
-  if (!link || link.jobId !== job.id || link.sourceFingerprint !== job.sourceFingerprint || job.offeringId !== null ||
+  if (!link || link.jobId !== job.id || link.sourceFingerprint !== job.sourceFingerprint ||
+      Boolean(link.simulatorAssignmentRef) !== Boolean(job.offeringId) ||
       Date.parse(link.requestedAt) > now.getTime() || !["QUEUED", "RUNNING"].includes(job.status) ||
       job.status === "RUNNING" && readLearningExecutionRuntime(job.result) !== link.runtimeVersion) return { kind: "INVALID" };
   const delegated = job.attempts > 0 && job.attempts <= 2 && job.firstPickedUpAt !== null && job.deadlineAt !== null &&
     job.deadlineAt.getTime() - job.firstPickedUpAt.getTime() === 900_000 && job.deadlineAt > now &&
     readLearningExecutionRuntime(job.result) === link.runtimeVersion;
+  if (job.offeringId && link.simulatorAssignmentRef) {
+    const { loadSimulatorRecoveryClaim } = await import("@/lib/automation/simulator-full-repair");
+    const owned = await loadSimulatorRecoveryClaim(reader, link.batchId, now, delegated);
+    if (!owned || owned.audit.assignmentRef !== link.simulatorAssignmentRef ||
+        owned.audit.childThreadId !== link.ownerThreadId || owned.claim.releaseSha !== link.releaseSha ||
+        owned.audit.target.cycle !== link.cycle || owned.audit.target.offeringId !== job.offeringId ||
+        owned.audit.target.courseId !== job.courseId || owned.audit.target.incidentId !== link.incidentId ||
+        owned.failure.job.id !== link.originalJobId || owned.failure.job.targetKey !== job.targetKey ||
+        owned.failure.job.baseRecipeId !== job.baseRecipeId || owned.failure.job.sourceFingerprint !== job.sourceFingerprint ||
+        owned.failure.job.firstPickedUpAt!.toISOString() !== link.originalFirstPickedUpAt ||
+        owned.failure.job.deadlineAt!.toISOString() !== link.originalDeadlineAt ||
+        !hasReciprocalLearningRepairLink(owned.failure.job.result, link) ||
+        Date.parse(owned.claim.deployment!.deployedAt) > Date.parse(link.requestedAt)) return { kind: "INVALID" };
+    return { kind: "OWNED_REPAIR", batchId: link.batchId, ownerThreadId: link.ownerThreadId, incidentId: link.incidentId,
+      assignmentRef: link.simulatorAssignmentRef, baseSha: owned.audit.baseSha, cycle: link.cycle, observedAt: now.getTime(),
+      simulatorOfferingId: job.offeringId };
+  }
   const owned = await loadOwnedOutdoorLearningRepair(reader, { batchId: link.batchId, originalJobId: link.originalJobId, now,
     allowExpiredDelegation: delegated });
   if (!owned || !hasReciprocalLearningRepairLink(owned.failure.job.result, link) ||

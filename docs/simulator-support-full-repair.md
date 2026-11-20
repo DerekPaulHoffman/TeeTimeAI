@@ -14,6 +14,15 @@ The outcome is a working saved method, independent execution, matching normal
 application results and observed normal delivery. A completed research command,
 code commit, deployment or heartbeat is intermediate evidence.
 
+After the original worker records the deployed proof for its code-bearing
+repair, use `automation:simulator-support -- recover-learning` with the
+current assignment token and revision. The command qualifies the current
+published Sol runtime and delegates one linked late learner for that exact
+repair. It preserves the original failed job and its clock. The independent
+replay hands the method to the usual workflow, which owns matching and email.
+If the operation stops before admission, the scheduler may continue the same
+native owner when the existing verification lease expires.
+
 Read `discoveryEngineeringFailure`, retained research history and failed routes
 before choosing a different approach. Keep a private hypothesis, evidence,
 correction and regression receipt. Spending a research budget does not establish

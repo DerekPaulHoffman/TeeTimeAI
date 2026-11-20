@@ -736,6 +736,75 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     return { ...f, incident, run, assignmentRef, child, claim: () => lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha,
       branch: "automation/course-support-discovery-claim" }) };
   }
+
+  it("lets the original deployed simulator owner hand off one late learner and releases coding ownership only after replay", async () => {
+    const f = await boundSimulatorHandoff(true);
+    const lane = await import("@/lib/automation/simulator-support-ownership");
+    const { parseCourseDispatchAudit, planCourseSupportCourseDispatch } = await import("@/lib/automation/course-support-course-dispatch");
+    const claimed = await f.claim();
+    if (!claimed.acquired) throw Error("Simulator ownership unavailable in fixture.");
+    const current = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = parseCourseDispatchAudit(current.audit)!;
+    const registeredRelease = "b".repeat(40), runtimeVersion = "c".repeat(40);
+    // Release proof comes from the Git deployment boundary in production.
+    audit.launcherReceiptPath = join(tmpdir(), "original-simulator-launcher.json");
+    Object.assign(audit.simulatorClaim!, { phase: "VERIFYING", releaseSha: registeredRelease,
+      leaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
+      plannedPaths: ["src/lib/course-discovery/test-reader.ts"],
+      deployment: { source: "git", state: "READY", branch: "main", commitSha: registeredRelease,
+        deploymentId: "dpl_fixture", deploymentUrl: "https://fixture.vercel.app",
+        aliases: ["teetimespot.com", "www.teetimespot.com"], deployedAt: new Date().toISOString() } });
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const scheduler = `recovery-parent-${randomUUID()}`;
+    batchOwners.push(scheduler);
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: scheduler, baseSha: runtimeVersion, maxStarts: 1 });
+    expect(plan).toMatchObject({ acquired: true, value: {
+      continuationItems: [{ assignmentRef: f.assignmentRef, threadId: f.child, simulatorLearningRecovery: true }],
+      launchItems: [],
+    } });
+    const resumed = await lane.recoverSimulatorSupport({ assignmentRef: f.assignmentRef, ownerThreadId: f.child,
+      token: claimed.value.token, revision: claimed.value.revision });
+    if (!resumed.acquired) throw Error("Original simulator could not resume its expired lease.");
+    const owner = { assignmentRef: f.assignmentRef, ownerThreadId: f.child, token: resumed.value.token, revision: resumed.value.revision,
+      registeredRelease, runtimeVersion };
+    await expect(lane.requestSimulatorLearningRecovery({ ...owner, ownerThreadId: "different-chat" })).rejects.toThrow();
+    expect(await service.ensureDiscoveryJob({ ...f.target, searchId: f.search.id })).toBeNull();
+    const admitted = await lane.requestSimulatorLearningRecovery(owner);
+    if (!admitted.acquired || admitted.value.outcome !== "created") throw Error("Expected one late learner.");
+    expect(await lane.requestSimulatorLearningRecovery(owner)).toMatchObject({ acquired: true,
+      value: { outcome: "existing", jobId: admitted.value.jobId } });
+    expect(await service.claimNextDiscoveryJob("stale-runtime", registeredRelease)).toBeNull();
+    const pickedUp = await service.claimNextDiscoveryJob("fixture-sol-simulator", runtimeVersion);
+    expect(pickedUp).toMatchObject({ id: admitted.value.jobId, offeringId: f.offering!.id, attempts: 1 });
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "HTTP_JSON", target: { ...f.target, kind: "SIMULATOR" },
+      source: { venueName: f.course.name, officialUrl: f.course.website, bookingUrl: "https://golf.example.com/times",
+        timeZone: "UTC", providerFamily: "EXAMPLE" },
+      request: { url: "https://golf.example.com/times?date={{date}}&duration={{durationMinutes}}", method: "GET" },
+      permittedRoutes: [{ origin: "https://golf.example.com", path: "/times", methods: ["GET"], queryKeys: ["date", "duration"] }],
+      proof: { venue: { path: "venue" }, date: { path: "date" }, durationMinutes: { path: "duration" },
+        complete: { path: "complete" }, empty: { path: "empty" } },
+      slots: { collection: { path: "slots" }, startsAt: { path: "start" }, endsAt: { path: "end" }, availableSpots: { path: "spots" } } });
+    const proposed = await service.proposeDiscoveryRecipe(pickedUp!.id, pickedUp!.leaseToken!, recipe);
+    await expect(service.activateDiscoveryRecipe(pickedUp!.id, pickedUp!.leaseToken!)).rejects.toThrow();
+    for (const challenge of proposed.challenges) await service.recordDiscoveryVerification({ jobId: pickedUp!.id,
+      leaseToken: pickedUp!.leaseToken!, challengeId: challenge.id, recipeHash: proposed.recipeHash, input: challenge.input,
+      result: { status: "AVAILABLE", complete: true, observedAt: new Date().toISOString(), sourceUrl: recipe.source.bookingUrl,
+        slots: [{ sourceId: `fixture-${challenge.input.date}`, startsAt: `${challenge.input.date}T10:00:00.000Z`,
+          endsAt: `${challenge.input.date}T11:00:00.000Z`, availableSpots: 1, bookingUrl: recipe.source.bookingUrl }],
+        evidence: { recipeHash: proposed.recipeHash, venueVerified: true, dateVerified: true, capacityVerified: true,
+          durationVerified: true, completeVerified: true } } });
+    const method = await service.activateDiscoveryRecipe(pickedUp!.id, pickedUp!.leaseToken!);
+    expect(await service.getActiveAccessRecipe(f.target)).toMatchObject({ record: { id: method.recipeId, hash: method.hash } });
+    expect(await client.automationRun.findUnique({ where: { id: f.run.id } })).toMatchObject({ status: "COMPLETED",
+      outcome: "simulator_method_replayed", audit: { learningRecoveryHandoff: { recipeId: method.recipeId,
+        phase: "METHOD_REPLAYED_MONITORING_PENDING", recovery: { originalJobId: f.job.id, jobId: pickedUp!.id } } } });
+    expect(await client.courseDiscoveryJob.findUnique({ where: { id: f.job.id } })).toMatchObject({
+      status: f.job.status, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt, completedAt: f.job.completedAt,
+      attempts: f.job.attempts, outcome: f.job.outcome });
+    expect(await client.simulatorSupportIncident.findUnique({ where: { id: f.incident.id } }))
+      .toMatchObject({ status: "AUTO_INVESTIGATING" });
+  }, 25_000);
+
   it("keeps a full simulator repair through a denied read, retry, and expired executor without resetting the failed learner", async () => {
     const f = await boundSimulatorHandoff(true), lane = await import("@/lib/automation/simulator-support-ownership");
     const originalJob = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });

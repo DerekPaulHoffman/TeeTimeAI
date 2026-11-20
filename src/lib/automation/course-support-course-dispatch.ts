@@ -990,6 +990,7 @@ async function collectCourseSupportContinuationCandidates(input: {
     originalParentThreadId: string; branch: string; baseSha: string;
     launcherReceiptPath?: string; claimToken?: string; claimRevision?: number; sourceFingerprint?: string;
     plannedPaths?: string[]; releaseSha?: string | null; checkpoint?: CourseSupportContinuationCheckpoint;
+    simulatorLearningRecovery?: true;
     expectedNativeContinuation?: { turnId: string; key: string; receiptPath: string } | null }> = [];
   let attentionCount = 0;
   if (!input.runs.some(run => run.status === "RUNNING" && run.parsed?.target.mode === "SIMULATOR" && run.parsed.state === "CONSUMED")) {
@@ -1009,6 +1010,18 @@ async function collectCourseSupportContinuationCandidates(input: {
         ledger, sourceFingerprint: audit.simulatorClaim!.sourceFingerprint,
       }).candidate) { attentionCount += 1; continue; }
       if (context.checkpoint.kind === "EXPIRED_OWNED_STAGE" && !audit.launcherReceiptPath) { attentionCount += 1; continue; }
+      const expiredPublishedRepair = context.checkpoint.kind === "EXPIRED_OWNED_STAGE" &&
+        context.checkpoint.ownedStage?.phase === "VERIFYING" && context.providerReadInFlight === false &&
+        audit.target.fullRepair && !latestConfirmedNativeContinuation(ledger);
+      const recovery = expiredPublishedRepair
+        ? await (await import("./simulator-full-repair")).loadSimulatorRecoveryClaim(input.tx, run.id, input.now, true)
+        : null;
+      const history = recovery
+        ? (await import("@/lib/course-discovery/learning-repair-recovery")).readLearningRepairRecoveries(recovery.failure.job.result)
+        : null;
+      const simulatorLearningRecovery = recovery && history && !history.some(link =>
+        link.batchId === run.id && link.releaseSha === recovery.claim.releaseSha) &&
+        !await hasSimulatorSupportImplementationOwnership(input.tx, audit.assignmentRef);
       continuationItems.push({ mode: "SIMULATOR", assignmentRef: audit.assignmentRef, threadId: audit.childThreadId,
         originalParentThreadId: audit.ownerThreadId, branch: audit.simulatorClaim!.branch, baseSha: audit.baseSha,
         ...(context.checkpoint.kind === "EXPIRED_OWNED_STAGE" ? {
@@ -1016,6 +1029,12 @@ async function collectCourseSupportContinuationCandidates(input: {
           claimRevision: audit.simulatorClaim!.revision, sourceFingerprint: audit.simulatorClaim!.sourceFingerprint,
           plannedPaths: audit.simulatorClaim!.plannedPaths, releaseSha: audit.simulatorClaim!.releaseSha,
           expectedNativeContinuation: latestConfirmedNativeContinuation(ledger),
+          ...(simulatorLearningRecovery ? { simulatorLearningRecovery: true as const,
+            checkpoint: { ...context.checkpoint, providerReadInFlight: false, ownedStage: {
+              ...context.checkpoint.ownedStage!, leaseExpiresAt: audit.simulatorClaim!.leaseExpiresAt,
+              fullRepair: audit.target.fullRepair,
+            } },
+          } : {}),
           checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight },
         } : {}) });
     } catch { attentionCount += 1; }

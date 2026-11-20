@@ -141,6 +141,34 @@ describe("original Desktop full-repair continuation", () => {
       .rejects.toThrow("EXPIRED_COURSE_RELEASE_NOT_PUBLISHED");
   });
 
+  it("wakes a deployed simulator repair once with its original Desktop owner and no new read authority", async () => {
+    const f = fixture(), fingerprint = "a".repeat(64), releaseSha = "c".repeat(40);
+    const item = { mode: "SIMULATOR", simulatorLearningRecovery: true, assignmentRef: REF, threadId: CHILD,
+      branch: f.launcher.branch, baseSha: BEFORE, launcherReceiptPath: f.launcherPath,
+      sourceFingerprint: fingerprint, claimToken: TURN, claimRevision: 8,
+      plannedPaths: ["src/lib/course-discovery/test-reader.ts"], releaseSha, expectedNativeContinuation: null,
+      checkpoint: { kind: "EXPIRED_OWNED_STAGE", claimLeaseExpired: true, providerReadInFlight: false, ownedStage: {
+        phase: "VERIFYING", sourceFingerprint: fingerprint, branch: f.launcher.branch, leaseExpiresAt: "2029-12-31T23:59:00.000Z",
+        releaseSha, deployment: { commitSha: releaseSha },
+        fullRepair: { kind: "FAILED_LEARNER_FULL_REPAIR", offeringSourceFingerprint: fingerprint },
+      } } };
+    const git = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD"
+      ? releaseSha : git(cwd, args));
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ threadId: CHILD, model: "gpt-6.1-sol", messageRequired: true,
+      prompt: expect.stringContaining("recover-learning") });
+    expect(result.prompt).toContain("First user Chrome");
+    expect(result.receiptPath).toContain("desktop-simulator-learning-");
+    expect(f.deps.git).toHaveBeenCalledWith(f.selected, ["merge-base", "--is-ancestor", releaseSha, CURRENT]);
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    await expect(prepareOwnedDesktopContinuation({ context: f.context,
+      item: { ...item, checkpoint: { ...item.checkpoint, ownedStage: { ...item.checkpoint.ownedStage, deployment: null } } } }, f.deps))
+      .rejects.toThrow();
+    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
+  });
+
   it("defers a stopped registered release until current main is Ready and asks its original owner only once", async () => {
     const f = fixture();
     const registered = "c".repeat(40), path = "src/lib/course-discovery/public-calendar.ts";

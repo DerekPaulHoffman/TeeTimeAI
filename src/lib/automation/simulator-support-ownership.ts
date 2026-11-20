@@ -6,7 +6,7 @@ import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-f
 import { runWithCourseSupportWriterTransitionLease, withCourseSupportWriteConflictRetry, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES, isRuntimeBearingCourseSupportPath } from "./course-support-batches";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { SIMULATOR_IMPLEMENTATION_BUSY } from "./simulator-support-path-admission";
-import { currentSimulatorFullRepair, hasConsumedSimulatorFullRepair, readSimulatorFullRepair } from "./simulator-full-repair";
+import { currentSimulatorFullRepair, hasConsumedSimulatorFullRepair, loadSimulatorRecoveryClaim, readSimulatorFullRepair } from "./simulator-full-repair";
 import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { assertSimulatorSupportDeployment, createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorImplementationWait, SIMULATOR_SUPPORT_LEASE_MS, SIMULATOR_SUPPORT_SOURCE_SELECT, validateSimulatorSupportPath, type SimulatorSupportClaim } from "./simulator-support-policy";
@@ -868,6 +868,22 @@ export function queueSimulatorSupportRechecks(input: Owner) {
     }
     if (cycle < 2) { cycle += 1; await queueOwnedSourceRechecks(tx, row, now, `verification-${cycle}`); }
     return saveClaim(tx, row, now, { recheckQueuedAt: row.claim.recheckQueuedAt ?? now.toISOString(), verificationCycle: cycle });
+  });
+}
+
+/** The original simulator worker returns its registered repair to the normal
+ * learner. A live descendant is the execution runtime, never a new repair SHA. */
+export function requestSimulatorLearningRecovery(input: Owner & { runtimeVersion: string; registeredRelease: string }) {
+  const runtimeVersion = z.string().regex(/^[a-f0-9]{40}$/u).parse(input.runtimeVersion);
+  return withTransition(async (tx, now) => {
+    const row = await loadOwned(tx, input, now);
+    await tx.$queryRaw`SELECT "id" FROM "Course" WHERE "id" = ${row.audit.target.courseId} FOR UPDATE`;
+    const owned = await loadSimulatorRecoveryClaim(tx, row.runId, now);
+    if (!owned || owned.claim.releaseSha !== input.registeredRelease) throw new Error("OWNED_SIMULATOR_LEARNING_REPAIR_REQUIRED");
+    const { createOwnedLateLearningJob } = await import("@/lib/course-discovery/service");
+    return createOwnedLateLearningJob(tx, owned.failure, { batchId: row.runId, incidentId: row.audit.target.incidentId,
+      ownerThreadId: input.ownerThreadId, cycle: row.audit.target.cycle, releaseSha: input.registeredRelease,
+      runtimeVersion, simulatorAssignmentRef: row.audit.assignmentRef }, now);
   });
 }
 

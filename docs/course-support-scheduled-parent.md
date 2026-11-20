@@ -135,12 +135,15 @@ manually free implementation or release ownership.
 Observe the same private supervisor/launcher receipts and process handles when
 useful; never restart healthy work because a wait returned. On a
 `continuationItems` handoff, read the original launcher status. If the item is an
-expired `WAITING_IMPLEMENTATION` stage and its original receipt is
+expired `WAITING_IMPLEMENTATION` stage or carries `simulatorLearningRecovery: true`
+and its original receipt is
 `DESKTOP_REQUESTED`, pass the original context and item through the same sealed
 `course-support-desktop-continuation.mjs` helper above. Use only its exact
 returned Desktop message and retain the acknowledgement. This wake requires the
 original inactive, completed Desktop turn and a qualified release. It grants
-no claim or path. For detached command-line continuations, follow
+no claim or path. The simulator learner handoff also requires the original
+registered deployed repair, unchanged active offering and alert, and no
+existing late job for that repair. For detached command-line continuations, follow
 `course-support-worker-continuation.md` using the original native worker.
 An expired owned simulator implementation or release
 stage requires the actual STOPPED or COMPLETED receipt and corresponding latest

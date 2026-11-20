@@ -78,16 +78,16 @@ export async function discoveryJobLegacyOwnership(reader: Prisma.TransactionClie
 
 async function legacyDiscoveryOwnerConflict(reader: Pick<Prisma.TransactionClient, "courseSupportBatch" | "automationRun">,
   target: Target, originalOwner?: { batchId: string; ownerThreadId: string; incidentId: string; cycle: number;
-    assignmentRef: string | null; baseSha: string; observedAt: number }) {
+    assignmentRef: string | null; baseSha: string; observedAt: number; simulatorOfferingId?: string }) {
   const batch = await reader.courseSupportBatch.findFirst({ where: {
-    ...(originalOwner ? { id: { not: originalOwner.batchId } } : {}),
+    ...(originalOwner && !originalOwner.simulatorOfferingId ? { id: { not: originalOwner.batchId } } : {}),
     status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] }, incidents: { some: { courseId: target.courseId } },
   }, select: { id: true } });
   if (batch) return true;
   const runs = await reader.automationRun.findMany({ where: {
     promptVersion: "course-support-course-dispatch-v1", status: "RUNNING",
     audit: { path: ["target", target.offeringId ? "offeringId" : "courseId"], equals: target.offeringId ?? target.courseId },
-  }, select: { audit: true }, take: 16 });
+  }, select: { id: true, audit: true }, take: 16 });
   if (runs.length >= 16) throw new Error("Legacy ownership is unavailable.");
   const parser = originalOwner ? (await import("@/lib/automation/course-support-course-dispatch")).parseCourseDispatchAudit : null;
   return runs.some(run => {
@@ -103,7 +103,10 @@ async function legacyDiscoveryOwnerConflict(reader: Pick<Prisma.TransactionClien
     const shared = Boolean(originalOwner?.assignmentRef && parsed && parsed.state === "CONSUMED" &&
       parsed.childThreadId === originalOwner.ownerThreadId && parsed.assignmentRef === originalOwner.assignmentRef &&
       parsed.target.incidentId === originalOwner.incidentId && parsed.target.cycle === originalOwner.cycle &&
-      parsed.baseSha === originalOwner.baseSha && parsed.target.mode === undefined && !parsed.target.offeringId &&
+      parsed.baseSha === originalOwner.baseSha &&
+      (originalOwner.simulatorOfferingId ? parsed.target.mode === "SIMULATOR" &&
+        parsed.target.offeringId === originalOwner.simulatorOfferingId && run.id === originalOwner.batchId
+        : parsed.target.mode === undefined && !parsed.target.offeringId) &&
       parsed.controlledRetryOf === undefined && Number.isFinite(consumedAt) &&
       consumedAt >= Date.parse(parsed.reservedAt) && consumedAt <= originalOwner.observedAt);
     return matches && !shared;
