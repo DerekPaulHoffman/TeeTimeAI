@@ -737,7 +737,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       branch: "automation/course-support-discovery-claim" }) };
   }
 
-  it.each(["replayed", "failed"])("keeps the same original deployed simulator owner through a %s late learner", async scenario => {
+  it.each(["replayed", "failed", "prepared"])("keeps the same original deployed simulator owner through a %s late learner", async scenario => {
     const f = await boundSimulatorHandoff(true);
     const lane = await import("@/lib/automation/simulator-support-ownership");
     const { parseCourseDispatchAudit, planCourseSupportCourseDispatch } = await import("@/lib/automation/course-support-course-dispatch");
@@ -780,6 +780,44 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await service.claimNextDiscoveryJob("stale-runtime", registeredRelease)).toBeNull();
     const pickedUp = await service.claimNextDiscoveryJob("fixture-sol-simulator", runtimeVersion);
     expect(pickedUp).toMatchObject({ id: admitted.value.jobId, offeringId: f.offering!.id, attempts: 1 });
+    if (scenario === "prepared") {
+      await service.failDiscoveryJob(pickedUp!.id, pickedUp!.leaseToken!, "TOOL_FAILURE", false);
+      const currentRun = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+      const snapshot = parseCourseDispatchAudit(currentRun.audit)!;
+      const fingerprint = snapshot.simulatorClaim!.sourceFingerprint, bookingUrl = "https://golf.example.com/rentals";
+      const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "BROWSER_DOM", target: { ...f.target, kind: "SIMULATOR" },
+        source: { venueName: f.course.name, officialUrl: f.course.website, bookingUrl, timeZone: "UTC", providerFamily: "EXAMPLE" },
+        pageUrl: bookingUrl, steps: [],
+        permittedRoutes: [{ origin: "https://golf.example.com", path: "/rentals", methods: ["GET"], queryKeys: [] },
+          { origin: "https://golf.example.com", path: "/times", methods: ["GET"], queryKeys: ["date"] }],
+        availabilityResponse: { url: "https://golf.example.com/times?date={{date}}", method: "GET", date: { source: "QUERY", path: "date" } },
+        proof: { venue: { selector: "h1" }, date: { selector: "#date" }, complete: { selector: "#loaded" }, durationMinutes: { selector: "#duration" } },
+        slots: { scope: { selector: "article.resource", label: { selector: "h2" }, expectedLabel: "Golf Simulator" },
+          collection: { selector: ".slot" }, startsAt: { selector: ".start" }, endsAt: { derive: "ADD_REQUESTED_DURATION" } } });
+      await expect(lane.requestSimulatorLearningRecovery({ ...owner, preparedMethod: { recipe } }))
+        .rejects.toThrow("SIMULATOR_PREPARED_PUBLIC_SOURCE_REQUIRED");
+      snapshot.simulatorResearch = { version: 1, sourceFingerprint: fingerprint, readCount: 1, links: [], bookingLinks: [],
+        linkBaseUrl: null, inFlight: null, history: [{ source: "booking", requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+          sourceFingerprint: fingerprint, observedAt: new Date().toISOString(), requestId: randomUUID(), httpStatus: 200,
+          rendered: true, outcome: "READ", publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true,
+            accessControls: [], method: "BROWSER", renderComplete: true } }] };
+      await client.automationRun.update({ where: { id: f.run.id }, data: { audit: snapshot as unknown as Prisma.InputJsonValue } });
+      const prepared = await lane.requestSimulatorLearningRecovery({ ...owner, preparedMethod: { recipe } });
+      if (!prepared.acquired || prepared.value.outcome !== "created") throw Error("The prepared method did not reach independent replay.");
+      expect(await lane.requestSimulatorLearningRecovery({ ...owner, preparedMethod: { recipe } })).toMatchObject({
+        acquired: true, value: { outcome: "existing", jobId: prepared.value.jobId } });
+      const verifier = (await service.claimNextDiscoveryJob("recipe-verifier", runtimeVersion))!;
+      expect(verifier.result).toMatchObject({ learningRecoveryOf: { preparedRecipeHash: hashAccessRecipe(recipe) } });
+      await expect(service.proposeDiscoveryRecipe(verifier.id, verifier.leaseToken!, { ...recipe, steps: [{ action: "waitFor", selector: ".other" }] },
+        { officialUrl: f.course.website, observedBookingUrl: bookingUrl })).rejects.toBeInstanceOf(service.DiscoveryConflictError);
+      const proposal = await service.proposeDiscoveryRecipe(verifier.id, verifier.leaseToken!, recipe,
+        { officialUrl: f.course.website, observedBookingUrl: bookingUrl });
+      expect(proposal.challenges).toHaveLength(2);
+      expect(await client.courseOffering.findUnique({ where: { id: f.offering!.id } })).toMatchObject({ activeAccessRecipeId: null });
+      expect(await client.courseDiscoveryJob.findUnique({ where: { id: f.job.id } })).toMatchObject({ status: f.job.status,
+        firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+      return;
+    }
     if (scenario === "failed") {
       const beforeFailure = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: pickedUp!.id } });
       const terminalDiagnostic = { version: 1, failureCode: "DISCOVERY_MODEL_CATALOG_UNAVAILABLE", frameworkPhase: "GENERIC_FALLBACK", errorName: "Error" };

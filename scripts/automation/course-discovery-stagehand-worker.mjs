@@ -160,7 +160,15 @@ export async function runCourseDiscoveryStagehandWorker({
   try {
     check();
     let prepared;
-    if (isOfficialAdapterJob(job)) {
+    const preparedHash = job.result?.learningRecoveryOf?.preparedRecipeHash;
+    if (preparedHash !== undefined) {
+      prepared = job.result?.preparedLearningRecipe;
+      if (!/^[a-f0-9]{64}$/u.test(preparedHash) || !job.result.learningRecoveryOf.simulatorAssignmentRef ||
+          job.request?.target?.kind !== "SIMULATOR" || !prepared?.recipe || !prepared.sourceEvidence)
+        throw discoveryError("DISCOVERY_PREPARED_METHOD_INVALID");
+      metrics.framework = "FixedPublicRoot";
+      metrics.frameworkRole = "ORIGINAL_OWNER_PREPARED_REPLAY";
+    } else if (isOfficialAdapterJob(job)) {
       phase = "FIXED_INSPECTION";
       metrics.framework = "FixedPublicRoot"; metrics.frameworkRole = "FIXED_PUBLIC_ROOT";
       try {
@@ -294,11 +302,12 @@ export async function runCourseDiscoveryStagehandWorker({
     phase = "RECIPE_VALIDATION";
     const validation = await validateRecipe({ recipe: prepared.recipe, signal });
     if (validation.valid !== true) throw discoveryError("DISCOVERY_RECIPE_INVALID");
-    await checkpoint("FIXED_INSPECTION_COMPLETE");
+    await checkpoint(preparedHash ? "INDEPENDENT_REPLAY" : "FIXED_INSPECTION_COMPLETE");
     phase = "REPLAY";
     const publicRentalDurations = prepared.recipe.adapter?.family === "YOUCANBOOKME" ?
       [...new Set(prepared.recipe.adapter.rooms?.map(room => room.durationMinutes))] : [];
-    const verificationDurationMinutes = job.request?.target?.kind === "SIMULATOR" && job.request.durationPreference === "ANY" &&
+    const verificationDurationMinutes = preparedHash ? prepared.verificationDurationMinutes :
+      job.request?.target?.kind === "SIMULATOR" && job.request.durationPreference === "ANY" &&
       publicRentalDurations.length === 1 ? publicRentalDurations[0] : undefined;
     const activation = await verifyDiscoveryCandidate({ client, job, recipe: prepared.recipe, sourceEvidence: prepared.sourceEvidence, signal, executeRecipe,
       ...(verificationDurationMinutes === undefined ? {} : { verificationDurationMinutes }),
