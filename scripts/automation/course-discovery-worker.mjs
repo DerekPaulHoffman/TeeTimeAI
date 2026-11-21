@@ -2299,6 +2299,8 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           }
           const modelText = JSON.stringify(previewDiscoverySnapshot({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
             ...(feedback ? { details: feedback.details } : {}),
+            ...(message.params.tool === "discovery_browser" && error?.code === "STALE_OR_UNKNOWN_CONTROL"
+              ? { hint: "The control or document changed before the action, so it was rejected. Use observe within the remaining authorized budget to inspect the current document and obtain fresh controls. Reassess its public read-only purpose before any action. Never retry the old target or guess a replacement. An access denial remains a stop; the original deadline, source restrictions and all budgets are unchanged." } : {}),
             // Return the closed correction contract, never rejected arguments.
             // An invalid progress report must not invite repeated guesses that
             // spend the remaining model budget or imply an access verdict.

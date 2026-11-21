@@ -23,7 +23,7 @@ const job = () => ({ id: "current-job", leaseToken: "synthetic-lease", deadlineA
  * provider or database operation is performed by these worker flow fixtures. */
 async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<typeof job>) => void; inspectError?: Error; checkpoint?: object; observation?: object; adapter?: object;
   workerOptions?: Record<string, unknown>; resolveHook?: () => void; browserCloseThrows?: boolean; lateUsage?: number;
-  browserSnapshot?: object; browserError?: Error; concurrentActions?: boolean; usageUpdates?: Record<string, number>[];
+  browserSnapshot?: object; browserError?: Error; browserErrorOnAction?: string; concurrentActions?: boolean; usageUpdates?: Record<string, number>[];
   checkpointThrowsSynchronously?: boolean; firstCheckpointGate?: Promise<void>; usageDuringFirstCheckpoint?: Record<string, number>;
   onProcessClose?: () => void; onCheckpointWrite?: (value: unknown) => void } = {}) {
   const home = mkdtempSync(join(tmpdir(), "worker-direct-protocol-")), original = job();
@@ -49,7 +49,7 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
   const inspectProtocol = vi.fn(async () => { if (options.inspectError) throw options.inspectError;
     return structuredClone({ ...descriptor, ...(options.observation ? { observation: options.observation } : {}) }); });
   const browserClose = vi.fn(async () => { if (options.browserCloseThrows) throw Error("synthetic close failure"); });
-  const browserRequest = vi.fn(async input => { if (options.browserError) throw options.browserError; return ({ url: input.url, text: "Public page",
+  const browserRequest = vi.fn(async input => { if (options.browserError && (!options.browserErrorOnAction || input.action === options.browserErrorOnAction)) throw options.browserError; return ({ url: input.url, text: "Public page",
     browserTransport: "NATIVE_CHROME", navigationStatus: 200, loading: false, requests: [], controls: [], frames: [],
     ...(input.action === "inspect_adapter" && options.adapter ? { adapter: options.adapter } : {}), ...options.browserSnapshot }); });
   const browserFactory = vi.fn(() => ({ close: browserClose, request: browserRequest }));
@@ -95,6 +95,23 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
 describe("unattended direct public protocol inspection", () => {
   const open: Action = { tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } };
   const checkpoint: Action = { tool: "discovery_checkpoint", arguments: { summary: "bounded synthetic observation" } };
+  it("guides a document-changed click to fresh observation without automatically retrying a read or target", async () => {
+    const out = await run({ actions: [open, { tool: "discovery_browser", arguments: {
+      action: "click", target: "00000000-0000-4000-8000-000000000001" } }], browserErrorOnAction: "click",
+      browserError: Object.assign(Error("private-stale-control-canary"), { code: "STALE_OR_UNKNOWN_CONTROL",
+        details: { browserDiagnostics: { staleControlReason: "TARGET_OR_DOCUMENT_CHANGED" } } }),
+    });
+    const reply = out.replies[1] as { result: { success: boolean; contentItems: { text: string }[] } };
+    const feedback = JSON.parse(reply.result.contentItems[0].text);
+    expect(reply.result.success).toBe(false);
+    expect(feedback.hint).toContain("observe");
+    expect(feedback.hint).toContain("Never retry the old target");
+    expect(out.browserRequest.mock.calls.map(([action]) => action.action)).toEqual(["open", "click"]);
+    expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.client.activate).not.toHaveBeenCalled();
+    expect(out.result.code).toBe("DISCOVERY_NO_VERIFIED_RECIPE");
+    expect(out.result.discoveryMetrics.genericBudget.toolOperations).toBe(2);
+    expect(JSON.stringify(out.replies)).not.toContain("private-stale-control-canary");
+  });
   it.each([
     { summary: "private-checkpoint-canary", outcome: "TOOL_FAILURE" },
     { summary: "private-checkpoint-canary", extra: "private-field-canary" },
