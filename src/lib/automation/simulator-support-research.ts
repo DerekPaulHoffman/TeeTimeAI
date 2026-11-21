@@ -743,6 +743,7 @@ function blockedRequestPathShape(url: URL) {
 function publicAssetDestinations(html: string, sourceUrl: string) {
   const assets = new Set<string>();
   let hasDeferredScripts = false;
+  let hasModulePreload = false;
   const add = (value: string) => {
     try {
       const url = publicUrl(new URL(value, sourceUrl).href);
@@ -766,6 +767,7 @@ function publicAssetDestinations(html: string, sourceUrl: string) {
         // consume the bounded allowance for exact external declarations.
         add(url.href);
         if (script?.deferred) hasDeferredScripts = true;
+        if (node.tagName === "link" && rel.includes("modulepreload")) hasModulePreload = true;
       }
     } catch { /* Untrusted resource declarations cannot expand request authority. */ } }
     const scriptType = attrs.find(attr => attr.name === "type")?.value.trim().toLowerCase();
@@ -775,7 +777,7 @@ function publicAssetDestinations(html: string, sourceUrl: string) {
     for (const child of node.childNodes ?? []) visit(child);
   };
   visit(parse(html));
-  return { urls: [...assets], hasDeferredScripts };
+  return { urls: [...assets], hasDeferredScripts, hasModulePreload };
 }
 
 function publicOccupancyUrl(url: URL, slug: string | undefined) {
@@ -957,6 +959,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   const assets = new Map<string, string>();
   let assetsObserved = false;
   let hasDeferredScripts = false;
+  let hasModulePreload = false;
   let renderedAssetInspections = 0;
   let renderedAssetAdmissions = 0;
   const inspectRenderedAsset = async (target: URL) => {
@@ -1193,6 +1196,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
               const declared = publicAssetDestinations(response.body.toString("utf8"), response.url);
               for (const asset of declared.urls) assets.set(asset, asset);
               hasDeferredScripts = declared.hasDeferredScripts;
+              hasModulePreload = declared.hasModulePreload;
               contractSlug ??= publishedYourGolfBookingSlug(response.body.toString("utf8"), response.url);
             }
             if (kind === "script" && response.status >= 200 && response.status < 300 && /(?:javascript|ecmascript)/iu.test(response.contentType)) {
@@ -1269,9 +1273,9 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     await settleStartedRoutes();
     if (hasRouteFailure) throw routeFailure;
     if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
-    if (renderedAssetAdmissions > 0) {
-      // Async script execution can follow a fulfilled route after DOMContentLoaded.
-      // Give the already-declared loader a bounded chance to update the document.
+    if ((renderedAssetAdmissions > 0 || hasModulePreload) && !terminalMainDocument && !accessControls.size) {
+      // Dynamically imported modules can update the document after load even
+      // when preload already fetched the script and no new route is pending.
       for (let turn = 0; turn < 4; turn += 1) {
         await beforeDeadline(page.waitForTimeout(150), deadline);
         await settleStartedRoutes();

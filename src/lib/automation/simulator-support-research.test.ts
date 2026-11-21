@@ -547,6 +547,22 @@ describe("owned known-reader public configuration", () => {
 });
 
 describe("bounded owned simulator public research transport", () => {
+  it("observes a preloaded module that updates the booking page after load", async () => {
+    const root = `${source}/`, asset = "https://assets.example.test/calendar.js";
+    const initial = `<link rel='modulepreload' href='${asset}'><div id='calendar'></div>`;
+    const view = renderedBrowser([{ url: root }, { url: asset, kind: "script" }], initial);
+    view.page.waitForTimeout.mockImplementationOnce(async () => {
+      view.page.content.mockResolvedValue(`${initial}<a href='https://calendar.example.test/public'>Book a bay</a>`);
+    });
+    const fetch = vi.fn(async (url: unknown) => String(url) === root ? response(initial) : response("/* public module */", 200, "text/javascript"));
+
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease, browser: view.factory });
+
+    expect(result).toMatchObject({ bookingLinks: ["https://calendar.example.test/public"], renderComplete: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(view.page.mouse.wheel).not.toHaveBeenCalled();
+  });
+
   it.each(["modulepreload", "preload' as='script", "preload' as='style"])("honors exact public %s declarations without admitting adjacent data", async declaration => {
     const asset = "https://assets.example.test/public-file.js";
     const html = `<link rel='${declaration}' href='${asset}'>`;
