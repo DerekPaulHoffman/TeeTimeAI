@@ -200,6 +200,13 @@ describe("original Desktop full-repair continuation", () => {
     expect(result).toMatchObject({ threadId: CHILD, model: "gpt-6.1-sol", messageRequired: true });
     expect(result.prompt).toContain("First user Chrome");
     expect(result.prompt).toContain(failed ? "grants no provider operation" : "fresh owner guide explicitly permits an untried observation");
+    if (failed) {
+      const predecessor = join(f.selected, ".codex-artifacts", `desktop-simulator-learning-${REF}-${releaseSha}.private.json`);
+      writeFileSync(predecessor, JSON.stringify({ ...JSON.parse(readFileSync(predecessor, "utf8")), runtimeSha: BEFORE }));
+    } else {
+      const git = f.deps.git.getMockImplementation()!;
+      f.deps.git.mockImplementation((cwd, args) => cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD" ? CURRENT : git(cwd, args));
+    }
     expect(await prepareOwnedDesktopContinuation({ context: f.context, item: { ...item, claimRevision: 9 } }, f.deps))
       .toMatchObject({ outcome: "already_requested", messageRequired: false });
   });
@@ -315,6 +322,44 @@ describe("original Desktop full-repair continuation", () => {
     f.deps.git.mockImplementation((cwd, args) => args[0] === "rev-parse" && args[1] === "HEAD" && cwd === f.worker
       ? "d".repeat(40) : priorGit(cwd, args));
     await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).rejects.toThrow("ORIGINAL_REGISTERED_CANDIDATE_CHANGED");
+  });
+
+  it("offers one same-owner registered continuation when current main advances after a completed turn", async () => {
+    const f = fixture(), registered = "c".repeat(40), nextRuntime = "d".repeat(40);
+    const path = "src/lib/course-discovery/public-calendar.ts";
+    const item = { ...f.item, releaseSha: registered, continuationMode: "REGISTERED_IMPLEMENTATION",
+      continuationTrigger: "UNFINISHED_FULL_REPAIR", plannedPaths: [path] };
+    const git = f.deps.git.getMockImplementation()!;
+    let runtime = CURRENT;
+    f.deps.git.mockImplementation((cwd, args) => {
+      if (args[0] === "merge-base" && args[1] === "--all") return BEFORE;
+      if (args[0] === "diff") return `${path}\0`;
+      if (args[0] === "rev-parse" && ["HEAD", "origin/main"].includes(args[1])) return cwd === f.worker ? registered : runtime;
+      return git(cwd, args);
+    });
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).toMatchObject({ messageRequired: true });
+
+    runtime = nextRuntime;
+    const ready = { ...f.deps.readProductionProof(), commitSha: nextRuntime };
+    f.deps.readProductionProof.mockReturnValue({ ...ready, state: "BUILDING" });
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "production_not_ready", messageRequired: false });
+    f.deps.readProductionProof.mockReturnValue(ready);
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "prior_continuation_not_observed", messageRequired: false });
+
+    const request = f.client.request.getMockImplementation()!;
+    const later = Date.parse("2030-01-01T00:01:00.000Z");
+    f.deps.now = () => later;
+    f.client.request.mockImplementation(async method => method === "thread/turns/list"
+      ? { data: [{ id: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa", status: "completed", error: null, itemsView: "notLoaded", items: [], completedAt: later / 1000 }] }
+      : request(method));
+    const followthrough = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(followthrough).toMatchObject({ threadId: CHILD, messageRequired: true, model: "gpt-6.1-sol",
+      prompt: expect.stringContaining("Inspect the recorded CI result and the shared changes") });
+    expect(JSON.parse(readFileSync(followthrough.receiptPath, "utf8"))).toMatchObject({ registeredRuntimeChanged: true });
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
   });
 
   it.each(["building", "wrong-sha", "missing-alias", "cli-source", "unavailable"])("defers source reconciliation before consuming its intent when production is %s", async scenario => {

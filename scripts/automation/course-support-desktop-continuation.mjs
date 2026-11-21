@@ -166,12 +166,13 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
   if (simulator && workerHead !== (simulatorPublished || simulatorRelease ? item.releaseSha : item.baseSha)) {
     if (recoveredSimulatorStage) {
-      const markers = simulatorReadFailure ? [simulatorLearningMarker] : Array.from({ length: item.checkpoint.readCount },
+      const markers = simulatorReadFailure ? [primaryMarker, simulatorLearningMarker] : Array.from({ length: item.checkpoint.readCount + 1 },
         (_, count) => join(selected, ".codex-artifacts", `desktop-simulator-research-${item.assignmentRef}-${count}.private.json`)).reverse();
       simulatorPrior = markers.filter(path => existsSync(path)).map(readJson).find(prior =>
         prior.schemaVersion === 1 && prior.kind === "OWNED_DESKTOP_CONTINUATION_REQUESTED" &&
         prior.status === "REQUESTED_NOT_ACKNOWLEDGED" &&
-        prior.continuationMode === (simulatorReadFailure ? "SIMULATOR_LEARNING_RECOVERY" : "SIMULATOR_RESEARCH") &&
+        (simulatorReadFailure ? ["SIMULATOR_SETTLED_READ_FAILURE", "SIMULATOR_LEARNING_RECOVERY"].includes(prior.continuationMode)
+          : prior.continuationMode === "SIMULATOR_RESEARCH") &&
         prior.childThreadId === item.threadId && prior.assignmentRef === item.assignmentRef && prior.runtimeSha === workerHead &&
         UUID.test(prior.priorTurnId ?? "") && Number.isFinite(Date.parse(prior.preparedAt)) && Date.parse(prior.preparedAt) <= now);
       if (!simulatorPrior) fail("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
@@ -236,7 +237,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const parentCommon = realpathSync(resolve(selected, execute(selected, ["rev-parse", "--git-common-dir"])));
   if (!same(common, parentCommon) || same(common, realpathSync(execute(worker, ["rev-parse", "--absolute-git-dir"])))) fail("ORIGINAL_LINKED_WORKER_REQUIRED");
   if (!localCandidate) execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
-  let marker = primaryMarker, prior = null;
+  let marker = primaryMarker, prior = null, registeredRuntimeChanged = false;
   if (simulatorLearning && progress && !existsSync(primaryMarker)) {
     // A still-active original worker can publish another repair and admit its
     // own learner without a scheduler message for that release. The planner
@@ -245,7 +246,19 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     marker = join(selected, ".codex-artifacts", `desktop-repair-followthrough-${item.assignmentRef}-${progress.fingerprint}.private.json`);
     if (existsSync(marker)) return { outcome: "already_requested", messageRequired: false };
   }
-  if (existsSync(primaryMarker)) {
+  if (existsSync(primaryMarker) && registeredImplementation && !simulator && !expiredDemandRecoveryOnly) {
+    prior = readJson(primaryMarker);
+    if (prior.schemaVersion !== 1 || prior.kind !== "OWNED_DESKTOP_CONTINUATION_REQUESTED" ||
+        prior.status !== "REQUESTED_NOT_ACKNOWLEDGED" || prior.childThreadId !== item.threadId ||
+        prior.assignmentRef !== item.assignmentRef || prior.batchReference !== item.batchReference ||
+        prior.continuationMode !== "REGISTERED_IMPLEMENTATION" || !SHA.test(prior.runtimeSha ?? "") ||
+        !UUID.test(prior.priorTurnId ?? "") || !Number.isFinite(Date.parse(prior.preparedAt)) ||
+        Date.parse(prior.preparedAt) > now) fail("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
+    marker = join(selected, ".codex-artifacts", `desktop-repair-registered-runtime-change-${item.assignmentRef}-${item.releaseSha}.private.json`);
+    if (prior.runtimeSha === currentSha || existsSync(marker)) return { outcome: "already_requested", messageRequired: false };
+    execute(selected, ["merge-base", "--is-ancestor", prior.runtimeSha, currentSha]);
+    registeredRuntimeChanged = true;
+  } else if (existsSync(primaryMarker)) {
     if (!progress) return { outcome: "already_requested", messageRequired: false };
     prior = readJson(primaryMarker);
     if (prior.schemaVersion !== 1 || prior.kind !== "OWNED_DESKTOP_CONTINUATION_REQUESTED" ||
@@ -296,6 +309,9 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     if (!Array.isArray(turns.data) || turns.data.length !== 1 || !UUID.test(turn?.id ?? "") || turn.status !== "completed" || turn.error !== null ||
         turn.itemsView !== "notLoaded" || !Array.isArray(turn.items) || turn.items.length !== 0 || !Number.isSafeInteger(turn.completedAt) || turn.completedAt <= 0) fail("ORIGINAL_TERMINAL_TURN_REQUIRED");
     if (prior && turn.id === prior.priorTurnId) return { outcome: "prior_continuation_not_observed", messageRequired: false };
+    if (registeredRuntimeChanged && turn.completedAt * 1000 + 999 < Date.parse(prior.preparedAt)) {
+      return { outcome: "prior_continuation_not_observed", messageRequired: false };
+    }
     if (simulatorPrior && (turn.id === simulatorPrior.priorTurnId ||
         (turn.completedAt + 1) * 1000 < Date.parse(simulatorPrior.preparedAt)))
       return { outcome: "prior_continuation_not_observed", messageRequired: false };
@@ -311,7 +327,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     const purpose = expiredDemandRecoveryOnly
       ? `EXPIRED_DEMAND_CLOSEOUT_ONLY. The original alert completed after its search window ended. On your unchanged clean original branch, import the exact tested main commit with a fast-forward only. Run npm run automation:course-support -- recover --batch-ref ${item.batchReference} --close-expired-demand once using your actual native identity. This records only your expired claim's closeout after revalidating the completed alert and current ownership. Never extend this lease, reopen demand, run learner admission, publish a release, access a provider, or send email. Stop after the typed result; any new alert uses the ordinary workflow.`
       : registeredImplementation
-      ? "REGISTERED_RELEASE_RECONCILIATION. Your exact clean registered candidate is retained and its owner-bound deployment proof is absent. Reconcile the stopped release stage using the continuation guide. Do not infer a venue failure, start another provider read or use learner admission before release, ownership and deployment proof are established."
+      ? `REGISTERED_RELEASE_RECONCILIATION. Your exact clean registered candidate is retained and its owner-bound deployment proof is absent. Reconcile the stopped release stage using the continuation guide.${registeredRuntimeChanged ? " Tested main advanced after your last continuation. Inspect the recorded CI result and the shared changes. If they address the recorded failure, preserve your candidate while integrating that exact main, then qualify the changed head. Never rerun unchanged failed CI as a substitute for a repair." : ""} Do not infer a venue failure, start another provider read or use learner admission before release, ownership and deployment proof are established.`
       : sourceReconciliationOnly
       ? "SOURCE_RECONCILIATION_ONLY. The source snapshot changed after this data-only claim. Read your same owned packet and use only the existing qualified original-owner recovery/requeue path when eligible. Do not investigate or implement against the changed snapshot, request provider reads, change claim fingerprints, or repeat verification. Stop after the typed recovery result; the scheduler owns subsequent admission. A rejected recovery stays visible."
       : `finish the unresolved diagnosis under the existing action plan; a newer release is not required. Do not rerun unchanged verification or an exhausted read. Obtain and validate fresh research context, distinguish tooling-repair permission from provider-contract permission, and diagnose the actual missing evidence/transport/extraction tool within the returned scope.${phaseInstruction}${releaseInstruction}`;
@@ -345,7 +361,8 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       ...(expiredDemandRecoveryOnly ? { expiredDemandRecoveryOnly: true } : {}),
       ...(localCandidate ? { localCandidate } : {}),
       observedFailureFingerprint: progress?.fingerprint ?? null,
-      ...(prior ? { parentReceiptPath: primaryMarker, failedLearningProgress: progress } : {}),
+      ...(registeredRuntimeChanged ? { parentReceiptPath: primaryMarker, registeredRuntimeChanged: true }
+        : prior ? { parentReceiptPath: primaryMarker, failedLearningProgress: progress } : {}),
       ...(simulatorLearning && progress && !prior ? { failedLearningProgress: progress } : {}),
       unchangedRuntime, preparedAt: new Date(now).toISOString(), monitoringVerified: false }, true);
     return { outcome: "desktop_continuation_message_required", messageRequired: true, threadId: item.threadId,
