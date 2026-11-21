@@ -143,6 +143,14 @@ const inspectionReadabilitySchema = z.array(z.object({
   officialDocumentCurrent: z.boolean().nullable(),
   failedPredicates: z.array(z.enum(["TRANSPORT_CHANGED", "PUBLIC_URL_REJECTED", "ACCESS_REQUIREMENT", "NATIVE_FATAL", "OPEN_STATUS_MISSING", "STATUS_REJECTED"])).max(6),
 })).min(1).max(6).refine(rows => new Set(rows.map(row => row.actionIndex)).size === rows.length);
+const inspectionRoutingSchema = z.object({
+  reason: z.enum(["OFFICIAL_RENDERING_INCOMPLETE", "PUBLIC_READS_PENDING", "FRESH_LINK_MISSING"]),
+  pathLength: z.number().int().min(1).max(512), position: z.number().int().min(0).max(511),
+  nextPresent: z.boolean(), freshLinkCount: z.number().int().min(0).max(2048), exactNextPresent: z.boolean(),
+  requiredFixedFrame: z.boolean(), freshFixedFrameEdge: z.boolean(), frameWaitUsed: z.boolean(),
+  completeOfficial: z.boolean(), incompleteOfficial: z.boolean(), sourceUnsettled: z.boolean(),
+  actionBudgetRemaining: z.number().int().min(0).max(6), reservedActions: z.number().int().min(0).max(512),
+}).refine(row => row.position < row.pathLength);
 const inspectionExecutionSchema = z.object({
   boundary: z.enum(["PREPARATION", "BROWSER_CREATE", "SOURCE_ROUTING", "BROWSER_REQUEST", "SNAPSHOT_VALIDATION", "RECIPE_VALIDATION", "SOURCE_BINDING", "CLEANUP"]),
   action: z.enum(["open", "observe", "inspect_adapter", "click"]).nullable(), actionIndex: z.number().int().min(0).max(6),
@@ -151,8 +159,10 @@ const inspectionExecutionSchema = z.object({
     "BROWSER_NAVIGATION_FAILED", "BROWSER_UNAVAILABLE", "DISCOVERY_PROCESS_REQUEST_FAILED", "DISCOVERY_PROCESS_OUTPUT_LIMIT",
     "DISCOVERY_PROCESS_PROTOCOL_INVALID", "DISCOVERY_PROCESS_FAILED", "DISCOVERY_PROCESS_CLOSED", "DISCOVERY_PROCESS_INPUT_FAILED",
     "DISCOVERY_PROCESS_TIMEOUT", "DISCOVERY_TOOL_FAILED", "DISCOVERY_CANCELLED", "PROVIDER_COORDINATION_UNAVAILABLE",
-    "FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID", "FIXED_INSPECTION_FRAME_SCOPE_INVALID"]),
-}).refine(row => (row.actionIndex === 0) === (row.action === null) && (!row.snapshotReturned || row.actionIndex > 0) && (!row.browserClosed || row.browserCreated));
+    "FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID", "FIXED_INSPECTION_FRAME_SCOPE_INVALID",
+    "FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED"]),
+  routing: inspectionRoutingSchema.optional(),
+}).refine(row => (row.actionIndex === 0) === (row.action === null) && (!row.snapshotReturned || row.actionIndex > 0) && (!row.browserClosed || row.browserCreated) && (!row.routing || row.boundary === "SOURCE_ROUTING"));
 
 export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpoint: unknown; result?: unknown; status?: string; attempts?: number;
   firstPickedUpAt?: Date | null; deadlineAt?: Date | null; completedAt?: Date | null }, includeBookingEdgeEvidence = false) {

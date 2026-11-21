@@ -598,6 +598,24 @@ describe("private failure evidence", () => {
       } })).toMatchObject({ code: null, phase: null, evidenceAuthority: false });
     }
   });
+  it("projects bounded routing predicates without leaking a route or changing eligibility", () => {
+    const routing = { reason: "FRESH_LINK_MISSING", pathLength: 2, position: 0, nextPresent: true,
+      freshLinkCount: 0, exactNextPresent: false, requiredFixedFrame: false, freshFixedFrameEdge: false,
+      frameWaitUsed: false, completeOfficial: true, incompleteOfficial: false, sourceUnsettled: false,
+      actionBudgetRemaining: 1, reservedActions: 1 };
+    const execution = { boundary: "SOURCE_ROUTING", action: "observe", actionIndex: 5, snapshotReturned: true,
+      browserCreated: true, browserClosed: true, failureCode: "FRAMEWORK_INSPECTION_PATH_STALE" };
+    const project = (value: unknown, boundary = execution.boundary) => sanitizeResponderValue(discoveryFailureDiagnosis({
+      outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 1, phase: "FIXED_INSPECTION",
+        code: "FRAMEWORK_INSPECTION_PATH_STALE", fixedInspectionDiagnostic: { execution: { ...execution, boundary, routing: value } } }] } },
+    }));
+    expect(project({ ...routing, url: "PRIVATE_CANARY" })).toMatchObject({ fixedInspectionExecution: { ...execution, routing }, evidenceAuthority: false });
+    expect(JSON.stringify(project({ ...routing, url: "PRIVATE_CANARY" }))).not.toContain("PRIVATE_CANARY");
+    for (const value of [{ ...routing, reason: "PRIVATE_CANARY" }, { ...routing, position: 2 },
+      { ...routing, freshLinkCount: 2049 }, { ...routing, nextPresent: "true" }, { ...routing, actionBudgetRemaining: -1 }])
+      expect(project(value)).not.toHaveProperty("fixedInspectionExecution");
+    expect(project(routing, "BROWSER_REQUEST")).not.toHaveProperty("fixedInspectionExecution");
+  });
   it("retains a bounded resumed second-attempt replay failure as diagnosis only", () => {
     expect(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: {
       schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC",

@@ -19,11 +19,20 @@ const executionFailureCodes = ["UNKNOWN", "BROWSER_ACTION_FAILED", "BROWSER_ACTI
   "BROWSER_NAVIGATION_FAILED", "BROWSER_UNAVAILABLE", "DISCOVERY_PROCESS_REQUEST_FAILED", "DISCOVERY_PROCESS_OUTPUT_LIMIT",
   "DISCOVERY_PROCESS_PROTOCOL_INVALID", "DISCOVERY_PROCESS_FAILED", "DISCOVERY_PROCESS_CLOSED", "DISCOVERY_PROCESS_INPUT_FAILED",
   "DISCOVERY_PROCESS_TIMEOUT", "DISCOVERY_TOOL_FAILED", "DISCOVERY_CANCELLED", "PROVIDER_COORDINATION_UNAVAILABLE",
-  "FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID", "FIXED_INSPECTION_FRAME_SCOPE_INVALID"];
+  "FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID", "FIXED_INSPECTION_FRAME_SCOPE_INVALID",
+  "FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED"];
+const routingSchema = z.object({ reason: z.enum(["OFFICIAL_RENDERING_INCOMPLETE", "PUBLIC_READS_PENDING", "FRESH_LINK_MISSING"]),
+  pathLength: z.number().int().min(1).max(512), position: z.number().int().min(0).max(511),
+  nextPresent: z.boolean(), freshLinkCount: z.number().int().min(0).max(2048), exactNextPresent: z.boolean(),
+  requiredFixedFrame: z.boolean(), freshFixedFrameEdge: z.boolean(), frameWaitUsed: z.boolean(),
+  completeOfficial: z.boolean(), incompleteOfficial: z.boolean(), sourceUnsettled: z.boolean(),
+  actionBudgetRemaining: z.number().int().min(0).max(6), reservedActions: z.number().int().min(0).max(512),
+}).strict().refine(row => row.position < row.pathLength);
 const executionSchema = z.object({ boundary: z.enum(["PREPARATION", "BROWSER_CREATE", "SOURCE_ROUTING", "BROWSER_REQUEST", "SNAPSHOT_VALIDATION", "RECIPE_VALIDATION", "SOURCE_BINDING", "CLEANUP"]),
   action: z.enum(["open", "observe", "inspect_adapter", "click"]).nullable(), actionIndex: z.number().int().min(0).max(6),
   snapshotReturned: z.boolean(), browserCreated: z.boolean(), browserClosed: z.boolean(), failureCode: z.enum(executionFailureCodes),
-}).strict().refine(row => (row.actionIndex === 0) === (row.action === null) && (!row.snapshotReturned || row.actionIndex > 0) && (!row.browserClosed || row.browserCreated));
+  routing: routingSchema.optional(),
+}).strict().refine(row => (row.actionIndex === 0) === (row.action === null) && (!row.snapshotReturned || row.actionIndex > 0) && (!row.browserClosed || row.browserCreated) && (!row.routing || row.boundary === "SOURCE_ROUTING"));
 export function safeInspectionExecutionDiagnostic(value) {
   const parsed = executionSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
@@ -386,7 +395,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     startedAt: new Date(startedAt).toISOString(), actionLimit: INSPECTION_ACTION_LIMIT, actions: [],
     modelCalls: 0, browserClosed: false, outcome: 'INCOMPLETE' };
   let browser, primary, result, lastPublicRoutingRead;
-  let executionBoundary = 'PREPARATION', failedBoundary;
+  let executionBoundary = 'PREPARATION', failedBoundary, routingFailure;
   let browserClosedClean = false;
   const check = () => {
     if (signal?.aborted) throw fail('FRAMEWORK_INSPECTION_CANCELLED');
@@ -618,6 +627,13 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       // spend the existing six-action budget and original90s clock; no reset.
       const reserved = Math.max(0, path.length - position - 2) + finalFrameOpen + 1 +
         (earlyCpsContext && current !== recipe.source.bookingUrl ? 1 : 0);
+      // Capture the exact deciding structure before the unchanged routing
+      // guards. No URLs, targets, page contents or inferred source authority.
+      routingFailure = reason ? { reason, pathLength: path.length, position, nextPresent: next !== undefined,
+        freshLinkCount: freshLinks.size, exactNextPresent, requiredFixedFrame, freshFixedFrameEdge: Boolean(freshFixedFrameEdge),
+        frameWaitUsed, completeOfficial: Boolean(completeOfficial), incompleteOfficial: Boolean(incompleteOfficial),
+        sourceUnsettled: Boolean(unsettledRequiredSource), actionBudgetRemaining: INSPECTION_ACTION_LIMIT - receipt.actions.length,
+        reservedActions: reserved } : undefined;
       if (reason && requiredFixedFrame && frameWaitUsed) throw fail('FRAMEWORK_INSPECTION_PATH_STALE');
       if (reason && receipt.actions.length + reserved < INSPECTION_ACTION_LIMIT) {
         if (requiredFixedFrame) {
@@ -778,7 +794,9 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         const execution = safeInspectionExecutionDiagnostic({ boundary: failedBoundary ?? executionBoundary,
           action: failedAction?.action ?? null, actionIndex: receipt.actions.length, snapshotReturned: failedAction?.snapshotReturned === true,
           browserCreated: Boolean(browser), browserClosed: receipt.browserClosed === true,
-          failureCode: executionFailureCodes.includes(primary.code) ? primary.code : 'UNKNOWN' });
+          failureCode: executionFailureCodes.includes(primary.code) ? primary.code : 'UNKNOWN',
+          ...(['FRAMEWORK_INSPECTION_PATH_STALE', 'FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED'].includes(primary.code) && routingFailure
+            ? { routing: routingFailure } : {}) });
         const precedingReadability = safeInspectionReadability(receipt.actions.map(row => row.readability).filter(Boolean));
         if (execution) inspectionFailures.set(primary, { job, attempt: job.attempts, requestSha256: hash(canonical(job.request)),
           sourceFingerprint: job.sourceFingerprint, firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,

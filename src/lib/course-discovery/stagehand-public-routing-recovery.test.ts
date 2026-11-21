@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { runCourseDiscoveryStagehandWorker, PUBLIC_ROUTING_FALLBACK_CODES } from "../../../scripts/automation/course-discovery-stagehand-worker.mjs";
-import { inspectStagehandAdapter, currentStagehandPublicRoutingRecovery } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
+import { inspectStagehandAdapter, currentStagehandPublicRoutingRecovery, currentStagehandInspectionDiagnostic } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
+import { createStagehandFailureCheckpoint, readStagehandFailure } from "../../../scripts/automation/course-discovery-stagehand-failure.mjs";
 import { createDiscoveryBrowser, createDiscoveryAdapterObservation, bindDiscoveryRecipeIdentity, inspectedAdapterSourceEvidence,
   verifyDiscoveryCandidate, DISCOVERY_GENERIC_LIMITS } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { stagehandDataHash } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
@@ -79,6 +80,24 @@ function setup(reason: "path" | "pending", mode = "valid") {
 }
 
 describe("private public-routing failure recovery", () => {
+  it.each(["path", "pending"] as const)("retains the actual bounded %s routing predicate through the owned failure checkpoint", async reason => {
+    const t = setup(reason), error = await t.inspect().catch(error => error);
+    const diagnostic = currentStagehandInspectionDiagnostic(error, t.job, first + 2000, t.now());
+    expect(diagnostic?.execution?.routing).toMatchObject({
+      reason: reason === "path" ? "FRESH_LINK_MISSING" : "PUBLIC_READS_PENDING",
+      pathLength: 2, position: 0, nextPresent: true, freshLinkCount: 0,
+      exactNextPresent: false, requiredFixedFrame: false, freshFixedFrameEdge: false,
+      completeOfficial: reason === "path", incompleteOfficial: false,
+      sourceUnsettled: reason === "pending", reservedActions: 1,
+    });
+    const checkpoint = createStagehandFailureCheckpoint({ job: t.job, report: t.report, error,
+      phase: "FIXED_INSPECTION", now: t.now(), startedAt: first + 2000 });
+    const retained = readStagehandFailure({ ...t.job, checkpoint }, t.now());
+    expect(retained?.entries[0].fixedInspectionDiagnostic.execution.routing).toEqual(diagnostic.execution.routing);
+    expect(JSON.stringify(diagnostic)).not.toMatch(/routing-fixture|PRIVATE|https:/);
+    expect(t.close).toHaveBeenCalledOnce();
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled();
+  });
   it.each(["path", "pending"] as const)("restarts %s only from a fresh canonical root after actual private clean inspection, then verifies twice", async reason => {
     const t = setup(reason), before = structuredClone(t.job), result = await t.run();
     expect(t.job).toEqual(before); expect(t.genericWorker).toHaveBeenCalledOnce(); expect(result.outcome).toBe("activated");
