@@ -327,7 +327,7 @@ test('unobserved/model-invented proposal cannot become source or method',async()
  assert.equal(r.adapterSourceProposal,null);assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_OUTPUT_INVALID');assert.equal(r.recipe,null);assert.equal(r.browserClosed,true);
 });
 
-test('fresh guarded before-action witness retains a link hydrated after the prior zero-link capture',async()=>{
+for(const caption of [null,{text:'Public navigation',label:''}])test(`fresh guarded before-action witness retains a link hydrated after the prior zero-link capture: ${caption?'caption':'bare'}`,async()=>{
  const f=fixture();let current=official,evaluations=0,extracts=0,callback;
  f.session.page.url=async()=>current;
  f.session.page.evaluate=async()=>++evaluations%2?{url:current,links:[],frames:[],dom:[],network:{requests:[]}}:[];
@@ -335,18 +335,18 @@ test('fresh guarded before-action witness retains a link hydrated after the prio
   {decision:'CONTINUE',reason:'Inspect visible navigation',nextActionInstruction:'Open public availability',bookingUrl:null}:
   {decision:'SOURCE_FOUND',reason:'Native observed destination',nextActionInstruction:'',bookingUrl:booking})});
  f.session.act=async()=>{
-  callback({kind:'NATIVE_VISIBLE_DOM',pageUrl:official,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:booking,visible:true}]});
+  callback({kind:'NATIVE_VISIBLE_DOM',pageUrl:official,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:booking,visible:true,...caption??{}}]});
   current=booking;return{before:{tag:'A',href:booking},afterUrl:booking,openedNewPage:false};
  };
  const r=await sourceDiscover({job:job(),sessionFactory:async options=>{callback=options.onNativeSourceWitness;return f.session;}});
  assert.equal(r.officialLinkLedger[0].links.length,0);assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED');
- const witness=r.officialLinkLedger.find(row=>row.documentHash);assert.equal(witness.pageUrl,official);assert.deepEqual(witness.links,[{href:booking,visible:true}]);
+ const witness=r.officialLinkLedger.find(row=>row.documentHash);assert.equal(witness.pageUrl,official);assert.deepEqual(witness.links,[{href:booking,visible:true,...caption??{}}]);
  assert.deepEqual(observedBookingSourceCandidates(r,official,publicEvidenceUrl,{sourceDiscoveryOnly:true}),[booking]);
  assert.equal(r.recipe,null);assert.deepEqual(r.matchingSlots,[]);
  assert.throws(()=>callback({...witness}),/STAGEHAND_SOURCE_OUTPUT_INVALID/);
 });
 
-for(const mutation of['foreign','stale','hidden','bad-hash','hash-array','duplicate','model-only'])test(`late DOM witness rejects ${mutation} evidence without promoting SDK/model target`,async()=>{
+for(const mutation of['foreign','stale','hidden','bad-hash','hash-array','duplicate','model-only','caption-type','caption-length','caption-canonical','caption-field'])test(`late DOM witness rejects ${mutation} evidence without promoting SDK/model target`,async()=>{
  const f=fixture();let evaluations=0,extracts=0,callback,current=official;
  f.session.page.url=async()=>current;
  f.session.page.evaluate=async()=>++evaluations%2?{url:current,links:[],frames:[],dom:[],network:{requests:[]}}:[];
@@ -360,6 +360,11 @@ for(const mutation of['foreign','stale','hidden','bad-hash','hash-array','duplic
   if(mutation==='hidden')witness.links[0].visible=false;
   if(mutation==='bad-hash')witness.documentHash='untrusted';
   if(mutation==='hash-array')witness.documentHash=['a'.repeat(64)];
+  if(mutation.startsWith('caption-'))Object.assign(witness.links[0],{text:'Public navigation',label:''});
+  if(mutation==='caption-type')witness.links[0].text=42;
+  if(mutation==='caption-length')witness.links[0].text='x'.repeat(161);
+  if(mutation==='caption-canonical')witness.links[0].text=' Public navigation ';
+  if(mutation==='caption-field')witness.links[0].privateText='PRIVATE';
   if(mutation!=='model-only')callback(witness);
   if(mutation==='duplicate')callback(witness);
   current=booking;return{before:{tag:'A',href:booking},afterUrl:booking,openedNewPage:false,nativeWitness:witness};

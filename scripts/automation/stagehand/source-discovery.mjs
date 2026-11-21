@@ -280,8 +280,9 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         (typeof witness.links[0].text!=='string'||typeof witness.links[0].label!=='string'||
           witness.links[0].text.length>160||witness.links[0].label.length>160||
           witness.links[0].text!==witness.links[0].text.replace(/\s+/gu,' ').trim()||
-          witness.links[0].label!==witness.links[0].label.replace(/\s+/gu,' ').trim()||
-          witness.links[0].href!==witness.pageUrl+'#')))throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+          witness.links[0].label!==witness.links[0].label.replace(/\s+/gu,' ').trim())))throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+    // Native captions are bounded diagnostic metadata on any witnessed link.
+    // Placeholder gesture admission remains in its separate exact-# witness.
     activeAct.witnessed=true;report.officialLinkLedger.push(structuredClone(witness));
   };
   const sourceStartedAt=Date.now();
