@@ -23,6 +23,7 @@ import { readPrivateCpsAvailabilityStructure } from "./cps-availability-structur
 import { projectGenericFailureDiagnostic } from "./generic-failure-diagnostic";
 import { parseWorkerTerminalDiagnostic } from "../../../scripts/automation/course-discovery-terminal-diagnostic.mjs";
 import { canonicalStagehandData, createStagehandSourceCheckpoint, publicStagehandSourceUrl, observedInspectionPath } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
+import type { RetainedStagehandRoutingReport } from "../../../scripts/automation/course-discovery-stagehand-source.d.mts";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -276,7 +277,8 @@ export function readRetainedStagehandRoutingEvidence(job: { id: string; sourceFi
     const bound = { ...job, attempts: attempt, firstPickedUpAt: job.firstPickedUpAt.toISOString(), deadlineAt: job.deadlineAt.toISOString() };
     const rebuilt = createStagehandSourceCheckpoint(bound, saved.report);
     if (canonicalStagehandData(saved) !== canonicalStagehandData(rebuilt)) return null;
-    const report = rebuilt.report, request = object(job.request), officialUrl = object(request.identity).officialUrl;
+    const report: RetainedStagehandRoutingReport = rebuilt.report;
+    const request = object(job.request), officialUrl = object(request.identity).officialUrl;
     const observedAt = report.finishedAt;
     if (Date.parse(observedAt) < job.firstPickedUpAt.getTime() ||
         Date.parse(observedAt) > Math.min(job.deadlineAt.getTime(), job.completedAt.getTime(), now.getTime())) return null;
