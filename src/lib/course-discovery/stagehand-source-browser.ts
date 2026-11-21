@@ -64,6 +64,9 @@ export const stagehandNativeSourceDomExpression = `(() => {
   const frames = [...document.querySelectorAll("iframe[src]")].filter(element => !element.hasAttribute("srcdoc") && visible(element));
   return JSON.stringify({ url: location.href, readyState: document.readyState, bodyPresent: Boolean(document.body),
     links: links.slice(0, 160).map(element => element.href), frames: frames.slice(0, 24).map(element => element.src),
+    sourceLinkCaptions: links.slice(0, 160).filter(sourceVisible).map(element => ({ href: element.href,
+      text: element.innerText.replace(/\\s+/gu, " ").trim().slice(0, 161),
+      label: (element.getAttribute("aria-label") || "").replace(/\\s+/gu, " ").trim().slice(0, 161) })),
     placeholderLinks: links.slice(0, 160).filter(element => sourceVisible(element) && element.getAttribute("href") === "#" &&
       !element.hasAttribute("download") && !element.hasAttribute("onclick") && element.getAttribute("aria-disabled") !== "true" &&
       ["", "link"].includes(element.getAttribute("role") || "") && ["", "_self", "_top", "_parent"].includes(element.getAttribute("target") || ""))
@@ -877,13 +880,20 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
             frameId: capture.frameId, loaderId: capture.loaderId, request: capture.target.documentRequest!,
             until: Math.min(input.deadlineAt.getTime(), Date.now() + 5000), used: false, completed: false });
         }
+        // Diagnostic caption only: the exact href already passed the unchanged
+        // visibility/URL/transaction guards above. No caption admits a route.
+        const captions = Array.isArray(observed.sourceLinkCaptions) ? observed.sourceLinkCaptions.map(record).filter(row => row.href === actionHref) : [];
+        const captionKeys = new Set(captions.map(row => JSON.stringify([row.text, row.label])));
+        const caption = captions.length > 0 && captionKeys.size === 1 && captions.every(row =>
+          typeof row.text === "string" && row.text.length <= 160 && typeof row.label === "string" && row.label.length <= 160)
+          ? { text: captions[0].text as string, label: captions[0].label as string } : undefined;
         if (actionHref !== undefined) return {
           kind: "NATIVE_VISIBLE_DOM" as const, pageUrl: observed.url as string, observedAt: gestureIntents.get(id)?.observedAt ?? new Date().toISOString(),
           // Bind the stable native document identity and observed public DOM;
           // private frame/loader identifiers never leave this host.
           documentHash: capture.documentHash,
           links: [{ href: actionHref, visible: true as const,
-            ...(placeholder ? { text: placeholder.text, label: placeholder.label } : {}) }],
+            ...(placeholder ? { text: placeholder.text, label: placeholder.label } : caption ?? {}) }],
         };
       },
       async completeGestureNavigation(id: string) {

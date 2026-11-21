@@ -637,10 +637,16 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode, popupSpa
     // The target can hydrate after an earlier source collector saw no link.
     await page.evaluate(() => { const a = document.createElement("a"); a.href = "https://owned-booking.example/hydrated?exact=full"; a.textContent = "Public availability"; document.body.append(a); });
     const witness = await host.beforeAction(host.targetId, "https://owned-booking.example/hydrated?exact=full");
-    expect(witness).toMatchObject({ kind: "NATIVE_VISIBLE_DOM", pageUrl: "https://owned-source.example/", links: [{ href: "https://owned-booking.example/hydrated?exact=full", visible: true }] });
+    expect(witness).toMatchObject({ kind: "NATIVE_VISIBLE_DOM", pageUrl: "https://owned-source.example/", links: [{ href: "https://owned-booking.example/hydrated?exact=full", visible: true, text: "Public availability", label: "" }] });
     expect(witness?.documentHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(Object.keys(witness!).sort()).toEqual(["documentHash", "kind", "links", "observedAt", "pageUrl"]);
     expect(Date.now() - Date.parse(witness!.observedAt)).toBeLessThan(5000);
+    await page.evaluate(() => { const a = document.createElement("a"); a.id = "ambiguous-caption"; a.href = "https://owned-booking.example/hydrated?exact=full"; a.textContent = "Different caption"; document.body.append(a); });
+    const ambiguous = await host.beforeAction(host.targetId, "https://owned-booking.example/hydrated?exact=full");
+    expect(ambiguous?.links).toEqual([{ href: "https://owned-booking.example/hydrated?exact=full", visible: true }]);
+    await page.evaluate(() => { document.getElementById("ambiguous-caption")?.remove(); document.querySelector<HTMLAnchorElement>('a[href="https://owned-booking.example/hydrated?exact=full"]')!.textContent = "x".repeat(161); });
+    const oversized = await host.beforeAction(host.targetId, "https://owned-booking.example/hydrated?exact=full");
+    expect(oversized?.links).toEqual([{ href: "https://owned-booking.example/hydrated?exact=full", visible: true }]);
     await host.beforeAction(host.targetId, "https://owned-booking.example/landing?keep=full");
     popupAck.armed = true;
     const popupPromise = page.waitForEvent("popup"), clicking = page.locator("#book span").click();

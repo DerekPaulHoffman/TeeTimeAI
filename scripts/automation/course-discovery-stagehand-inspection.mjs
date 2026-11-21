@@ -2,8 +2,8 @@
 import { discoveryError } from "./course-discovery-client.mjs";
 import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDataHash as hash,
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
-  validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
-import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, nativeLegacyGatewayLandings } from "./stagehand/source-provenance.mjs";
+  validateStagehandSourceReport, observedInspectionPath } from "./course-discovery-stagehand-source.mjs";
+import { observedBookingSourceCandidates, nativeFrameNavigations, nativeGestureNavigations, nativeHistoryNavigations, nativeLegacyGatewayLandings } from "./stagehand/source-provenance.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safeNativeMainDocumentContinuity, safePrivateCourseNameComparison } from "./course-discovery-worker.mjs";
 import { z } from "zod";
 import { isCpsPublicSearchDocument } from "./stagehand/public-source-gateway.mjs";
@@ -184,66 +184,7 @@ export function isReviewedCpsSourceEntry(value) {
   return Boolean(publicUrl(value)&&isCpsPublicSearchDocument(value));
 }
 
-export function observedInspectionPath(report, officialUrl, bookingUrl) {
-  if (!publicUrl(officialUrl) || !publicUrl(bookingUrl)) throw fail('FRAMEWORK_INSPECTION_SOURCE_INVALID');
-  const norm = value => new URL(value).href, edges = new Map();
-  let edgeCount = 0;
-  const link = (from, to) => {
-    if (!publicUrl(from) || !publicUrl(to)) return;
-    const source = norm(from), target = norm(to);
-    if (!edges.has(source)) edges.set(source, new Set());
-    if (!edges.get(source).has(target)) {
-      if (++edgeCount > 2048 || edges.size > 512) throw fail('FRAMEWORK_INSPECTION_GRAPH_LIMIT');
-      edges.get(source).add(target);
-    }
-  };
-  for (const row of (report.officialLinkLedger ?? []).slice(0, 512))
-    for (const item of (row.links ?? []).slice(0, 512)) {
-      if(row.kind==='NATIVE_PUBLIC_BOOKING_INTERMEDIARY'&&!nativeIntermediaryNavigations(report,publicUrl).some(entry=>entry.pageUrl===row.pageUrl&&entry.observedAt===row.observedAt&&entry.documentHash===row.documentHash&&entry.url===item.href))continue;
-      link(row.pageUrl, item.href);
-    }
-  for (const row of (report.frameLedger ?? []).slice(0, 512))
-    for (const frame of (row.frames ?? []).slice(0, 32)) link(row.pageUrl, frame.src);
-  for (const row of nativeFrameNavigations(report, publicUrl)) for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
-  for (const row of nativeIntermediaryNavigations(report, publicUrl)) for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
-  for (const row of nativeGestureNavigations(report, publicUrl)) {
-    link(row.pageUrl, row.targetUrl);
-    for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
-  }
-  for (const row of nativeHistoryNavigations(report, publicUrl)) link(row.documentUrl, row.finalUrl);
-  for (const row of nativeLegacyGatewayLandings(report, publicUrl)) link(row.href, row.documentUrl);
-  for (const row of (report.observedSourceEvidence ?? []).slice(0, 1024)) {
-    const source = row.kind === 'NATIVE_DOM_LINK_OBSERVED' ? nativeLinkSource(row) : row.url;
-    if (['DOM_OBSERVED', 'NATIVE_DOM_LINK_OBSERVED'].includes(row.kind)) {
-      for (const target of [...(row.exactObservedHrefs ?? []).slice(0, 512), ...(row.exactObservedFrameUrls ?? []).slice(0, 32)])
-        if (row.kind !== 'NATIVE_DOM_LINK_OBSERVED' || corroboratedNativeLink(row, target, report)) link(source, target);
-    }
-    if (row.kind === 'NETWORK_DOCUMENT' && row.completedAt && row.status >= 300 && row.status < 400) link(row.url, row.redirectTo);
-  }
-  const initial = report.initialNavigation;
-  if (initial?.requestedUrl === officialUrl && initial.status >= 200 && initial.status < 400) link(officialUrl, initial.finalUrl);
-  // A real official-anchor navigation may add provider routing defaults.
-  // The bridge still opens its bare observed href; only a matching fresh landing can skip this edge.
-  for (const row of [...(report.actions ?? []).slice(0, 256), ...(report.observedNavigationActions ?? []).slice(0, 256)]) {
-    const href = row.observedTarget?.href;
-    if ((row.action?.method === 'click' || row.kind === 'PUBLIC_LINK_CLICK') &&
-        String(row.observedTarget?.tag).toUpperCase() === 'A' && publicUrl(row.sourceUrl) &&
-        norm(row.sourceUrl) === norm(officialUrl) && publicUrl(href) && publicUrl(row.afterUrl) &&
-        edges.get(norm(officialUrl))?.has(norm(href))) {
-      const anchor = new URL(href), landing = new URL(row.afterUrl);
-      if (!anchor.search && !anchor.hash && !landing.hash && anchor.origin === landing.origin && anchor.pathname === landing.pathname)
-        link(href, row.afterUrl);
-    }
-  }
-  const start = norm(officialUrl), end = norm(bookingUrl), queue = [[start]], seen = new Set([start]);
-  for (const path of queue) {
-    if (path.at(-1) === end) return path;
-    // At most five opens (the final link need not be opened) and one inspection.
-    if (path.length >= INSPECTION_ACTION_LIMIT) continue;
-    for (const next of edges.get(path.at(-1)) ?? []) if (!seen.has(next)) { seen.add(next); queue.push([...path, next]); }
-  }
-  throw fail('FRAMEWORK_INSPECTION_PATH_NOT_OBSERVED');
-}
+export { observedInspectionPath } from "./course-discovery-stagehand-source.mjs";
 
 /** Report edges constrain one fixed inspection; a fresh native DOM match still owns admission. */
 export function fixedInspectionFrameWitness(report, path, officialUrl) {

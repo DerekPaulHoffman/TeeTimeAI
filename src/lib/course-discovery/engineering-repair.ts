@@ -22,6 +22,7 @@ import { readPrivateCourseNameComparison } from "./cps-course-name-comparison-ev
 import { readPrivateCpsAvailabilityStructure } from "./cps-availability-structure";
 import { projectGenericFailureDiagnostic } from "./generic-failure-diagnostic";
 import { parseWorkerTerminalDiagnostic } from "../../../scripts/automation/course-discovery-terminal-diagnostic.mjs";
+import { canonicalStagehandData, createStagehandSourceCheckpoint, publicStagehandSourceUrl, observedInspectionPath } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -262,6 +263,38 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
   };
 }
 
+/** Historical source routing only. Reconstruct the exact native checkpoint;
+ * never use the expired resume operation or return raw source text/controls. */
+export function readRetainedStagehandRoutingEvidence(job: { id: string; sourceFingerprint: string; request: unknown; attempts: number;
+  checkpoint: unknown; firstPickedUpAt: Date | null; deadlineAt: Date | null; completedAt: Date | null }, now: Date) {
+  try {
+    if (!job.firstPickedUpAt || !job.deadlineAt || !job.completedAt ||
+        ![job.firstPickedUpAt, job.deadlineAt, job.completedAt, now].every(date => Number.isFinite(date.getTime())) || job.completedAt > now ||
+        job.deadlineAt.getTime() - job.firstPickedUpAt.getTime() !== 900_000) return null;
+    const saved = object(object(job.checkpoint).stagehandSource), attempt = saved.attempt;
+    if (attempt !== 1 && attempt !== 2 || ![1, 2].includes(job.attempts) || attempt > job.attempts) return null;
+    const bound = { ...job, attempts: attempt, firstPickedUpAt: job.firstPickedUpAt.toISOString(), deadlineAt: job.deadlineAt.toISOString() };
+    const rebuilt = createStagehandSourceCheckpoint(bound, saved.report);
+    if (canonicalStagehandData(saved) !== canonicalStagehandData(rebuilt)) return null;
+    const report = rebuilt.report, request = object(job.request), officialUrl = object(request.identity).officialUrl;
+    const observedAt = report.finishedAt;
+    if (Date.parse(observedAt) < job.firstPickedUpAt.getTime() ||
+        Date.parse(observedAt) > Math.min(job.deadlineAt.getTime(), job.completedAt.getTime(), now.getTime())) return null;
+    const path: string[] = observedInspectionPath(report, officialUrl, report.adapterSourceProposal?.bookingUrl);
+    const links = path.slice(0, -1).flatMap((pageUrl, position) => (report.officialLinkLedger ?? [])
+      .filter(row => row.pageUrl === pageUrl).flatMap(row => (row.links ?? []).filter(link => link.href === path[position + 1])
+        .map(link => ({ position, kind: ["NATIVE_VISIBLE_DOM", "NATIVE_PUBLIC_BOOKING_INTERMEDIARY"].includes(row.kind ?? "") ? row.kind : "OTHER",
+          visible: typeof link.visible === "boolean" ? link.visible : null,
+          bookingLabel: typeof link.text === "string" && typeof link.label === "string"
+            ? /\b(?:book|reserve|reservations?|tee\s*times?|availability)\b/iu.test(`${link.text} ${link.label}`) : null })))).slice(0, 12);
+    const actions = (report.actions ?? []).filter(row => [row.sourceUrl, row.observedTarget?.href, row.afterUrl].every(publicStagehandSourceUrl))
+      .slice(0, 12).map(row => ({ sourceUrl: row.sourceUrl, href: row.observedTarget.href, afterUrl: row.afterUrl,
+        action: row.action?.method === "click" ? "CLICK" : "OTHER", tag: row.observedTarget.tag === "A" ? "A" : "OTHER", failed: row.error === true }));
+    return { schemaVersion: 1 as const, kind: "STAGEHAND_RETAINED_ROUTING" as const, observedAt,
+      sourceReportSha256: rebuilt.reportSha256, path, links, actions, actionsTruncated: (report.actions ?? []).length > 12 };
+  } catch { return null; }
+}
+
 /** Only the same live, source-bound repair owner's reciprocal failed child.
  * Structural facts remain untrusted diagnosis, never provider/read authority. */
 export async function getOwnedLearningFailureEvidence(reader: Reader, input: {
@@ -289,14 +322,16 @@ export async function getOwnedLearningFailureEvidence(reader: Reader, input: {
     deadlineAt: child.deadlineAt, completedAt: child.completedAt }, input.now);
   const structure = readPrivateCpsAvailabilityStructure({ ...child, firstPickedUpAt: child.firstPickedUpAt,
     deadlineAt: child.deadlineAt, completedAt: child.completedAt }, input.now);
+  const routing = readRetainedStagehandRoutingEvidence(child, input.now);
   const withinAttempt = (at: string) => Date.parse(at) >= child.firstPickedUpAt!.getTime() &&
     Date.parse(at) <= Math.min(child.deadlineAt!.getTime(), child.completedAt!.getTime(), input.now.getTime());
-  if (!evidence && !physical && !comparison && !structure || evidence && (!withinAttempt(evidence.observedAt) || evidence.attestedAt && !withinAttempt(evidence.attestedAt)) ||
+  if (!evidence && !physical && !comparison && !structure && !routing || evidence && (!withinAttempt(evidence.observedAt) || evidence.attestedAt && !withinAttempt(evidence.attestedAt)) ||
       physical && !withinAttempt(physical.observedAt)) return null;
   return { schemaVersion: 1 as const, sourceFingerprint: link.sourceFingerprint, implementationRelease: link.releaseSha,
     executionRuntime: link.runtimeVersion, bookingEdgeEvidence: evidence ?? null, physicalBindingEvidence: physical ?? null,
     ...(comparison ? { courseNameComparisonEvidence: comparison } : {}),
     ...(structure ? { availabilityStructureEvidence: structure } : {}),
+    ...(routing ? { sourceRoutingEvidence: routing } : {}),
     evidenceAuthority: false as const, untrustedPageEvidence: true as const };
 }
 
@@ -304,8 +339,8 @@ export async function getOwnedLearningFailureEvidence(reader: Reader, input: {
 export async function getOwnedLearningBookingEdgeEvidence(reader: Reader, input: Parameters<typeof getOwnedLearningFailureEvidence>[1]) {
   const value = await getOwnedLearningFailureEvidence(reader, input);
   if (!value?.bookingEdgeEvidence) return null;
-  const { bookingEdgeEvidence, physicalBindingEvidence: _physical, courseNameComparisonEvidence: _comparison, availabilityStructureEvidence: _structure, ...header } = value;
-  void _physical; void _comparison; void _structure;
+  const { bookingEdgeEvidence, physicalBindingEvidence: _physical, courseNameComparisonEvidence: _comparison, availabilityStructureEvidence: _structure, sourceRoutingEvidence: _routing, ...header } = value;
+  void _physical; void _comparison; void _structure; void _routing;
   return { ...header, evidence: bookingEdgeEvidence };
 }
 

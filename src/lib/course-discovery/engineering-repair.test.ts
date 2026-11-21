@@ -14,7 +14,7 @@ vi.mock("./legacy-exclusion", () => ({ hasLegacyDiscoveryOwner: m.owner,
 vi.mock("@/lib/automation/support-incidents", () => ({ reportCourseSupportIssue: m.report }));
 vi.mock("@/lib/automation/simulator-support-incidents", () => ({ reconcileSimulatorSupportIncidentFailure: m.simulator }));
 import { currentDiscoveryEngineeringHandoff, discoveryEngineeringContext, discoveryEngineeringReceipt,
-  discoveryFailureDiagnosis, getOwnedLearningBookingEdgeEvidence, getOwnedLearningFailureEvidence, reconcileDiscoveryEngineeringHandoffs } from "./engineering-repair";
+  discoveryFailureDiagnosis, getOwnedLearningBookingEdgeEvidence, getOwnedLearningFailureEvidence, readRetainedStagehandRoutingEvidence, reconcileDiscoveryEngineeringHandoffs } from "./engineering-repair";
 import { collectBookingEdgeEvidence } from "./booking-edge-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { listCourseSupportDispatchCandidates } from "@/lib/automation/course-support-batches";
@@ -22,7 +22,7 @@ import { sanitizeResponderValue } from "@/lib/automation/course-support-responde
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { cpsCatalogIdentityFailureStages } from "./cps-source";
 import { safeFixedInspectionSourceDiagnostic, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
-import { stagehandDataHash } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
+import { stagehandDataHash, createStagehandSourceCheckpoint } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
 const now = new Date("2030-01-01T12:16:00Z"), picked = new Date("2030-01-01T12:00:00Z");
 let failure: ReturnType<typeof fixture>;
 let outdoorIncident: { id: string; courseId: string; status: string; updatedAt: Date; firstSeenAt: Date; attemptLedger: unknown; activeBatchId: string | null };
@@ -48,6 +48,56 @@ beforeEach(() => {
   m.report.mockResolvedValue({ incidentId: "incident1", status: "AUTO_INVESTIGATING" });
 });
 afterEach(() => vi.unstubAllEnvs());
+describe("private retained source-routing evidence", () => {
+  function routingFixture(nativeLabels = false) {
+    const official = "https://routing-official.example/", booking = "https://routing-booking.example/availability";
+    const request = { identity: { name: "Routing Fixture", address: "10 Public Road", officialUrl: official, timeZone: "UTC" },
+      target: { kind: "OUTDOOR", courseId: "course1" }, demand: { searchId: "search1", alertGeneration: 1 },
+      input: { date: "2030-01-02", startTime: "08:00", endTime: "18:00", timeZone: "UTC", players: 2 } };
+    const job = { ...failure.job, request, checkpoint: {} as unknown };
+    const report = { framework: { name: "Stagehand", version: "4.3.0" }, jobId: job.id,
+      firstPickedUpAt: picked.toISOString(), deadlineAt: job.deadlineAt.toISOString(),
+      startedAt: "2030-01-01T12:00:01.000Z", finishedAt: "2030-01-01T12:00:10.000Z", workDeadlineAt: "2030-01-01T12:04:00.000Z",
+      frameworkMode: "HYBRID_SOURCE_DISCOVERY", frameworkRole: "SOURCE_DISCOVERY_ONLY", frameworkExtractedTimes: false,
+      outcome: "SOURCE_PROPOSED_UNVERIFIED", browserClosed: true, modelClosed: true, recipe: null, matchingSlots: [],
+      adapterSourceProposal: { schemaVersion: 1, kind: "EXISTING_ADAPTER_SOURCE", bookingUrl: booking },
+      visitedUrls: [official, booking], officialLinkLedger: [{ pageUrl: official,
+        ...(nativeLabels ? { kind: "NATIVE_VISIBLE_DOM", observedAt: "2030-01-01T12:00:02.000Z", documentHash: "c".repeat(64) } : {}),
+        links: [{ href: booking, ...(nativeLabels ? { text: "Golf Now", label: "", visible: true } : {}) }] }], frameLedger: [],
+      actions: [{ sourceUrl: official, action: { method: "click" }, observedTarget: { tag: "A", href: booking }, afterUrl: booking }],
+      initialNavigation: { requestedUrl: official, finalUrl: official, status: 200 }, metrics: { model: "gpt-6.1-sol", reasoningEffort: "medium" } };
+    job.checkpoint = { stagehandSource: createStagehandSourceCheckpoint({ ...job, attempts: 1,
+      firstPickedUpAt: picked.toISOString(), deadlineAt: job.deadlineAt.toISOString() }, report) };
+    return { job, official, booking };
+  }
+  it("projects already-retained public routing after the original deadline without resuming or admitting a read", () => {
+    const { job, official, booking } = routingFixture();
+    const value = readRetainedStagehandRoutingEvidence(job, now);
+    expect(value).toMatchObject({ kind: "STAGEHAND_RETAINED_ROUTING", path: [official, booking],
+      links: [{ position: 0, kind: "OTHER", visible: null }], actions: [{ sourceUrl: official, href: booking, afterUrl: booking, action: "CLICK" }], actionsTruncated: false });
+    expect(JSON.stringify(value)).not.toMatch(/lease|search1|course1|Routing Fixture|Public Road/);
+    expect(m.db.courseDiscoveryJob.findUnique).not.toHaveBeenCalled();
+  });
+  it.each(["request", "source", "job", "clock", "attempt", "report", "completion", "invalid-completion", "extra"])("rejects changed checkpoint binding: %s", mode => {
+    const { job } = routingFixture();
+    const saved = (job.checkpoint as { stagehandSource: Record<string, unknown> }).stagehandSource;
+    if (mode === "request") job.request.demand.alertGeneration++;
+    if (mode === "source") job.sourceFingerprint = "b".repeat(64);
+    if (mode === "job") job.id = "foreign";
+    if (mode === "clock") job.deadlineAt = new Date("2030-01-01T12:16:00Z");
+    if (mode === "attempt") job.attempts = 0;
+    if (mode === "report") saved.reportSha256 = "b".repeat(64);
+    if (mode === "completion") job.completedAt = new Date("2030-01-01T12:00:05Z");
+    if (mode === "invalid-completion") job.completedAt = new Date("invalid");
+    if (mode === "extra") saved.privateText = "PRIVATE";
+    expect(readRetainedStagehandRoutingEvidence(job, now)).toBeNull();
+  });
+  it("retains a closed label category from native link evidence without copying the caption", () => {
+    const { job } = routingFixture(true), value = readRetainedStagehandRoutingEvidence(job, now);
+    expect(value?.links).toEqual([{ position: 0, kind: "NATIVE_VISIBLE_DOM", visible: true, bookingLabel: false }]);
+    expect(JSON.stringify(value)).not.toContain("Golf Now");
+  });
+});
 describe("durable terminal worker diagnostics", () => {
   const diagnostic = { version: 1 as const, failureCode: "DISCOVERY_MODEL_CATALOG_UNAVAILABLE", frameworkPhase: "GENERIC_FALLBACK" as const, errorName: "Error" };
   const failureRecord = () => ({ version: 1, attempt: 2, terminal: true, observedAt: "2030-01-01T12:01:00.000Z", diagnostic });
