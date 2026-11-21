@@ -64,7 +64,7 @@ export const stagehandNativeSourceDomExpression = `(() => {
   const frames = [...document.querySelectorAll("iframe[src]")].filter(element => !element.hasAttribute("srcdoc") && visible(element));
   return JSON.stringify({ url: location.href, readyState: document.readyState, bodyPresent: Boolean(document.body),
     links: links.slice(0, 160).map(element => element.href), frames: frames.slice(0, 24).map(element => element.src),
-    sourceLinkCaptions: links.slice(0, 160).filter(sourceVisible).map(element => ({ href: element.href,
+    sourceLinkCaptions: links.slice(0, 160).filter(element => sourceVisible(element) && typeof element.innerText === "string").map(element => ({ href: element.href,
       text: element.innerText.replace(/\\s+/gu, " ").trim().slice(0, 161),
       label: (element.getAttribute("aria-label") || "").replace(/\\s+/gu, " ").trim().slice(0, 161) })),
     placeholderLinks: links.slice(0, 160).filter(element => sourceVisible(element) && element.getAttribute("href") === "#" &&
