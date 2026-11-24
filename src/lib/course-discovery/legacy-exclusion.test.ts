@@ -11,7 +11,9 @@ const now = new Date("2030-01-01T12:00:00.000Z");
 const preferences = vi.fn();
 const reader = { coursePreference: { findMany: preferences } } as unknown as Prisma.TransactionClient;
 function row(courseId: string, offeringId: string | null = null, date = "2030-01-02") {
-  return { courseId, offeringId, course: { timeZone: "UTC" }, teeSearch: { status: "ACTIVE", mode: offeringId ? "SIMULATOR" : "OUTDOOR", date: new Date(`${date}T00:00:00Z`),
+  return { courseId, offeringId, course: { timeZone: "UTC", isPublic: true, monitoringMode: "AUTOMATIC" },
+    offering: offeringId ? { courseId, kind: "SIMULATOR", active: true, publicAccessStatus: "PUBLIC" } : null,
+    teeSearch: { status: "ACTIVE", mode: offeringId ? "SIMULATOR" : "OUTDOOR", date: new Date(`${date}T00:00:00Z`),
     endTime: "17:00", userTimeZone: "UTC", createdAt: now, trafficClass: "PUBLIC", syntheticMultiCycle: false, syntheticTestWindow: null, alertGeneration: 0 } };
 }
 beforeEach(() => {
@@ -83,6 +85,33 @@ describe("general rollout legacy handoff", () => {
     const targets = [{ courseId: "venue" }, { courseId: "venue", offeringId: "bay" }, { courseId: "venue", offeringId: "other" }];
     expect(await excludeDiscoveryPilotTargets(targets, generalReader, now)).toEqual([targets[0], targets[2]]);
     expect(activeMethod).toHaveBeenCalledTimes(3);
+  });
+  it("keeps local-reader-only and private outdoor demand out of the generic recipe lookup", async () => {
+    preferences.mockResolvedValue([
+      { ...row("local"), course: { timeZone: "UTC", isPublic: true, monitoringMode: "LOCAL_READER_ONLY" } },
+      { ...row("private"), course: { timeZone: "UTC", isPublic: false, monitoringMode: "AUTOMATIC" } },
+      row("public"),
+    ]);
+    activeMethod.mockImplementation(async (_reader, target) => {
+      if (target.courseId !== "public") throw new Error("The source is ineligible for a generic recipe lookup");
+      return { recipe: {} };
+    });
+    const targets = ["local", "private", "public"].map(courseId => ({ courseId }));
+    expect(await excludeDiscoveryPilotTargets(targets, generalReader, now)).toEqual(targets.slice(0, 2));
+    expect(activeMethod).toHaveBeenCalledExactlyOnceWith(generalReader, targets[2]);
+  });
+  it("uses the simulator offering's eligibility independently of its outdoor course", async () => {
+    const bay = row("venue", "public-bay");
+    const closed = row("venue", "closed-bay");
+    preferences.mockResolvedValue([
+      { ...bay, course: { ...bay.course, monitoringMode: "LOCAL_READER_ONLY" } },
+      { ...closed, offering: { ...closed.offering!, active: false } },
+      { ...closed, offeringId: "private-bay", offering: { ...closed.offering!, publicAccessStatus: "NOT_PUBLIC" } },
+    ]);
+    activeMethod.mockResolvedValue({ recipe: {} });
+    const targets = ["public-bay", "closed-bay", "private-bay"].map(offeringId => ({ courseId: "venue", offeringId }));
+    expect(await excludeDiscoveryPilotTargets(targets, generalReader, now)).toEqual(targets.slice(1));
+    expect(activeMethod).toHaveBeenCalledExactlyOnceWith(generalReader, targets[0]);
   });
   it("propagates job and saved-method database errors instead of granting legacy ownership", async () => {
     preferences.mockResolvedValue([row("venue")]);

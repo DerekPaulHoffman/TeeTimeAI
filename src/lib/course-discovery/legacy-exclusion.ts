@@ -11,9 +11,13 @@ function key(target: Target) { return target.offeringId ? `offering:${target.off
 /** An off pilot does not add database reads to the existing responder. */
 export async function discoveryPilotTargetKeys(reader: Reader, now: Date) {
   if (!isCourseDiscoveryEnabled()) return new Set<string>();
+  const general = isGeneralDiscoveryEnabled();
   const preferences = await reader.coursePreference.findMany({ where: {
     teeSearchId: { in: await activeDiscoveryPilotSearchIds(process.env, reader) }, teeSearch: { status: "ACTIVE" },
-  }, select: { courseId: true, offeringId: true, course: { select: { timeZone: true } }, teeSearch: {
+  }, select: { courseId: true, offeringId: true,
+    course: { select: { timeZone: true, isPublic: true, monitoringMode: true } },
+    offering: { select: { courseId: true, kind: true, active: true, publicAccessStatus: true } },
+    teeSearch: {
     select: { status: true, mode: true, date: true, endTime: true, userTimeZone: true, createdAt: true,
       trafficClass: true, syntheticMultiCycle: true, syntheticTestWindow: true, alertGeneration: true },
   } } });
@@ -21,13 +25,22 @@ export async function discoveryPilotTargetKeys(reader: Reader, now: Date) {
     const search = preference.teeSearch;
     const synthetic = search.trafficClass === "TEST" || search.trafficClass === "AUTOMATION";
     const expiry = getSyntheticMultiCycleExpiresAt(search, now);
+    // The general recipe loader rejects these sources. Keep their alerts in
+    // their own monitoring lane without blocking the remaining dispatch queue.
+    if (general) {
+      const { course, offering, courseId, offeringId } = preference;
+      if (offeringId) {
+        if (!offering || offering.courseId !== courseId || offering.kind !== "SIMULATOR" ||
+          !offering.active || offering.publicAccessStatus === "NOT_PUBLIC") return false;
+      } else if (course.isPublic === false || course.monitoringMode === "LOCAL_READER_ONLY") return false;
+    }
     return search.status === "ACTIVE" && (search.mode === "SIMULATOR") === Boolean(preference.offeringId) &&
       (!synthetic || search.syntheticMultiCycle && expiry !== null && expiry > now) &&
       isSearchWindowActive({ date: search.date, endTime: search.endTime, courseTimeZones: [preference.course.timeZone], fallbackTimeZone: search.userTimeZone, now });
   });
   const targets = new Map(eligible.map(target => [key(target), target]));
   // Pilot ownership intentionally covers the entire enrolled acceptance scope.
-  if (!isGeneralDiscoveryEnabled()) return new Set(targets.keys());
+  if (!general) return new Set(targets.keys());
   if (!targets.size) return new Set<string>();
   const jobs = await reader.courseDiscoveryJob.findMany({ where: {
     activeTargetKey: { in: [...targets.keys()] }, status: { in: ["QUEUED", "RUNNING"] },
