@@ -1880,7 +1880,7 @@ function getParkedCourseStartedLocalReaderCapability(
     course.monitoringMode === "SERVER_ONLY" || course.monitoringMode === "CONTACT_ONLY" ||
     gate.disposition !== "ACTIONABLE" || !gate.adapterAllowed ||
     resolveProviderCapability(course).evidenceConflict) return null;
-  return getRequiredLocalReaderCapability(courseKey, course.name);
+  return getRequiredLocalReaderCapability(courseKey, course.name, course.detectedBookingUrl ?? course.website);
 }
 
 export function assessParkedCourseStartedLocalReaderReadiness(input: {

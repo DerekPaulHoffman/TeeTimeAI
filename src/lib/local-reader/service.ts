@@ -343,12 +343,13 @@ function isCurrentCycleTerminalReaderJob(input: {
 async function resolveRequiredCapability(
   courseId: string,
   courseKey: ReturnType<typeof getLocalReaderCourseKey> & {},
+  bookingUrl: string,
 ) {
   const course = await prisma.course.findUnique({
     where: { id: courseId },
     select: { name: true },
   });
-  return getRequiredLocalReaderCapability(courseKey, course?.name);
+  return getRequiredLocalReaderCapability(courseKey, course?.name, bookingUrl);
 }
 
 function hasCurrentReaderLease(
@@ -422,6 +423,7 @@ export async function queueLocalReaderCourseVerification(input: {
   const requiredCapability = await resolveRequiredCapability(
     input.courseId,
     courseKey,
+    input.bookingUrl,
   );
   const now = new Date();
   const verificationKey = createLocalReaderCourseVerificationKey(input.courseId, input.targetDate, input.players);
@@ -437,6 +439,7 @@ export async function queueLocalReaderCourseVerification(input: {
     courseKey,
     input.targetDate,
     input.players,
+    input.bookingUrl,
   );
   if (!existing) {
     return prisma.localReaderJob.upsert({
@@ -617,6 +620,7 @@ export async function queueLocalReaderJob(input: {
   const requiredCapability = await resolveRequiredCapability(
     input.courseId,
     courseKey,
+    input.bookingUrl,
   );
   const now = new Date();
   const freshnessCutoff = new Date(
@@ -813,6 +817,7 @@ export async function queueLocalReaderJob(input: {
         courseKey,
         input.targetDate,
         input.players,
+        input.bookingUrl,
       ),
       jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS),
       requiredCapabilityKey: requiredCapability.key,
@@ -824,6 +829,7 @@ export async function queueLocalReaderJob(input: {
         courseKey,
         input.targetDate,
         input.players,
+        input.bookingUrl,
       ),
       status: "PENDING",
       leaseToken: null,
@@ -1138,6 +1144,7 @@ export async function claimNextLocalReaderJob(
     if (!readerCourse) {
       throw new Error("The local reader course is no longer available");
     }
+    const capability = getRequiredLocalReaderCapability(courseKey, course?.name, candidate.bookingUrl);
     return {
       id: candidate.id,
       courseKey,
@@ -1150,13 +1157,8 @@ export async function claimNextLocalReaderJob(
       bookingUrl: candidate.bookingUrl,
       cardTextIncludes: [...readerCourse.cardTextIncludes],
       requiredCapability: {
-        key:
-          candidate.requiredCapabilityKey ??
-          getRequiredLocalReaderCapability(courseKey, course?.name).key,
-        parserVersion:
-          candidate.requiredParserVersion ??
-          getRequiredLocalReaderCapability(courseKey, course?.name)
-            .parserVersion,
+        key: candidate.requiredCapabilityKey ?? capability.key,
+        parserVersion: candidate.requiredParserVersion ?? capability.parserVersion,
       },
       leaseToken,
     };
@@ -1260,6 +1262,7 @@ export async function completeLocalReaderJob(input: {
   if (!readerCourse) {
     throw new Error("The local reader course is no longer available");
   }
+  const capability = getRequiredLocalReaderCapability(courseKey, course?.name, current.bookingUrl);
   validateLocalReaderResultForJob(
     {
       id: current.id,
@@ -1274,13 +1277,8 @@ export async function completeLocalReaderJob(input: {
       bookingUrl: current.bookingUrl,
       cardTextIncludes: [...readerCourse.cardTextIncludes],
       requiredCapability: {
-        key:
-          current.requiredCapabilityKey ??
-          getRequiredLocalReaderCapability(courseKey, course?.name).key,
-        parserVersion:
-          current.requiredParserVersion ??
-          getRequiredLocalReaderCapability(courseKey, course?.name)
-            .parserVersion,
+        key: current.requiredCapabilityKey ?? capability.key,
+        parserVersion: current.requiredParserVersion ?? capability.parserVersion,
       },
     },
     normalizedResult,
@@ -1547,9 +1545,7 @@ export async function completeLocalReaderJob(input: {
   await recordReaderSuccess({
     deviceId: current.deviceId,
     readerVersion: normalizedResult.readerVersion,
-    capability:
-      current.requiredCapabilityKey ??
-      getRequiredLocalReaderCapability(courseKey, course?.name).key,
+    capability: current.requiredCapabilityKey ?? capability.key,
     now: completion.completedAt,
   });
 
@@ -1826,6 +1822,7 @@ async function requeueReaderBlockedIncidents(input: {
     const required = getRequiredLocalReaderCapability(
       courseKey,
       incident.course.name,
+      incident.course.detectedBookingUrl ?? incident.course.website,
     );
     if (
       !readerSupportsCapability(
@@ -1949,6 +1946,7 @@ export async function getFreshLocalReaderObservation(input: {
   const requiredCapability = await resolveRequiredCapability(
     input.courseId,
     courseKey,
+    input.bookingUrl,
   );
   // A result completed during a live check stays on generation N; an idle
   // result advances to N+1. Both require an exact generation-bound proof.
@@ -2029,6 +2027,7 @@ export async function getAppliedLocalReaderObservationWithinCadence(input: {
   const requiredCapability = await resolveRequiredCapability(
     input.courseId,
     courseKey,
+    input.bookingUrl,
   );
   const now = new Date();
   const cutoff = new Date(now.getTime() - input.cadenceMinutes * 60_000);
@@ -2089,6 +2088,7 @@ export async function getExpiredUnconsumedLocalReaderObservationForCanonicalResu
   const requiredCapability = await resolveRequiredCapability(
     input.courseId,
     courseKey,
+    input.bookingUrl,
   );
   // An expired proof can still drive the one canonical resume that completion
   // queued, so include compatible prior generations but never a future one.
@@ -2167,6 +2167,7 @@ export async function getLocalReaderCourseVerification(input: {
   const requiredCapability = await resolveRequiredCapability(
     input.courseId,
     courseKey,
+    input.bookingUrl,
   );
   const now = new Date();
   const row = await prisma.localReaderJob.findFirst({

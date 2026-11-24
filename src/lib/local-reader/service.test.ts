@@ -379,6 +379,26 @@ describe("local reader job service", () => {
     );
   });
 
+  it("retains the verified public TeeItUp route for detached checks and alert jobs", async () => {
+    prismaMocks.course.findUnique.mockResolvedValue({ name: "Desert Mirage at Golf Ranch Glendale" });
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-public-teeitup" });
+    const input = {
+      courseId: "course-public-teeitup", targetDate: "2026-11-21", players: 2,
+      bookingUrl: "https://desert-mirage-at-golf-ranch-glendale.book.teeitup.com/teetimes?course=4245"
+    };
+    await queueLocalReaderCourseVerification(input);
+    await queueLocalReaderJob({ ...input, searchId: "search-public-teeitup", scheduleVersion: 1 });
+    for (const [query] of prismaMocks.localReaderJob.upsert.mock.calls) {
+      expect(query.create).toMatchObject({
+        bookingUrl: input.bookingUrl + "&date=2026-11-21&max=999999",
+        requiredCapabilityKey: "TEEITUP_RENDERED", requiredParserVersion: 2
+      });
+      if (query.update.bookingUrl) expect(query.update.bookingUrl).toBe(query.create.bookingUrl);
+    }
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledTimes(2);
+  });
+
   it("normalizes a legacy EZLinks search hash before queueing the reader", async () => {
     prismaMocks.course.findUnique.mockResolvedValue({
       name: "Harbor Golf Course",

@@ -81,16 +81,15 @@ describe("local reader capabilities", () => {
     });
   });
 
-  it("routes exact TeeItUp tenant scopes to the rendered parser", () => {
-    expect(
-      getRequiredLocalReaderCapability(
-        "teeitup:crumpin-fox-club.book.teeitup.com:5165",
-        "Crumpin-Fox Club"
-      )
-    ).toEqual({
-      key: "TEEITUP_RENDERED",
-      parserVersion: 1
-    });
+  it("requires the new TeeItUp parser only for the matching newer calendar route", () => {
+    const key = "teeitup:crumpin-fox-club.book.teeitup.com:5165";
+    const root = "https://crumpin-fox-club.book.teeitup.com";
+    expect(getRequiredLocalReaderCapability(key, "Crumpin-Fox Club", `${root}/?course=5165`))
+      .toEqual({ key: "TEEITUP_RENDERED", parserVersion: 1 });
+    expect(getRequiredLocalReaderCapability(key, "Crumpin-Fox Club", `${root}/teetimes?course=5165`))
+      .toEqual({ key: "TEEITUP_RENDERED", parserVersion: 2 });
+    expect(getRequiredLocalReaderCapability(key, "Crumpin-Fox Club", `${root}/teetimes?course=42`))
+      .toEqual({ key: "TEEITUP_RENDERED", parserVersion: 1 });
   });
 
   it("requires the corrected Prophet redirect parser for both supported courses", () => {

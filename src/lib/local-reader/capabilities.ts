@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { getLocalReaderCourse, type LocalReaderCourseKey } from "./course-key";
+import { getLocalReaderCourse, getLocalReaderCourseKey, type LocalReaderCourseKey } from "./course-key";
 
 export const localReaderCapabilitySchema = z
   .object({
@@ -39,7 +39,8 @@ export const LEGACY_READER_1_6_CAPABILITIES: LocalReaderCapability[] = [
 
 export function getRequiredLocalReaderCapability(
   courseKey: LocalReaderCourseKey,
-  courseName?: string
+  courseName?: string,
+  bookingUrl?: string | null
 ): LocalReaderCapability {
   const course = getLocalReaderCourse(courseKey, courseName);
   if (!course) {
@@ -58,8 +59,11 @@ export function getRequiredLocalReaderCapability(
       return { key: "WEBTRAC_RENDERED", parserVersion: 1 };
     case "MEMBERSPORTS":
       return { key: "MEMBERSPORTS_RENDERED", parserVersion: 1 };
-    case "TEEITUP":
-      return { key: "TEEITUP_RENDERED", parserVersion: 1 };
+    case "TEEITUP": {
+      const newCalendarRoute = bookingUrl && getLocalReaderCourseKey(bookingUrl) === courseKey &&
+        new URL(bookingUrl).pathname === "/teetimes";
+      return { key: "TEEITUP_RENDERED", parserVersion: newCalendarRoute ? 2 : 1 };
+    }
     case "PROPHET":
       return {
         key: "PROPHET_FREAR_RENDERED",

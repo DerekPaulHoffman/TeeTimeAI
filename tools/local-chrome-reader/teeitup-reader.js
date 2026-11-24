@@ -1,7 +1,7 @@
 (function initializeTeeItUpReader(root) {
   "use strict";
 
-  const READER_VERSION = "teeitup-rendered-v1";
+  const READER_VERSION = "teeitup-rendered-v2";
   const COURSE_KEY =
     /^teeitup:([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book\.teeitup\.(?:com|golf)):(root|[1-9]\d{0,9})$/u;
   const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/u;
@@ -41,7 +41,7 @@
         !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book\.teeitup\.(?:com|golf)$/u.test(
           url.hostname,
         ) ||
-        url.pathname !== "/" ||
+        !["/", "/teetimes"].includes(url.pathname) ||
         url.username !== "" ||
         url.password !== "" ||
         url.hash !== "" ||
