@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getOperatorNotificationConfig } from "./config";
+import { getOperatorNotificationDeliveryConfig } from "./config";
 import {
   assessOperatorNotificationHealth,
   buildOperatorNotificationSummary,
@@ -11,6 +11,7 @@ import {
   sendOperatorNotification,
   OperatorNotificationSendError,
 } from "./push";
+import { NTFY_NEW_ALERT_MESSAGE, sendOperatorNtfyNotification } from "./ntfy";
 
 const FOLLOWUP_DELAY_MS = 5 * 60_000;
 const CLAIM_MS = 60_000;
@@ -107,7 +108,7 @@ export async function recordOperatorNotificationAcceptance(input: {
     const delivery = await tx.operatorNotificationDelivery.findUniqueOrThrow({
       where: { id: input.id },
     });
-    if (delivery.kind === "CREATED") {
+    if (delivery.kind === "CREATED" && !delivery.recipient.startsWith("ntfy:")) {
       const dueAt = new Date(now.getTime() + FOLLOWUP_DELAY_MS);
       await tx.operatorNotificationDelivery.createMany({
         data: [
@@ -131,7 +132,7 @@ export async function recordOperatorNotificationAcceptance(input: {
 export async function processOperatorNotification(
   id: string,
 ): Promise<{ id: string; dueAt: string } | null> {
-  const config = getOperatorNotificationConfig();
+  const config = getOperatorNotificationDeliveryConfig();
   if (!config) return null;
   const now = new Date();
   const delivery = await prisma.operatorNotificationDelivery.findUnique({
@@ -139,39 +140,18 @@ export async function processOperatorNotification(
   });
   if (!delivery) return null;
   if (delivery.status === "ACCEPTED")
-    return nextFollowup(delivery.sourceSearchId);
+    return "topic" in config ? null : nextFollowup(delivery.sourceSearchId);
   if (delivery.status !== "PENDING") return null;
   if (delivery.nextAttemptAt > now)
     return { id, dueAt: delivery.nextAttemptAt.toISOString() };
-  const search = await loadOperatorNotificationSearch(delivery.teeSearchId);
-  const subscription = await prisma.operatorPushSubscription.findUnique({
-    where: { id: delivery.recipient },
-  });
-  if (
-    !subscription ||
-    subscription.ownerEmail !== config.ownerEmail ||
-    subscription.publicKey !== config.publicKey ||
-    (search &&
-      !isEligibleOperatorNotificationSearch(search, config.excludedEmails)) ||
-    (!search && delivery.kind === "CREATED")
-  ) {
+  const prepared = await prepareOperatorNotification(config, delivery, now);
+  if (!prepared) {
     await prisma.operatorNotificationDelivery.updateMany({
       where: { id, status: "PENDING" },
       data: { status: "SUPPRESSED" },
     });
     return null;
   }
-  const health =
-    delivery.kind === "FOLLOWUP"
-      ? assessOperatorNotificationHealth(search, now)
-      : null;
-  const summary =
-    delivery.kind === "FOLLOWUP" && search
-      ? buildOperatorNotificationSummary(search)
-      : delivery.summary;
-  const body =
-    delivery.body ??
-    `${delivery.kind === "CREATED" ? "Tee Time Spot: new customer alert" : "Tee Time Spot: 5-minute update"}\n${summary}\n${health ? `${health.text}\n` : ""}${config.origin}/operator`;
   const token = randomUUID();
   const claim = await prisma.operatorNotificationDelivery.updateMany({
     where: { id, status: "PENDING", nextAttemptAt: { lte: now } },
@@ -180,17 +160,13 @@ export async function processOperatorNotification(
       claimToken: token,
       claimExpiresAt: new Date(now.getTime() + CLAIM_MS),
       attemptCount: { increment: 1 },
-      body,
+      body: prepared.body,
     },
   });
   if (!claim.count) return null;
   let result: Awaited<ReturnType<typeof sendOperatorNotification>>;
   try {
-    result = await sendOperatorNotification(config, {
-      id,
-      body,
-      subscription,
-    });
+    result = await prepared.send();
   } catch (error) {
     const failure =
       error instanceof OperatorNotificationSendError
@@ -200,7 +176,7 @@ export async function processOperatorNotification(
       failure.outcome === "retry" && delivery.attemptCount + 1 < MAX_ATTEMPTS;
     if (failure.code === "404" || failure.code === "410") {
       await prisma.operatorPushSubscription.deleteMany({
-        where: { id: subscription.id },
+        where: { id: delivery.recipient },
       });
     }
     const nextAttemptAt = new Date(
@@ -238,9 +214,79 @@ export async function processOperatorNotification(
     messageId: result.messageId,
     providerStatus: result.status,
   });
-  return delivery.kind === "CREATED"
+  return delivery.kind === "CREATED" && !("topic" in config)
     ? nextFollowup(delivery.sourceSearchId)
     : null;
+}
+
+async function prepareOperatorNotification(
+  config: NonNullable<ReturnType<typeof getOperatorNotificationDeliveryConfig>>,
+  delivery: {
+    id: string;
+    kind: "CREATED" | "FOLLOWUP";
+    recipient: string;
+    teeSearchId: string | null;
+    summary: string;
+    body: string | null;
+  },
+  now: Date,
+) {
+  if ("topic" in config) {
+    if (
+      delivery.kind !== "CREATED" ||
+      delivery.recipient !== config.recipient ||
+      !delivery.teeSearchId
+    )
+      return null;
+    const search = await prisma.teeSearch.findUnique({
+      where: { id: delivery.teeSearchId },
+      select: {
+        user: { select: { email: true } },
+        alertEmail: true,
+        trafficClass: true,
+        syntheticMultiCycle: true,
+        syntheticTestWindow: true,
+      },
+    });
+    if (!search || !isEligibleOperatorNotificationSearch(search, config.excludedEmails))
+      return null;
+    return {
+      body: NTFY_NEW_ALERT_MESSAGE,
+      send: () => sendOperatorNtfyNotification(config),
+    };
+  }
+
+  if (delivery.recipient.startsWith("ntfy:")) return null;
+  const subscription = await prisma.operatorPushSubscription.findUnique({
+    where: { id: delivery.recipient },
+  });
+  if (
+    !subscription ||
+    subscription.ownerEmail !== config.ownerEmail ||
+    subscription.publicKey !== config.publicKey
+  )
+    return null;
+  const search = await loadOperatorNotificationSearch(delivery.teeSearchId);
+  if (
+    (search && !isEligibleOperatorNotificationSearch(search, config.excludedEmails)) ||
+    (!search && delivery.kind === "CREATED")
+  )
+    return null;
+  const health =
+    delivery.kind === "FOLLOWUP"
+      ? assessOperatorNotificationHealth(search, now)
+      : null;
+  const summary =
+    delivery.kind === "FOLLOWUP" && search
+      ? buildOperatorNotificationSummary(search)
+      : delivery.summary;
+  const body =
+    delivery.body ??
+    `${delivery.kind === "CREATED" ? "Tee Time Spot: new customer alert" : "Tee Time Spot: 5-minute update"}\n${summary}\n${health ? `${health.text}\n` : ""}${config.origin}/operator`;
+  return {
+    body,
+    send: () => sendOperatorNotification(config, { id: delivery.id, body, subscription }),
+  };
 }
 
 async function nextFollowup(sourceSearchId: string) {
@@ -253,7 +299,7 @@ async function nextFollowup(sourceSearchId: string) {
 }
 
 export async function listOperatorNotificationForRecovery() {
-  if (!getOperatorNotificationConfig()) return [];
+  if (!getOperatorNotificationDeliveryConfig()) return [];
   const now = new Date();
   await prisma.operatorNotificationDelivery.updateMany({
     where: { status: "SENDING", claimExpiresAt: { lt: now } },

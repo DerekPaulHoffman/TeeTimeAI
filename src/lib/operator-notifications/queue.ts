@@ -1,9 +1,10 @@
 import type { Prisma } from "@prisma/client";
-import { getOperatorNotificationConfig } from "./config";
+import { getOperatorNotificationDeliveryConfig } from "./config";
 import {
   buildOperatorNotificationSummary,
   isEligibleOperatorNotificationSearch,
 } from "./content";
+import { NTFY_NEW_ALERT_MESSAGE } from "./ntfy";
 
 export async function enqueueOperatorNotification(
   transaction: Prisma.TransactionClient,
@@ -24,12 +25,8 @@ export async function enqueueOperatorNotification(
     preferences: Array<{ rank: number; course: { name: string } }>;
   },
 ) {
-  const config = getOperatorNotificationConfig();
+  const config = getOperatorNotificationDeliveryConfig();
   if (!config) return;
-  const subscription = await transaction.operatorPushSubscription.findUnique({
-    where: { ownerEmail: config.ownerEmail },
-  });
-  if (!subscription || subscription.publicKey !== config.publicKey) return;
   const user = await transaction.user.findUniqueOrThrow({
     where: { id: search.userId },
     select: { email: true },
@@ -41,14 +38,26 @@ export async function enqueueOperatorNotification(
     )
   )
     return;
+  let recipient: string;
+  let summary = NTFY_NEW_ALERT_MESSAGE;
+  if ("topic" in config) {
+    recipient = config.recipient;
+  } else {
+    const subscription = await transaction.operatorPushSubscription.findUnique({
+      where: { ownerEmail: config.ownerEmail },
+    });
+    if (!subscription || subscription.publicKey !== config.publicKey) return;
+    recipient = subscription.id;
+    summary = buildOperatorNotificationSummary({ ...search, user });
+  }
   await transaction.operatorNotificationDelivery.createMany({
     data: [
       {
         sourceSearchId: search.id,
         teeSearchId: search.id,
         kind: "CREATED",
-        recipient: subscription.id,
-        summary: buildOperatorNotificationSummary({ ...search, user }),
+        recipient,
+        summary,
         dueAt: search.createdAt,
         nextAttemptAt: search.createdAt,
       },

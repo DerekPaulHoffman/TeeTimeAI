@@ -1,7 +1,7 @@
 import { start } from "workflow/api";
 import { operatorNotificationWorkflow } from "@/workflows/operator-notifications";
 import { prisma } from "@/lib/prisma";
-import { getOperatorNotificationConfig } from "./config";
+import { getOperatorNotificationDeliveryConfig } from "./config";
 import { listOperatorNotificationForRecovery } from "./service";
 
 async function launch(id: string) {
@@ -11,7 +11,7 @@ async function launch(id: string) {
 export async function startOperatorNotificationForSearch(
   sourceSearchId: string,
 ) {
-  if (!getOperatorNotificationConfig()) return;
+  if (!getOperatorNotificationDeliveryConfig()) return;
   try {
     const delivery = await prisma.operatorNotificationDelivery.findFirst({
       where: { sourceSearchId, status: "PENDING" },

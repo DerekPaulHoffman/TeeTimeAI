@@ -1,8 +1,20 @@
 # Private operator phone notifications
 
+## ntfy for new alerts
+
+The optional ntfy transport sends one generic notification after an eligible customer alert is saved. Tapping it opens the signed-in operator dashboard. The hosted ntfy topic is public to anyone who knows its name. The app sends the fixed text “New Tee Time Spot alert” and the dashboard URL, with no customer or course details.
+
+1. Generate a 48-character lowercase hex topic with `randomBytes(24).toString("hex")`. Keep it out of logs and Git. Subscribe in the ntfy phone app and allow notifications.
+2. Send a test using that topic and confirm it appears with the phone locked. Then set `OPERATOR_NTFY_TOPIC` as a production-only Vercel secret and deploy. Keep the existing `OPERATOR_NOTIFICATIONS_ENABLED`, owner email, exclusions and site URL configuration.
+3. Verify the next eligible saved alert through the outbox and confirm one push reaches the phone. The ntfy transport uses the existing recovery cron and outbox, needs no browser subscription, and queues no five-minute follow-up.
+
+Removing the topic and redeploying restores Chrome delivery if its configuration and subscription are still valid. Pending deliveries addressed to the previous transport or topic are suppressed on processing. There is no historical backfill. Provider acceptance is recorded separately from phone display.
+
+## Chrome Web Push
+
 These are Web Push notifications for the configured operator's Android Chrome device. No email, SMS, Telegram account, or paid messaging plan is used for this channel. Ordinary customer tee-time emails keep their existing behavior. Hosting and database usage remain on the application's existing plan.
 
-## Behavior
+### Behavior
 
 - A newly persisted real customer alert creates one private notification with the authenticated account email, ranked courses, date, course-local time window, and player count.
 - Always queue a second notification five minutes after the push service accepts the first. Vercel Workflow sleeps until that time; the website and phone browser do not need to stay open. Device connectivity and OS settings can delay actual display.
@@ -10,7 +22,7 @@ These are Web Push notifications for the configured operator's Android Chrome de
 - Exclude the configured operator and aliases, additional configured excluded emails, TEST/AUTOMATION traffic, synthetic searches, and known test-account patterns. Anonymous browsing is not an alert-creation event.
 - One phone subscription per configured operator. Replacing or removing a subscription suppresses pending deliveries addressed to the old device. Already accepted pushes cannot be recalled. Nothing is backfilled when a phone opts in.
 
-## Production configuration
+### Production configuration
 
 Apply `20260916170000_add_operator_alert_notifications` to the direct database connection before deploying the code. Configuration is inert unless both `VERCEL_ENV=production` and `OPERATOR_NOTIFICATIONS_ENABLED=true`.
 
@@ -31,7 +43,7 @@ After the approved release, open `https://teetimespot.com/operator` in Chrome on
 
 The notification preview contains customer details requested by the operator. Android's lock-screen notification settings control whether that preview is visible while locked.
 
-## Security and recovery
+### Security and recovery
 
 - The setup endpoint requires the designated verified Clerk operator and same-origin mutations. Browser subscription URLs and encryption keys are private server data; the status endpoint returns only the public VAPID key and a device fingerprint.
 - Only HTTPS Chrome FCM push endpoints are accepted. Client-provided arbitrary network destinations, credentials, ports, invalid keys, and oversized bodies are rejected. Send failures log only bounded codes.
@@ -41,7 +53,7 @@ The notification preview contains customer details requested by the operator. An
 - The existing authenticated five-minute recovery cron restarts due outbox deliveries when Workflow launch fails; normal five-minute follow-ups use durable Workflow sleep. No Codex poller is introduced.
 - Set `OPERATOR_NOTIFICATIONS_ENABLED=false` to stop new sends. The phone's **Stop on this device** button removes its subscription. To inspect failure counts, query `OperatorNotificationDelivery` without dumping customer summaries, endpoints, or keys.
 
-## Verification
+### Verification
 
 Focused tests cover owner/test exclusions, latest-evidence health, private setup authorization, origin checks, SSRF fences, phone replacement, expired subscriptions, encrypted transport options, retry/uncertainty, and service-worker display without an open page. Durable delivery integration tests require `OPERATOR_NOTIFICATIONS_TEST_DATABASE_URL` to point to an isolated loopback database named `operator_notifications_test`; they never use production.
 
