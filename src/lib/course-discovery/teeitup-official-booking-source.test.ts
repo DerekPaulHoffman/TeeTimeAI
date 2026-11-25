@@ -8,6 +8,8 @@ import { parseAccessRecipe } from "./recipe";
 import type { ExistingAdapterRecipe } from "./existing-adapter-schema";
 import { recipeTimeToInstant, venueProofMatches } from "./executor";
 import * as teeItUpAdapter from "@/lib/adapters/teeitup";
+import { safeOfficialSourceDiagnostic } from "./official-source-diagnostics";
+import { safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 const source = { officialUrl: "https://example.org/", bookingUrl: "https://example-golf.book.teeitup.com/", venueName: "Example Ridge Golf Club",
   venueAddress: "565 Competition Road, Example, NC 27603, USA", timeZone: "America/New_York" };
@@ -54,6 +56,36 @@ const deps = { now: () => new Date("2030-10-20T12:00:00Z"), venueMatches: venueP
 const input = { date: "2030-10-23", timeZone: source.timeZone, players: 2, startTime: "09:00", endTime: "18:00" };
 
 describe("official booking source proof", () => {
+  it.each(["root-lineage", "home-identity", "direct-embed"] as const)("retains the rejected %s prerequisite without granting a chain", failure => {
+    const scope = createTeeItUpOfficialBookingScope(source, new AbortController().signal);
+    expect(scope.diagnostics(source.officialUrl)).not.toHaveProperty("chainHomeRequestEligible");
+    const root = {}, redirected = {}, documentUrl = failure === "root-lineage" ? `${official}new-location/` : official;
+    const start = (request: object, url: string, parent?: object) => scope.beginMainDocument(request, { url, method: "GET", parent })!;
+    scope.completeMainDocument(start(root, source.officialUrl), { status: 302, location: documentUrl });
+    const rootToken = start(redirected, documentUrl, root);
+    scope.completeMainDocument(rootToken, { status: 200, contentType: "text/html" });
+    scope.observeRenderedSnapshot(rootToken, { url: documentUrl, timeOrigin: 1, blocked: false, frames: [],
+      verifiedOfficial: { kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: source.officialUrl, documentUrl },
+      officialPage: { ...home, url: documentUrl, html: failure === "home-identity" ? homeHtml.replace(source.venueName, "Other Golf Course") : homeHtml } });
+    if (failure === "direct-embed") {
+      const token = start({}, bookingPage);
+      scope.completeMainDocument(token, { status: 200, contentType: "text/html" });
+      scope.observeRenderedSnapshot(token, { url: bookingPage, timeOrigin: 2, blocked: false, frames: [source.bookingUrl],
+        verifiedOfficial: { kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: source.officialUrl, documentUrl: bookingPage },
+        officialPage: { url: bookingPage, html: pageHtml.replace(entry, source.bookingUrl) } });
+    }
+    const diagnostic = scope.diagnostics(failure === "direct-embed" ? bookingPage : documentUrl);
+    expect(diagnostic).toMatchObject(failure === "root-lineage" ? { chainHomeRequestEligible: false, chainHome: false } :
+      failure === "home-identity" ? { chainHomeRequestEligible: true, chainHomeIdentityEligible: false, chainHome: false } :
+        { chainHomeRequestEligible: true, chainHomeIdentityEligible: true, chainBookingPageEligible: false, chainHome: true, chainBookingPage: false });
+    expect(scope.tokenFor(source.bookingUrl, source.bookingUrl)).toBeUndefined();
+    const safe = safeOfficialSourceDiagnostic({ ...diagnostic, url: documentUrl, html: "PRIVATE", token: "PRIVATE" });
+    expect(safe).toEqual(diagnostic);
+    expect(safeBrowserFailureDiagnostics({ officialSourceDiagnostic: diagnostic }).officialSourceDiagnostic).toEqual(safe);
+    expect(JSON.stringify(safe)).not.toMatch(/https:|PRIVATE|example/u);
+    scope.close();
+    expect(scope.diagnostics(documentUrl)).not.toHaveProperty("chainHomeRequestEligible");
+  });
   const footerRow = `${source.venueName} | 565 Competition Road Example, NC 27603 | 212-555-1234`;
   const shapedHome = (heading = "h4") => ({ ...home,
     html: `<html><body><${heading}>Welcome to ${source.venueName}!</${heading}><a href="#">Tee Times</a><a href="${bookingPage}">Book A Tee Time</a><a href="${bookingPage}">Tee Times</a><footer><p class="address">${footerRow}</p></footer></body></html>`,

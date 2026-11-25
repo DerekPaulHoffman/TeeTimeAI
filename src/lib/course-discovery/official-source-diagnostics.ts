@@ -4,7 +4,8 @@ export const officialSourceStages = ["CONTROLLER_CAPTURE", "SOURCE_CONTEXT", "OF
   "LOCATION_DERIVATION_REJECTED", "LEGACY_FALLBACK", "CHAIN_INCOMPLETE", "CHAIN_CURRENT", "INSPECTOR_REJECTED", "INSPECTOR_VERIFIED"] as const;
 export const officialSourceBooleanKeys = ["rawOfficialCaptured", "currentOfficialDocument", "officialProvenance", "sourceContextValid", "officialSiteMatches",
   "rawVenueMatches", "rawAddressMatches", "rawLinkMatches", "renderedVenueMatches", "renderedAddressMatches", "renderedLinkMatches", "renderedFrameObserved",
-  "renderedHeadingsPresent", "renderedAddressesPresent", "renderedLinksPresent", "chainHome", "chainBookingPage", "chainRedirect", "chainFinalDocument", "chainTokenCurrent", "legacyFallback", "derivationRejected"] as const;
+  "renderedHeadingsPresent", "renderedAddressesPresent", "renderedLinksPresent", "chainHome", "chainBookingPage", "chainRedirect", "chainFinalDocument", "chainTokenCurrent",
+  "chainHomeRequestEligible", "chainHomeIdentityEligible", "chainBookingPageEligible", "legacyFallback", "derivationRejected"] as const;
 export const uscheduleConfigurationGates = ["SOURCE_CONTEXT", "BODY_LIMIT", "ACCESS_REQUIRED", "TENANT_DOCUMENT", "SELECTORS", "RENTAL_CATALOG", "SELECTED_RENTAL", "DURATION_CATALOG"] as const;
 export type UScheduleConfigurationGate = typeof uscheduleConfigurationGates[number];
 export type OfficialSourceDiagnostic = { stage: typeof officialSourceStages[number]; uscheduleConfigurationGate?: UScheduleConfigurationGate } & Partial<Record<typeof officialSourceBooleanKeys[number], boolean>>;

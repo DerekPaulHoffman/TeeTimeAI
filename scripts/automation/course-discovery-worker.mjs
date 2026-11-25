@@ -951,7 +951,8 @@ function safeOfficialBrowserDiagnostics(value) {
     const copy = { stage: source.stage };
     for (const key of ["rawOfficialCaptured", "currentOfficialDocument", "officialProvenance", "sourceContextValid", "officialSiteMatches",
       "rawVenueMatches", "rawAddressMatches", "rawLinkMatches", "renderedVenueMatches", "renderedAddressMatches", "renderedLinkMatches", "renderedFrameObserved",
-      "renderedHeadingsPresent", "renderedAddressesPresent", "renderedLinksPresent", "chainHome", "chainBookingPage", "chainRedirect", "chainFinalDocument", "chainTokenCurrent", "legacyFallback", "derivationRejected"])
+      "renderedHeadingsPresent", "renderedAddressesPresent", "renderedLinksPresent", "chainHome", "chainBookingPage", "chainRedirect", "chainFinalDocument", "chainTokenCurrent",
+      "chainHomeRequestEligible", "chainHomeIdentityEligible", "chainBookingPageEligible", "legacyFallback", "derivationRejected"])
       if (typeof source[key] === "boolean") copy[key] = source[key];
     if (source.stage === "INSPECTOR_REJECTED" && ["SOURCE_CONTEXT", "BODY_LIMIT", "ACCESS_REQUIRED", "TENANT_DOCUMENT", "SELECTORS", "RENTAL_CATALOG", "SELECTED_RENTAL", "DURATION_CATALOG"].includes(source.uscheduleConfigurationGate))
       copy.uscheduleConfigurationGate = source.uscheduleConfigurationGate;

@@ -28,7 +28,8 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
   let finalSnapshot: { epoch: number; url: string; currentUrl: string; record: Record } | undefined;
   let contextPending = false;
   let homeDiagnostic: OfficialSourceDiagnostic | undefined;
-  function reset() { epoch++; sequence = 0; current = undefined; records = new WeakMap(); tokens = new WeakMap(); home = undefined; page = undefined; finalSnapshot = undefined; homeDiagnostic = undefined; contextPending = false; }
+  let chainChecks: Partial<Pick<OfficialSourceDiagnostic, "chainHomeRequestEligible" | "chainHomeIdentityEligible" | "chainBookingPageEligible">> = {};
+  function reset() { epoch++; sequence = 0; current = undefined; records = new WeakMap(); tokens = new WeakMap(); home = undefined; page = undefined; finalSnapshot = undefined; homeDiagnostic = undefined; chainChecks = {}; contextPending = false; }
   const nativeCurrent = (record: Record, url: string, timeOrigin: number | undefined) => Boolean(nativeCurrentDocument &&
     teeItUpBookAlias(record.url) && Number.isFinite(timeOrigin) && nativeCurrentDocument(record.object, url, timeOrigin!));
   function invalidate() { reset(); }
@@ -40,7 +41,7 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
         entry.location === final?.url && entry.order === page.record.order + 1 && final?.order === entry.order + 1);
       const chainTokenCurrent = Boolean(active && !signal.aborted && !contextPending && home && page && finalSnapshot?.epoch === epoch && final === current &&
         finalSnapshot?.currentUrl === currentUrl && teeItUpBookAlias(final?.url ?? "") && final?.status === 200 && final.html && chainRedirect);
-      return { ...homeDiagnostic, stage: chainTokenCurrent ? "CHAIN_CURRENT" : homeDiagnostic?.stage ?? "CHAIN_INCOMPLETE",
+      return { ...homeDiagnostic, ...chainChecks, stage: chainTokenCurrent ? "CHAIN_CURRENT" : homeDiagnostic?.stage ?? "CHAIN_INCOMPLETE",
         chainHome: Boolean(home), chainBookingPage: Boolean(page), renderedFrameObserved: Boolean(page), chainRedirect,
         chainFinalDocument: Boolean(final?.status === 200 && final.html), chainTokenCurrent };
     },
@@ -91,10 +92,19 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
           const aliasRoot = root && actual && record.order === 2 && parent?.order === 1 && parent.url === source.officialUrl &&
             parent.status !== undefined && redirects.has(parent.status) && parent.location === record.url &&
             sameTeeItUpOfficialHost(root.href, actual.href) && root.pathname === actual.pathname && root.search === actual.search;
+          // Keep the actual failed prerequisite visible after later navigation.
+          // These copied booleans neither authorize a root nor mint a token.
+          chainChecks.chainHomeRequestEligible = Boolean(exactRoot || aliasRoot);
           if (!exactRoot && !aliasRoot) return;
-          try { home = { record, value: readTeeItUpOfficialHome(source, input.officialPage, true, value => { homeDiagnostic = value; }) }; } catch { return; }
+          try {
+            home = { record, value: readTeeItUpOfficialHome(source, input.officialPage, true, value => { homeDiagnostic = value; }) };
+            chainChecks.chainHomeIdentityEligible = true;
+          } catch { chainChecks.chainHomeIdentityEligible = false; return; }
         } else if (record.order === home.record.order + 1 && input.url === home.value.bookingPageUrl) {
-          try { page = { record, value: readTeeItUpOfficialEmbed(input.officialPage, input.frames) }; } catch { page = undefined; }
+          try {
+            page = { record, value: readTeeItUpOfficialEmbed(input.officialPage, input.frames) };
+            chainChecks.chainBookingPageEligible = true;
+          } catch { page = undefined; chainChecks.chainBookingPageEligible = false; }
         }
       }
       if (teeItUpBookAlias(record.url)) finalSnapshot = { epoch, url: record.url, currentUrl: input.url, record };
