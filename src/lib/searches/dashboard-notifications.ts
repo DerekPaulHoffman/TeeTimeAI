@@ -1,5 +1,4 @@
 import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
-import { formatDateInputValue } from "@/lib/dates/local-date";
 
 type NotificationSearch = {
   status: string;
@@ -16,7 +15,7 @@ export function getNotificationTitle(preferences: NotificationSearch["preference
 
 export function groupDashboardNotifications<T extends NotificationSearch>(searches: readonly T[], now = new Date()) {
   const isCurrent = (search: T) => search.status === "ACTIVE" && !notificationWindowEnded(
-    formatDateInputValue(search.date), search.endTime,
+    search.date.toISOString().slice(0, 10), search.endTime,
     search.preferences.map(preference => preference.course.timeZone), now
   );
   const active = searches.filter(isCurrent);

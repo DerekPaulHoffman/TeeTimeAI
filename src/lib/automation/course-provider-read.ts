@@ -34,10 +34,14 @@ import {
   resolveProviderCapability,
   type ExternalDetectedPlatform
 } from "@/lib/automation/provider-capabilities";
-import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
+import {
+  getBookingWindowFromEvidence,
+  type BookingWindowEvidence,
+} from "@/lib/courses/booking-window";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 import type { CourseCandidate } from "@/lib/places/google";
 import { detectAndSaveFacilityCourses } from "@/lib/courses/detect-and-save-facility";
+import type { DetectedFacility } from "@/lib/courses/shared-facility-detection";
 import { readSharedFacilityScope } from "@/lib/courses/shared-facility-scope";
 
 export type AutomationCourseProviderRead = {
@@ -63,7 +67,27 @@ export async function fetchCourseTeeSheet(
   course: AutomationCourseProviderRead,
   date: Date,
   players: number,
-  discoverBookingWindow: boolean
+  discoverBookingWindow: boolean,
+  options: { onSharedFacilityDetected?: (courseId: string, detection: DetectedFacility) => void } = {}
+): Promise<CourseTeeSheetResult> {
+  const result = await readCourseTeeSheet(course, date, players, discoverBookingWindow, options);
+  if (result.targetDateStatus === "OPEN") return result;
+
+  const bookingWindow = result.bookingWindowEvidence
+    ? getBookingWindowFromEvidence(date, course.timeZone, result.bookingWindowEvidence)
+    : null;
+  if (bookingWindow && bookingWindow.opensAt.getTime() > Date.now()) {
+    return { ...result, targetDateStatus: "NOT_OPEN" };
+  }
+  throw new Error("Provider returned an invalid response for confirming availability on the requested date");
+}
+
+async function readCourseTeeSheet(
+  course: AutomationCourseProviderRead,
+  date: Date,
+  players: number,
+  discoverBookingWindow: boolean,
+  options: { onSharedFacilityDetected?: (courseId: string, detection: DetectedFacility) => void },
 ): Promise<CourseTeeSheetResult> {
   const providerFamily = resolveProviderCapability(course).providerFamilyKey;
   if (providerFamily === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
@@ -93,6 +117,10 @@ export async function fetchCourseTeeSheet(
     });
     const detection = publicSchedule.detectedFacility;
     if (!detection || detection.courses.length < 2 && !readSharedFacilityScope(course.bookingMetadata, course.id)?.detectionMethod) return result;
+    if (options.onSharedFacilityDetected) {
+      options.onSharedFacilityDetected(course.id, detection);
+      return result;
+    }
     const members = await detectAndSaveFacilityCourses(course.id, detection);
     return members === undefined ? result : { ...result, facilityCourses: members };
   }
@@ -116,7 +144,7 @@ export async function fetchCourseTeeSheet(
       metadata: course.bookingMetadata
     }).then((slots) => ({
       slots,
-      targetDateStatus: slots.length > 0 ? ("OPEN" as const) : ("UNKNOWN" as const),
+      targetDateStatus: "OPEN" as const,
       bookingWindowEvidence: null
     }));
   }

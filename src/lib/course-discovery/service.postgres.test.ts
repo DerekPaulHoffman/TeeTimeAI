@@ -79,6 +79,61 @@ describe.skipIf(!url)("course discovery in isolated Postgres", () => {
     expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(1);
   });
 
+  it("counts saved queue time against the first worker lease but keeps the pickup receipt", async () => {
+    const f = await fixture();
+    const setupStartedAt = new Date(Date.now() - 14 * 60_000);
+    const setupDeadlineAt = new Date(setupStartedAt.getTime() + 15 * 60_000);
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { setupStartedAt } });
+    const job = await f.ensure();
+    expect(job).toMatchObject({ status: "QUEUED", setupDeadlineAt, deadlineAt: null, firstPickedUpAt: null });
+    const claimed = await service.claimNextDiscoveryJob("late-pickup");
+    expect(claimed).toMatchObject({ id: job?.id, setupDeadlineAt, leaseExpiresAt: setupDeadlineAt });
+    expect(claimed!.deadlineAt!.getTime() - claimed!.firstPickedUpAt!.getTime()).toBe(15 * 60_000);
+    expect(await service.heartbeatDiscoveryJob(claimed!.id, claimed!.leaseToken!))
+      .toMatchObject({ leaseExpiresAt: setupDeadlineAt });
+  });
+
+  it("records one missed setup cutoff across a later delivery-only generation", async () => {
+    const f = await fixture();
+    const setupStartedAt = new Date(Date.now() - 16 * 60_000);
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { setupStartedAt } });
+    const expired = await f.ensure();
+    expect(expired).toMatchObject({ status: "TIMED_OUT", outcome: "QUEUE_DEADLINE", attempts: 0,
+      activeTargetKey: null, deadlineAt: null, firstPickedUpAt: null });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { alertGeneration: { increment: 1 } } });
+    expect((await f.ensure())?.id).toBe(expired?.id);
+    expect(await service.claimNextDiscoveryJob("no-replay")).toBeNull();
+    expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(1);
+  });
+
+  it("fences an old request when a saved edit changes the availability window", async () => {
+    const f = await fixture();
+    const original = await f.ensure();
+    const claimed = await service.claimNextDiscoveryJob("before-window-edit");
+    const nextStart = new Date(Date.now() + 1);
+    await client.teeSearch.update({ where: { id: f.search.id }, data: {
+      startTime: "10:00", setupStartedAt: nextStart, alertGeneration: { increment: 1 }, scheduleVersion: { increment: 1 },
+    } });
+    await expect(service.heartbeatDiscoveryJob(claimed!.id, claimed!.leaseToken!)).rejects.toThrow("Course discovery state changed");
+    const replacement = await f.ensure();
+    expect(replacement?.id).not.toBe(original?.id);
+    expect(replacement).toMatchObject({ status: "QUEUED", setupDeadlineAt: new Date(nextStart.getTime() + 15 * 60_000) });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: original!.id } })).toMatchObject({
+      status: "CANCELLED", outcome: "DEMAND_CHANGED", activeTargetKey: null,
+      firstPickedUpAt: claimed!.firstPickedUpAt, setupDeadlineAt: original!.setupDeadlineAt,
+    });
+  });
+
+  it("stores the earlier requested window end as the hosted cutoff", async () => {
+    const f = await fixture();
+    let windowEnd = new Date(Math.ceil((Date.now() + 3 * 60_000) / 60_000) * 60_000);
+    if (windowEnd.toISOString().slice(11, 16) === "00:00") windowEnd = new Date(windowEnd.getTime() + 60_000);
+    await client.teeSearch.update({ where: { id: f.search.id }, data: {
+      date: new Date(`${windowEnd.toISOString().slice(0, 10)}T00:00:00Z`), startTime: "00:00", endTime: windowEnd.toISOString().slice(11, 16),
+    } });
+    expect(await f.ensure()).toMatchObject({ status: "QUEUED", setupDeadlineAt: windowEnd });
+  });
+
   it("keeps a pilot lease usable behind one hundred older non-pilot alerts", async () => {
     const f = await fixture();
     const ids = Array.from({ length: 100 }, () => randomUUID());
@@ -124,9 +179,10 @@ describe.skipIf(!url)("course discovery in isolated Postgres", () => {
     expect((await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: first.id } })).status).toBe("FAILED");
   });
 
-  it("discards old request evidence when a retry picks up an edited alert", async () => {
+  it("discards old request evidence when a legacy retry picks up an edited alert", async () => {
     const f = await fixture();
     const first = await verified(f);
+    await client.courseDiscoveryJob.update({ where: { id: first.id }, data: { setupDeadlineAt: null } });
     await service.checkpointDiscoveryJob(first.id, first.leaseToken!, { stagehandSource: { fixture: "old request" } });
     await service.failDiscoveryJob(first.id, first.leaseToken!, "TOOL_FAILURE", true);
     const editedDate = new Date(f.search.date);
@@ -269,6 +325,10 @@ finally{if(prisma)await prisma.$disconnect();if(process.connected)process.discon
     }
     expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(1);
     await client.teeSearch.update({ where: { id: f.search.id }, data: { alertGeneration: { increment: 1 } } });
+    expect((await f.ensure())?.id).toBe(first.id);
+    await client.teeSearch.update({ where: { id: f.search.id }, data: {
+      alertGeneration: { increment: 1 }, startTime: "10:00", setupStartedAt: new Date(),
+    } });
     const renewed = await f.ensure();
     expect(renewed?.id).not.toBe(first.id);
     expect(renewed?.firstPickedUpAt).toBeNull();

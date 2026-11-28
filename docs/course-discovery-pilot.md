@@ -51,6 +51,18 @@ expire after 90 seconds. Useful late checks are retained and reported as late,
 not suppressed to make the timing look successful. These budgets do not prove the delivery SLO; the pilot
 must measure discovery, replay, scheduling and delivery together.
 
+The dashboard uses a setup clock saved with the alert. A change to the requested availability starts a new setup clock. Changes to priority, cadence, or recipients retain it. The setup deadline is fifteen minutes from that clock or the end of the course-local requested window, whichever comes first. A course without verified setup at that point shows that automatic availability could not be confirmed.
+
+Postgres supplies the save and dashboard clocks. The browser schedules refresh from the remaining time reported by the server, and the dashboard retains a settled timeout when its receipt is present.
+
+Normal discovery admission saves the same deadline with the course or offering job. Queue wait uses that time. The hosted one-minute recovery route closes overdue jobs and releases the target reservation. A job that expires in the queue keeps its pickup clock empty. The worker lease and work budget end by the saved deadline even if the learner picked up late. Legacy jobs retain their recorded pickup clock and the queue-age fallback. Historical pilot reporting still measures pickup through observed delivery. A later verified repair can supply fresh evidence under its own authorization.
+
+Each saved course or offering also gets a setup receipt in the save transaction. It records the original request, the deadline and the first verified outcome. A checked result can settle it before the cutoff. The hosted recovery route settles overdue receipts even when no discovery job exists. An inconclusive probe can explain a timeout. It cannot establish availability. Late verified evidence can update current availability while the receipt remains unchanged. Older demand with incomplete historical proof is recorded as unverified history. The recovery route does not restart ended demand.
+
+A verified simulator booking opening saved with the request remains visible while the reader is offline and the exact public offering still matches. The dashboard refreshes when that window opens. A failure registering older alerts still allows the hosted watchdog to settle already-saved overdue receipts, and the route reports the registration failure.
+
+On an ordinary outdoor check, a ready public course can write its result while source discovery continues for another course. Provider-family request limits still apply. Shared-facility updates that can change a sibling's booking configuration wait until the selected courses have written their results. Owner-bound remediation keeps its exact search and lease checks. Search-level email timing is measured separately.
+
 Incomplete extraction, challenge pages and unavailable browser capabilities
 remain explicit failures. They cannot create a `NO_MATCH` result. Cancellation,
 edits, source changes and stale schedule versions are checked again before
@@ -144,6 +156,14 @@ Start -Apply` for the initial run. `-Action Inspect` is read-only. `Start`,
 `Stop`, `Disable` and `Uninstall` are dry runs unless `-Apply` is supplied. The
 script inspects the exact existing task name and refuses to overwrite a task
 without its managed marker.
+
+Inspect reports polling health and `restartPrerequisites` separately. A running
+supervisor can keep polling with loaded code after its checkout disappears. Use
+the inspector from a verified, available checkout. `MANAGED_RUNTIME_CHECKOUT_MISSING`
+requires restoring or replacing the managed checkout before stopping the current
+process. `PRESENT` confirms file presence. The wrapper still validates the
+checkout, protected configuration and runtime, and a release still requires a
+fresh heartbeat from the restarted supervisor.
 
 The default log directory is `logs` beside the protected configuration file;
 `-LogDirectory` can select another external directory. The wrapper writes only

@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ transaction: vi.fn(), courseLock: vi.fn(), deliveryLock: vi.fn() }));
+const mocks = vi.hoisted(() => ({ transaction: vi.fn(), courseLock: vi.fn(), deliveryLock: vi.fn(), registerSetup: vi.fn() }));
 vi.mock("@/lib/prisma", () => ({ prisma: { $transaction: mocks.transaction } }));
 vi.mock("@/lib/automation/course-monitoring", () => ({ acquireCourseMonitoringWriteLockInTransaction: mocks.courseLock }));
 vi.mock("@/lib/email/search-delivery-outbox", () => ({ lockSearchForAlertMutation: mocks.deliveryLock }));
+vi.mock("@/lib/searches/course-setup-receipts", async importOriginal => ({
+  ...(await importOriginal<typeof import("@/lib/searches/course-setup-receipts")>()),
+  registerCourseSetupReceipts: mocks.registerSetup,
+}));
 
 import { reactivateSyntheticTestSearch } from "./synthetic-test-reactivation";
 import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
@@ -106,10 +110,14 @@ describe("explicit synthetic reactivation", () => {
     expect(result.outcome).toBe("queued_for_recovery");
     expect(search).toMatchObject({ status: "ACTIVE", checkStatus: "QUEUED",
       date: new Date("2026-09-09T00:00:00.000Z"), nextCheckAt: now,
+      setupStartedAt: now,
       scheduleVersion: 8, alertGeneration: 4, syntheticMultiCycle: true, trafficClass: "TEST",
       createdAt: original.createdAt, preferences: original.preferences });
     expect(mocks.deliveryLock).toHaveBeenCalledWith(tx, { searchId: input.searchId, userId: original.userId, now });
     expect(mocks.courseLock).toHaveBeenCalledWith(tx, "course-one");
+    expect(mocks.registerSetup).toHaveBeenCalledWith(tx, expect.objectContaining({
+      id: input.searchId, status: "ACTIVE", setupStartedAt: now, alertGeneration: 4,
+    }), { supersedes: true });
     expect(tx.localReaderJob.findFirst).toHaveBeenCalledWith({
       where: { OR: [{ teeSearchId: input.searchId }, { courseId: { in: ["course-one"] } }],
         status: { in: ["PENDING", "LEASED"] } }, select: { id: true },

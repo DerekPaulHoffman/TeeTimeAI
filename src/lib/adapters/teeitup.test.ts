@@ -55,6 +55,20 @@ describe("TeeItUp adapter", () => {
       metadata: { aliases: ["public"], bookingBaseUrl: "https://public.book.teeitup.com/" } }, read);
     expect(result.slots).toHaveLength(1);
     expect(result.slots[0]).toMatchObject({ startsAt: "2030-10-22T11:30", availableSpots: 4, holes: 9 });
+    expect(result.targetDateStatus).toBe("UNKNOWN");
+  });
+
+  it.each([
+    { payload: [{ courseId: "public-course", teetimes: [] }], status: "OPEN" },
+    { payload: [{ teetimes: [] }], status: "UNKNOWN" },
+    { payload: [{ courseId: "public-course" }], status: "UNKNOWN" },
+    { payload: [], status: "UNKNOWN" },
+  ])("requires a scoped empty day to prove availability without a populated response: $status", async ({ payload, status }) => {
+    const read = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json([{ id: 123, courseId: "public-course", timeZone: "America/New_York" }]))
+      .mockResolvedValueOnce(Response.json(payload));
+    await expect(fetchTeeItUpTeeSheet({ courseId: "course", date: new Date("2030-10-22T00:00:00Z"), players: 2,
+      metadata: { aliases: ["public"], bookingBaseUrl: "https://public.book.teeitup.com/" } }, read))
+      .resolves.toMatchObject({ slots: [], targetDateStatus: status });
   });
 
   it("discovers facilities for aliases and normalizes available tee times", async () => {

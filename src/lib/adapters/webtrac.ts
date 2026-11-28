@@ -97,7 +97,7 @@ export async function fetchWebTracTeeSheet(
   }
 
   const html = await response.text();
-  const slots = parseWebTracSlots(html, input, url);
+  const { slots, hasTeeTimeRows } = parseWebTracSlots(html, input, url);
   const bookingWindowEvidence =
     input.discoverBookingWindow && input.metadata.bookingWindowDaysAhead !== undefined
       ? {
@@ -112,7 +112,7 @@ export async function fetchWebTracTeeSheet(
 
   return {
     slots,
-    targetDateStatus: /Tee Time Search Results/i.test(html) ? "OPEN" : "UNKNOWN",
+    targetDateStatus: hasTeeTimeRows && /Tee Time Search Results/i.test(html) ? "OPEN" : "UNKNOWN",
     bookingWindowEvidence
   };
 }
@@ -140,22 +140,28 @@ function buildSearchUrl(metadata: WebTracMetadata, date: Date, players: number) 
 
 function parseWebTracSlots(
   html: string,
-  input: { courseId: string; players: number; metadata: WebTracMetadata },
+  input: { courseId: string; date: Date; players: number; metadata: WebTracMetadata },
   evidenceUrl: string
 ) {
-  return [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].flatMap(
-    (row): TeeTimeSlot[] => {
-      const rowHtml = row[1];
+  const targetDate = input.date.toISOString().slice(0, 10);
+  const rows = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)]
+    .map(row => row[1])
+    .filter(row => /GRFMIDList=|<td\b[^>]*\bdata-title=["']Open Slots["']/i.test(row));
+  const slots = rows.flatMap(
+    (rowHtml): TeeTimeSlot[] => {
       const providerId = /GRFMIDList=(\d+)/i.exec(rowHtml)?.[1];
       const time = cellText(rowHtml, "Time");
       const date = cellText(rowHtml, "Date");
-      const openSlots = Number.parseInt(cellText(rowHtml, "Open Slots"), 10);
+      const openSlotsText = cellText(rowHtml, "Open Slots");
+      const openSlots = Number(openSlotsText);
       const holesText = cellText(rowHtml, "Holes");
       const startsAt = parseLocalDateTime(date, time);
       const holes = /\b9\b/.test(holesText) ? 9 : /\b18\b/.test(holesText) ? 18 : undefined;
-      if (!providerId || !startsAt || !Number.isFinite(openSlots) || openSlots < input.players) {
-        return [];
+      if (!startsAt || startsAt.slice(0, 10) !== targetDate || !/^\d+$/u.test(openSlotsText) || !Number.isSafeInteger(openSlots)) {
+        throw new Error("WebTrac search returned an unverified tee-time row");
       }
+      if (openSlots < input.players) return [];
+      if (!providerId) throw new Error("WebTrac search returned an unverified tee-time row");
       return [{
         sourceId: `webtrac-${input.metadata.courseCode ?? "default"}-${providerId}`,
         courseId: input.courseId,
@@ -168,6 +174,7 @@ function parseWebTracSlots(
       }];
     }
   );
+  return { slots, hasTeeTimeRows: rows.length > 0 };
 }
 
 function cellText(rowHtml: string, title: string) {
@@ -181,7 +188,7 @@ function cellText(rowHtml: string, title: string) {
 
 function parseLocalDateTime(date: string, time: string) {
   const dateMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(date);
-  const timeMatch = /^(\d{1,2}):(\d{2})\s*(am|pm)$/i.exec(time);
+  const timeMatch = /^(0?[1-9]|1[0-2]):([0-5]\d)\s*(am|pm)$/i.exec(time);
   if (!dateMatch || !timeMatch) {
     return null;
   }

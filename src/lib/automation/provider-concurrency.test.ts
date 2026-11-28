@@ -50,4 +50,24 @@ describe("runProviderFamilyTasks", () => {
     );
     expect(peak).toBe(2);
   });
+
+  it("starts other families in the free slot while a slow family still owns its slot", async () => {
+    const slow = Promise.withResolvers<void>();
+    const independent = Promise.withResolvers<void>();
+    const order: string[] = [];
+    const checking = runProviderFamilyTasks(["slow", "same", "fast", "independent"], item =>
+      item === "same" ? "slow" : item, async item => {
+      order.push(item);
+      if (item === "slow") await slow.promise;
+      if (item === "independent") independent.resolve();
+    });
+    try {
+      await independent.promise;
+      expect(order).toEqual(["slow", "fast", "independent"]);
+    } finally {
+      slow.resolve();
+      await checking;
+    }
+    expect(order).toEqual(["slow", "fast", "independent", "same"]);
+  });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { projectCurrentCheckEvidence } from "./current-check-evidence";
+import { getCourseSetupProbe, projectCurrentCheckEvidence } from "./current-check-evidence";
 import { getDashboardAvailabilityView, readDashboardAvailabilitySnapshot } from "./dashboard-availability";
 import { buildAlertGenerationStartMarker } from "./generation-clock";
 
@@ -21,6 +21,18 @@ function success(observedAt: Date, providerObservedAt = observedAt, courseId = "
 }
 
 describe("current saved-request check evidence", () => {
+  it("uses known same-request provider proof only for setup after a delivery-generation change", () => {
+    const observedAt = new Date("2026-09-30T03:31:59.787Z");
+    const probe = success(observedAt);
+    const sameCriteria = { ...search, setupStartedAt: search.createdAt, probes: [probe] };
+    expect(getCourseSetupProbe(sameCriteria, probe)).toEqual({ observedAt, outcome: "MATCH_FOUND", rawSummary: null });
+    expect(projectCurrentCheckEvidence(sameCriteria)).toMatchObject({ probes: [], lastCheckedAt: null, lastCheckOutcome: null });
+    expect(getCourseSetupProbe({ ...sameCriteria, setupStartedAt: startedAt }, probe)).toBeUndefined();
+    expect(getCourseSetupProbe({ ...sameCriteria, setupStartedAt: null }, probe)).toBeUndefined();
+    expect(getCourseSetupProbe({ ...sameCriteria, setupStartedAt: startedAt }, success(startedAt, observedAt))).toBeUndefined();
+    expect(getCourseSetupProbe(sameCriteria, { ...probe, rawSummary: { visibleSlotCount: 12 } })).toBeUndefined();
+  });
+
   it("retains simulator proof for the current offering without an outdoor execution marker", () => {
     const observedAt = new Date("2026-09-30T03:55:01Z");
     const probe = { courseId: "course-1", offeringId: "simulator-1", observedAt, outcome: "NO_MATCH",

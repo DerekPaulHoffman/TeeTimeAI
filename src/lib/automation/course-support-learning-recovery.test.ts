@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { watchOwnedLearningRecovery } from "./course-support-learning-recovery";
+import { isQualifiedCourseSupportLearningRuntime, readCourseSupportLearningRuntimeReadyReceipt, watchOwnedLearningRecovery } from "./course-support-learning-recovery";
+import { CourseSupportRuntimeUpdateFailure } from "./course-support-runtime-update";
 class StateConflict extends Error {}
 
 function fixture() {
@@ -8,11 +9,17 @@ function fixture() {
   const method = { state: "METHOD_SAVED" as const, recipeId: "recipe", recipeHash: "c".repeat(64), runtimeVersion: job.runtimeVersion,
     originalFirstPickedUpAt: "2030-01-01T12:00:00Z", originalDeadlineAt: "2030-01-01T12:15:00Z" };
   const pending = { state: "PENDING" as const, firstPickedUpAt: null, deadlineAt: null, attempts: 0, runtimeVersion: job.runtimeVersion };
-  return { controller, job, method, pending, prepareRuntime: vi.fn(async () => {}), admit: vi.fn(async () => job),
+  return { controller, job, method, pending, runtimeVersion: job.runtimeVersion,
+    prepareRuntime: vi.fn(async () => {}), admit: vi.fn(async () => job),
     read: vi.fn(async () => method as typeof method | typeof pending | { state: "OBSOLETE" }),
     readHandoff: vi.fn(async () => ({ durableCloseoutRecorded: true, method })),
     isStateConflict: (error: unknown) => error instanceof StateConflict, signal: controller.signal };
 }
+const noMutation = { schemaVersion: 1, outcome: "blocked", reasonCode: "MANAGED_RUNTIME_CHECKOUT_MISSING",
+  phase: "VALIDATE_MANAGED_CHECKOUT", apply: true, stateChanged: false, mutationAttempted: false, drainAttempted: false,
+  taskStopAttempted: false, runtimeUpdateAttempted: false, taskStartAttempted: false, activationWriteAttempted: false,
+  taskStartRequests: 0, firstStoppedTaskResult: null, acceptanceRestartProof: false };
+
 describe("original coding owner returning a repair to the learner", () => {
   it("prepares the exact runtime before admission; method handoff is not email success", async () => {
     const f = fixture();
@@ -25,6 +32,32 @@ describe("original coding owner returning a repair to the learner", () => {
   it("never admits work when runtime preparation fails", async () => {
     const f = fixture(); f.prepareRuntime.mockRejectedValue(Error("runtime not current"));
     await expect(watchOwnedLearningRecovery(f)).rejects.toThrow("runtime not current");
+    expect(f.admit).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["MANAGED_RUNTIME_CHECKOUT_MISSING", "VALIDATE_MANAGED_CHECKOUT"],
+    ["DEPENDENCY_SCHEMA_OR_INSTALLED_READER_ROLLOUT_REQUIRED", "VALIDATE_SOURCE"],
+  ])("passes through `%s` before admission only when the updater proves no mutation", async (reasonCode, phase) => {
+    const f = fixture();
+    const failure = new CourseSupportRuntimeUpdateFailure(JSON.stringify({ ...noMutation, reasonCode, phase,
+      privatePath: "must not be forwarded" }));
+    f.prepareRuntime.mockRejectedValue(failure);
+    const result = await watchOwnedLearningRecovery(f);
+    expect(result).toMatchObject({ outcome: "runtime_blocked_before_admission", error: failure, blocker: {
+      kind: "WINDOWS_RUNTIME_BLOCKED", runtimeVersion: f.runtimeVersion, observedAt: expect.any(Date),
+      diagnostic: { attributed: true, reasonCode, phase, mutationAttempted: false, taskStartRequests: 0 },
+    } });
+    expect(JSON.stringify(result)).not.toContain("must not be forwarded");
+    expect(f.admit).not.toHaveBeenCalled();
+    expect(f.read).not.toHaveBeenCalled();
+  });
+  it.each([{ phase: "VALIDATE_SOURCE" }, { reasonCode: "DIRTY_MANAGED_RUNTIME" }, { apply: false },
+    { taskStopAttempted: true }, { mutationAttempted: true }, { taskStartRequests: 1 }, { firstStoppedTaskResult: 1 },
+    { runtimeUpdateAttempted: undefined }])("preserves the existing stop without a blocker receipt for %o", async patch => {
+    const f = fixture();
+    const failure = new CourseSupportRuntimeUpdateFailure(JSON.stringify({ ...noMutation, ...patch }));
+    f.prepareRuntime.mockRejectedValue(failure);
+    await expect(watchOwnedLearningRecovery(f)).rejects.toBe(failure);
     expect(f.admit).not.toHaveBeenCalled();
   });
   it("retains an obsolete failure and does not try another budget", async () => {
@@ -70,5 +103,35 @@ describe("original coding owner returning a repair to the learner", () => {
     f.readHandoff.mockResolvedValue({ durableCloseoutRecorded: true, method: { ...f.method, runtimeVersion: "d".repeat(40) } });
     await expect(watchOwnedLearningRecovery(f)).rejects.toBe(error);
     expect(f.read).toHaveBeenCalledTimes(1); expect(f.admit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("exact ready evidence for a held Windows verification", () => {
+  const runtimeVersion = "b".repeat(40);
+  const heartbeatAt = new Date("2030-01-01T12:00:00.000Z");
+  const observedAt = new Date("2030-01-01T12:00:11.000Z");
+  const inspect = { action: "Inspect", apply: false, taskName: "Tee Time Spot Course Discovery", taskPath: "\\TeeTimeSpot\\",
+    exists: true, state: "Running", ready: true, restartPrerequisites: "PRESENT", workerMode: "STAGEHAND_SOL", pollStatus: "completed",
+    heartbeatStatus: "fresh", activeOperations: 0, runtimeVersion, lastHeartbeatAt: "2030-01-01T12:00:00.0000000+00:00",
+    logDirectory: "private" };
+
+  it("requires already-current updater proof for the exact runtime", () => {
+    const qualified = { outcome: "already_current", runtimeVersion, acceptanceRestartProof: false };
+    expect(isQualifiedCourseSupportLearningRuntime(JSON.stringify(qualified), runtimeVersion)).toBe(true);
+    expect(isQualifiedCourseSupportLearningRuntime(JSON.stringify({ ...qualified, outcome: "ready_to_update" }), runtimeVersion)).toBe(false);
+    expect(isQualifiedCourseSupportLearningRuntime(JSON.stringify({ ...qualified, runtimeVersion: "a".repeat(40) }), runtimeVersion)).toBe(false);
+  });
+
+  it("projects a bounded fresh exact-host receipt with no local paths", () => {
+    expect(readCourseSupportLearningRuntimeReadyReceipt(JSON.stringify(inspect), runtimeVersion, observedAt))
+      .toEqual({ kind: "WINDOWS_RUNTIME_READY", runtimeVersion, observedAt, heartbeatAt });
+  });
+
+  it.each([{ action: "Start" }, { apply: true }, { taskName: "another task" }, { taskPath: "\\" }, { state: "Ready" },
+    { ready: false }, { restartPrerequisites: "MANAGED_RUNTIME_CHECKOUT_MISSING" }, { workerMode: "NATIVE_SOL" },
+    { heartbeatStatus: "stale" }, { pollStatus: "failed" }, { activeOperations: 1 }, { runtimeVersion: "a".repeat(40) },
+    { drained: true }, { drainNonce: "another-operation" },
+    { lastHeartbeatAt: "2030-01-01T12:01:00Z" }, { lastHeartbeatAt: "2030-01-01T11:58:00Z" }])("rejects %o even when other task fields look ready", patch => {
+    expect(readCourseSupportLearningRuntimeReadyReceipt(JSON.stringify({ ...inspect, ...patch }), runtimeVersion, observedAt)).toBeNull();
   });
 });

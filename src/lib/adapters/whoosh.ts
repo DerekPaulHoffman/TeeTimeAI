@@ -255,11 +255,12 @@ export async function fetchWhooshTeeSheet(
     )
   );
   const slots = mergeWhooshSlots(
-    targetAgendas.flatMap((agenda) =>
-      (agenda.timeSlots?.edges ?? []).flatMap(({ node }) =>
-        normalizeWhooshSlot(node, input)
-      )
-    ),
+    targetAgendas.flatMap((agenda) => {
+      if (!Array.isArray(agenda.timeSlots?.edges)) {
+        throw new Error("Whoosh date agenda did not include a complete tee-time connection");
+      }
+      return agenda.timeSlots.edges.flatMap(edge => normalizeWhooshSlot(edge?.node, input, targetDate));
+    }),
     input.metadata.clubSlug
   );
 
@@ -301,19 +302,23 @@ function normalizeWhooshSlot(
     courseId: string;
     players: number;
     metadata: WhooshMetadata;
-  }
+  },
+  targetDate: string,
 ): TeeTimeSlot[] {
-  if (
-    !slot?.id ||
-    slot.availability !== "AVAILABLE" ||
-    !Number.isInteger(slot.capacity) ||
-    !Number.isInteger(slot.usedCapacity)
-  ) {
-    return [];
+  const startsAt = normalizeLocalDateTime(slot?.dateTime);
+  if (typeof slot?.id !== "string" || !slot.id || !startsAt || startsAt.slice(0, 10) !== targetDate ||
+      typeof slot.availability !== "string" || !slot.availability || slot.availability === "UNKNOWN") {
+    throw new Error("Whoosh date agenda contained an unverified tee-time row");
   }
-  const availableSpots = (slot.capacity as number) - (slot.usedCapacity as number);
-  const startsAt = normalizeLocalDateTime(slot.dateTime);
-  if (!startsAt || availableSpots < input.players || availableSpots <= 0) {
+  if (slot.availability !== "AVAILABLE") return [];
+  if (
+    typeof slot.capacity !== "number" || !Number.isInteger(slot.capacity) || slot.capacity < 0 ||
+    typeof slot.usedCapacity !== "number" || !Number.isInteger(slot.usedCapacity) || slot.usedCapacity < 0
+  ) {
+    throw new Error("Whoosh date agenda contained an unverified tee-time row");
+  }
+  const availableSpots = slot.capacity - slot.usedCapacity;
+  if (availableSpots < input.players || availableSpots <= 0) {
     return [];
   }
 
@@ -404,7 +409,7 @@ function buildWhooshSourceId(clubSlug: string, startsAt: string) {
 }
 
 function normalizeLocalDateTime(value: string | undefined) {
-  const match = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::\d{2})?$/u.exec(
+  const match = /^(\d{4}-\d{2}-\d{2})[ T]((?:[01]\d|2[0-3]):[0-5]\d)(?::[0-5]\d)?$/u.exec(
     value ?? ""
   );
   return match ? `${match[1]}T${match[2]}` : null;

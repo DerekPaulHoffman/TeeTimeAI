@@ -136,6 +136,23 @@ describe("dashboard course and simulator presentation", () => {
     expect(html).not.toContain('aria-label="Matching simulator sessions"');
   });
 
+  it("shows a saved verified simulator opening without an availability check", async () => {
+    const search = fixture("SIMULATOR", "Verified Booking Window");
+    const opensAt = new Date("2026-10-10T11:00:00Z");
+    const projected = { ...search, probes: [], matches: [], lastCheckedAt: null,
+      preferences: search.preferences.map(preference => ({ ...preference, setupDeadlineAt: now, setupBookingOpensAt: opensAt })) };
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue([projected] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    const dom = document.createElement("div");
+    dom.innerHTML = renderToStaticMarkup(await DashboardPage());
+    expect(dom.querySelector(".dashboard-alert-summary-copy")?.textContent).toContain("The public booking window has not opened yet.");
+    expect(dom.querySelector(".watch-course-availability")?.textContent).toContain("The public booking window has not opened yet.");
+    expect(dom.querySelector('a[href="https://official.example/booking"]')).not.toBeNull();
+
+    vi.setSystemTime(opensAt);
+    dom.innerHTML = renderToStaticMarkup(await DashboardPage());
+    expect(dom.querySelector(".dashboard-alert-summary-copy")?.textContent).toContain("Automatic availability not confirmed");
+  });
+
   it("shows golf matches outside the management accordion with search-style labels", async () => {
     const search = { ...fixture("GOLF", "Golf Matches"), matches: fixture("SIMULATOR", "Golf Matches").matches.map(match => ({ ...match, offeringId: null, offering: null })) };
     vi.mocked(listTeeSearchesForUser).mockResolvedValue([search] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
@@ -178,5 +195,28 @@ describe("dashboard course and simulator presentation", () => {
     expect(dom.querySelector(".watch-course-availability")?.textContent).toContain("official site");
     expect(dom.textContent).not.toMatch(/Simulator check pending|will retry|No matching sessions/);
     expect(dom.querySelector('a[href="https://official.example/booking"]')).not.toBeNull();
+  });
+
+  it("renders a clear deadline result in outdoor and simulator alerts even if no worker started", async () => {
+    vi.setSystemTime(new Date(now.getTime() - 20 * 60_000));
+    const searches = [fixture("GOLF", "Unverified Course"), fixture("SIMULATOR", "Unverified Venue")].map(search => ({
+      ...search, availabilityObservedAt: now, lastCheckedAt: null, matches: [], probes: [], preferences: search.preferences.map(preference => ({
+        ...preference, setupDeadlineAt: now,
+      })),
+    }));
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue(searches as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    const html = renderToStaticMarkup(await DashboardPage());
+    const dom = document.createElement("div");
+    dom.innerHTML = html;
+    for (const row of dom.querySelectorAll(".dashboard-row")) {
+      expect(row.querySelector(".dashboard-alert-summary-copy")?.textContent).toContain("Automatic availability not confirmed");
+      expect(row.querySelector(".dashboard-alert-summary-checked")?.textContent).toBe("No completed check");
+      expect(row.querySelector('a[href="https://official.example/booking"]')).not.toBeNull();
+    }
+    expect(dom.querySelectorAll(".dashboard-row")).toHaveLength(2);
+    expect(dom.textContent).not.toMatch(/check pending|pending initial check|will retry/i);
+    if (process.env.DASHBOARD_FINALITY_FIXTURE) {
+      writeFileSync(path.resolve(process.env.DASHBOARD_FINALITY_FIXTURE), html);
+    }
   });
 });

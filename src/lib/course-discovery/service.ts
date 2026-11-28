@@ -6,6 +6,9 @@ import { prisma } from "@/lib/prisma";
 import { providerBookingMetadata } from "@/lib/courses/provider-booking-metadata";
 import { isSearchWindowActive } from "@/lib/automation/date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
+import { getCourseSetupDeadline, readCourseSetupStartedAt } from "@/lib/searches/course-setup-deadline";
+import { readSavedCourseSetupDeadline } from "@/lib/searches/course-setup-receipts";
+import { courseMonitoringPreferenceTarget } from "@/lib/searches/course-monitoring-target";
 import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 import { activeDiscoveryPilotSearchIds, isDiscoveryPilotSearch } from "./config";
 import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
@@ -33,6 +36,7 @@ import {
 export const DISCOVERY_LEASE_MS = 90_000;
 export const DISCOVERY_DEADLINE_MS = 15 * 60_000;
 export const DISCOVERY_MAX_ATTEMPTS = 2;
+const DISCOVERY_DEADLINE_SWEEP_LIMIT = 100;
 
 export type DiscoveryTarget = { courseId: string; offeringId?: string; kind: "OUTDOOR" | "SIMULATOR" };
 export type DiscoveryRequest = {
@@ -82,7 +86,7 @@ const offeringSelect = {
 const searchSelect = {
   id: true, date: true, startTime: true, endTime: true, players: true, mode: true,
   durationMinutes: true, status: true, scheduleVersion: true, userTimeZone: true,
-  createdAt: true, trafficClass: true, syntheticMultiCycle: true,
+  createdAt: true, setupStartedAt: true, trafficClass: true, syntheticMultiCycle: true,
   syntheticTestWindow: true, alertGeneration: true,
 } satisfies Prisma.TeeSearchSelect;
 type Tx = Prisma.TransactionClient;
@@ -177,12 +181,24 @@ function requestFor(source: Source, search: Search): DiscoveryRequest {
     ...(search.mode === "SIMULATOR" ? { durationMinutes: search.durationMinutes ?? 60 } : {}),
   }) };
 }
+async function demandSetupDeadline(tx: Tx, search: Search, source: Source, now: Date) {
+  const saved = await readSavedCourseSetupDeadline(tx, { searchId: search.id, courseId: source.course.id,
+    offeringId: source.offering?.id ?? null, startedAt: readCourseSetupStartedAt(search) });
+  if (saved) return saved;
+  const bookingCutoff = getCourseSetupDeadline(search, source.identity.timeZone);
+  const syntheticExpiry = getSyntheticMultiCycleExpiresAt(search, now);
+  return syntheticExpiry && syntheticExpiry < bookingCutoff ? syntheticExpiry : bookingCutoff;
+}
+function sameSetupIntent(previous: DiscoveryRequest, current: DiscoveryRequest) {
+  return previous.demand?.searchId === current.demand?.searchId &&
+    previous.durationPreference === current.durationPreference && canonical(previous.input) === canonical(current.input);
+}
 async function currentDemand(tx: Tx, source: Source, now: Date, searchId?: string) {
   const pilotIds = await activeDiscoveryPilotSearchIds(process.env, tx);
   const eligibleIds = searchId ? pilotIds.filter(id => id === searchId) : pilotIds;
   if (!eligibleIds.length) return null;
   const preferences = await tx.coursePreference.findMany({ where: {
-    courseId: source.course.id, offeringId: source.offering?.id ?? null,
+    ...courseMonitoringPreferenceTarget(source.target),
     teeSearchId: { in: eligibleIds }, teeSearch: { status: "ACTIVE" },
   }, select: { teeSearch: { select: searchSelect } }, orderBy: { teeSearch: { createdAt: "asc" } }, take: 100 });
   for (const { teeSearch } of preferences) {
@@ -238,25 +254,36 @@ export async function ensureDiscoveryJobInTransaction(tx: Tx, input: DiscoveryAd
     }
   }
   const key = targetKey(input);
+  const setupDeadlineAt = await demandSetupDeadline(tx, demand, source, now);
   const existing = await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: key } });
-  if (existing && existing.sourceFingerprint === source.sourceFingerprint && existing.baseRecipeId === source.activeRecipeId) return existing;
+  const sameSource = existing && existing.sourceFingerprint === source.sourceFingerprint && existing.baseRecipeId === source.activeRecipeId;
+  const existingRequest = existing?.request as DiscoveryRequest | undefined;
+  const supersededDemand = sameSource && existing.setupDeadlineAt && existingRequest?.demand?.searchId === demand.id &&
+    (existing.setupDeadlineAt.getTime() !== setupDeadlineAt.getTime() || !sameSetupIntent(existingRequest, request));
+  if (sameSource && !supersededDemand) return existing;
   if (existing) await tx.courseDiscoveryJob.update({ where: { id: existing.id }, data: {
     status: "CANCELLED", activeTargetKey: null, leaseToken: null, leaseExpiresAt: null,
-    outcome: "SOURCE_CHANGED", completedAt: now,
+    outcome: supersededDemand ? "DEMAND_CHANGED" : "SOURCE_CHANGED", completedAt: now,
   } });
   const prior = await tx.courseDiscoveryJob.findFirst({ where: { targetKey: key,
     sourceFingerprint: source.sourceFingerprint, baseRecipeId: source.activeRecipeId,
     status: { in: ["FAILED", "TIMED_OUT", "CANCELLED"] },
     AND: [
       { request: { path: ["demand", "searchId"], equals: demand.id } },
-      { request: { path: ["demand", "alertGeneration"], equals: demand.alertGeneration } },
+      { OR: [
+        { request: { path: ["demand", "alertGeneration"], equals: demand.alertGeneration } },
+        { setupDeadlineAt, request: { path: ["input"], equals: json(request.input) } },
+      ] },
     ],
   }, orderBy: { createdAt: "desc" } });
   // An ordinary scheduled check cannot turn an exhausted incident into a new
-  // first attempt. A new alert generation or changed source is required.
+  // first attempt. Delivery generations can change without changing setup.
   if (prior) return prior;
-  return tx.courseDiscoveryJob.create({ data: { targetKey: key, activeTargetKey: key, courseId: source.course.id,
-    offeringId: source.offering?.id, sourceFingerprint: source.sourceFingerprint, baseRecipeId: source.activeRecipeId, request: json(request) } });
+  return tx.courseDiscoveryJob.create({ data: { targetKey: key, courseId: source.course.id,
+    offeringId: source.offering?.id, sourceFingerprint: source.sourceFingerprint, baseRecipeId: source.activeRecipeId,
+    request: json(request), setupDeadlineAt,
+    ...(setupDeadlineAt <= now ? { status: "TIMED_OUT", outcome: "QUEUE_DEADLINE", completedAt: now } : { activeTargetKey: key }),
+  } });
 }
 
 /** The original coding owner may return its tested repair to the normal recipe
@@ -460,6 +487,47 @@ async function handoffLearningRecipeInTransaction(tx: Tx, input: OwnedLearningRe
       monitoringVerified: false as const, deliveryVerified: false as const, handoff };
 }
 
+export async function expireOverdueDiscoveryJobs() {
+  return transaction(async tx => {
+    const now = await databaseNow(tx);
+    const unpicked = {
+      status: "QUEUED", firstPickedUpAt: null,
+      OR: [
+        { setupDeadlineAt: { lte: now } },
+        { setupDeadlineAt: null, deadlineAt: null, createdAt: { lte: new Date(now.getTime() - DISCOVERY_DEADLINE_MS) } },
+      ],
+    } satisfies Prisma.CourseDiscoveryJobWhereInput;
+    const picked = {
+      status: { in: ["QUEUED", "RUNNING"] }, firstPickedUpAt: { not: null },
+      OR: [{ setupDeadlineAt: { lte: now } }, { deadlineAt: { lte: now } }],
+    } satisfies Prisma.CourseDiscoveryJobWhereInput;
+    const expired = await tx.courseDiscoveryJob.findMany({
+      where: { activeTargetKey: { not: null }, OR: [unpicked, picked] },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, firstPickedUpAt: true }, take: DISCOVERY_DEADLINE_SWEEP_LIMIT,
+    });
+    const deadlineCloseout = {
+      status: "TIMED_OUT", completedAt: now, activeTargetKey: null,
+      leaseToken: null, leaseExpiresAt: null,
+    } as const;
+    const unpickedIds = expired.filter(job => job.firstPickedUpAt === null).map(job => job.id);
+    const pickedIds = expired.filter(job => job.firstPickedUpAt !== null).map(job => job.id);
+    const queueTimedOut = unpickedIds.length ? (await tx.courseDiscoveryJob.updateMany({
+      where: { ...unpicked, id: { in: unpickedIds }, activeTargetKey: { not: null } },
+      data: { ...deadlineCloseout, outcome: "QUEUE_DEADLINE" },
+    })).count : 0;
+    const executionTimedOut = pickedIds.length ? (await tx.courseDiscoveryJob.updateMany({
+      where: { ...picked, id: { in: pickedIds }, activeTargetKey: { not: null } },
+      data: { ...deadlineCloseout, outcome: "DEADLINE" },
+    })).count : 0;
+    return { queueTimedOut, executionTimedOut };
+  });
+}
+
+function effectiveDiscoveryDeadline(job: { setupDeadlineAt: Date | null; deadlineAt: Date }) {
+  return job.setupDeadlineAt && job.setupDeadlineAt < job.deadlineAt ? job.setupDeadlineAt : job.deadlineAt;
+}
+
 export async function claimNextDiscoveryJob(workerId: string, runtimeVersion?: string) {
   z.string().min(3).max(100).regex(/^[a-zA-Z0-9._-]+$/u).parse(workerId);
   if (runtimeVersion !== undefined) z.string().regex(/^[a-f0-9]{40}$/u).parse(runtimeVersion);
@@ -475,6 +543,12 @@ export async function claimNextDiscoveryJob(workerId: string, runtimeVersion?: s
       const finish = async (status: "CANCELLED" | "TIMED_OUT" | "FAILED", outcome: string) => tx.courseDiscoveryJob.update({ where: { id: current.id }, data: {
         status, outcome, activeTargetKey: null, leaseToken: null, leaseExpiresAt: null, completedAt: now,
       } });
+      if (current.setupDeadlineAt && current.setupDeadlineAt <= now ||
+          !current.setupDeadlineAt && !current.firstPickedUpAt && !current.deadlineAt &&
+          current.createdAt.getTime() + DISCOVERY_DEADLINE_MS <= now.getTime()) {
+        await finish("TIMED_OUT", current.firstPickedUpAt ? "DEADLINE" : "QUEUE_DEADLINE");
+        continue;
+      }
       if (current.deadlineAt && current.deadlineAt <= now) { await finish("TIMED_OUT", "DEADLINE"); continue; }
       if (current.attempts >= DISCOVERY_MAX_ATTEMPTS) { await finish("FAILED", "ATTEMPTS_EXHAUSTED"); continue; }
       let source: Source;
@@ -483,8 +557,12 @@ export async function claimNextDiscoveryJob(workerId: string, runtimeVersion?: s
       if (source.sourceFingerprint !== current.sourceFingerprint || source.activeRecipeId !== current.baseRecipeId) { await finish("CANCELLED", "SOURCE_CHANGED"); continue; }
       const previousRequest = current.request as unknown as DiscoveryRequest;
       const originalDemandId = typeof previousRequest.demand?.searchId === "string" ? previousRequest.demand.searchId : undefined;
-      const demand = originalDemandId ? await currentDemand(tx, source, now, originalDemandId) ?? await currentDemand(tx, source, now) : await currentDemand(tx, source, now);
+      const originalDemand = originalDemandId ? await currentDemand(tx, source, now, originalDemandId) : null;
+      const demand = current.setupDeadlineAt ? originalDemand : originalDemand ?? await currentDemand(tx, source, now);
       if (!demand) { await finish("CANCELLED", "NO_ACTIVE_DEMAND"); continue; }
+      const request = requestFor(source, demand);
+      if (current.setupDeadlineAt && (current.setupDeadlineAt.getTime() !== (await demandSetupDeadline(tx, demand, source, now)).getTime() ||
+          !sameSetupIntent(previousRequest, request))) { await finish("CANCELLED", "DEMAND_CHANGED"); continue; }
       const ownership = await discoveryJobOwnership(tx, current, now);
       if (ownership.repairAuthorityLost) { await finish("CANCELLED", "REPAIR_AUTHORITY_CHANGED"); continue; }
       if (ownership.blocked) continue;
@@ -493,15 +571,15 @@ export async function claimNextDiscoveryJob(workerId: string, runtimeVersion?: s
       // runtime must leave this new-code recovery queued, without starting its clock.
       if (recovery && recovery.runtimeVersion !== runtimeVersion) continue;
       const deadlineAt = current.deadlineAt ?? new Date(now.getTime() + DISCOVERY_DEADLINE_MS);
-      const request = requestFor(source, demand);
-      // A retry can bind to an edited or replacement alert. Its old checkpoint
-      // and replay challenges describe the previous request, but its clock still applies.
+      const leaseDeadline = effectiveDiscoveryDeadline({ setupDeadlineAt: current.setupDeadlineAt, deadlineAt });
+      // Legacy jobs can rebind to replacement demand under their original
+      // pickup clock. For all jobs a changed request clears prior challenges.
       const requestChanged = canonical(current.request) !== canonical(request);
       const runtimeChanged = current.attempts > 0 && runtimeVersion !== undefined &&
         readLearningExecutionRuntime(current.result) !== runtimeVersion;
       return tx.courseDiscoveryJob.update({ where: { id: current.id }, data: {
         status: "RUNNING", attempts: { increment: 1 }, workerId, firstPickedUpAt: current.firstPickedUpAt ?? now,
-        deadlineAt, leaseToken: randomUUID(), leaseExpiresAt: new Date(Math.min(deadlineAt.getTime(), now.getTime() + DISCOVERY_LEASE_MS)),
+        deadlineAt, leaseToken: randomUUID(), leaseExpiresAt: new Date(Math.min(leaseDeadline.getTime(), now.getTime() + DISCOVERY_LEASE_MS)),
         request: json(request), outcome: null,
         ...(runtimeVersion ? { result: json({ ...(current.result && typeof current.result === "object" &&
           !Array.isArray(current.result) ? current.result : {}), executionRuntimeVersion: runtimeVersion }) } : {}),
@@ -521,11 +599,18 @@ async function owned(tx: Tx, jobId: string, leaseToken: string) {
   await tx.$queryRaw`SELECT "id" FROM "CourseDiscoveryJob" WHERE "id" = ${jobId} FOR UPDATE`;
   const now = await databaseNow(tx);
   const job = await tx.courseDiscoveryJob.findUnique({ where: { id: jobId } });
-  if (!job || job.status !== "RUNNING" || !job.activeTargetKey || job.leaseToken !== leaseToken || !job.leaseExpiresAt || job.leaseExpiresAt <= now || !job.deadlineAt || job.deadlineAt <= now) conflict();
+  if (!job || job.status !== "RUNNING" || !job.activeTargetKey || job.leaseToken !== leaseToken ||
+      !job.leaseExpiresAt || job.leaseExpiresAt <= now || !job.deadlineAt ||
+      effectiveDiscoveryDeadline({ setupDeadlineAt: job.setupDeadlineAt, deadlineAt: job.deadlineAt }) <= now) conflict();
   const source = await loadSource(tx, { courseId: job.courseId, offeringId: job.offeringId ?? undefined });
-  const claimedContext = (job.request as unknown as DiscoveryRequest).trustedContext;
+  const request = job.request as unknown as DiscoveryRequest;
+  const claimedContext = request.trustedContext;
   if (claimedContext !== undefined && !isCurrentTrustedContext(claimedContext, source.trustedContext)) conflict();
-  if (source.sourceFingerprint !== job.sourceFingerprint || source.activeRecipeId !== job.baseRecipeId || !await currentDemand(tx, source, now) ||
+  if (job.setupDeadlineAt && !request.demand) conflict();
+  const demand = await currentDemand(tx, source, now, job.setupDeadlineAt ? request.demand?.searchId : undefined);
+  if (source.sourceFingerprint !== job.sourceFingerprint || source.activeRecipeId !== job.baseRecipeId || !demand ||
+      job.setupDeadlineAt && (job.setupDeadlineAt.getTime() !== (await demandSetupDeadline(tx, demand, source, now)).getTime() ||
+        !sameSetupIntent(request, requestFor(source, demand))) ||
       (await discoveryJobOwnership(tx, job, now)).blocked) conflict();
   return { job, now, source };
 }
@@ -533,7 +618,8 @@ async function owned(tx: Tx, jobId: string, leaseToken: string) {
 export async function heartbeatDiscoveryJob(jobId: string, leaseToken: string) {
   return transaction(async tx => {
     const { job, now } = await owned(tx, jobId, leaseToken);
-    return tx.courseDiscoveryJob.update({ where: { id: job.id }, data: { leaseExpiresAt: new Date(Math.min(job.deadlineAt!.getTime(), now.getTime() + DISCOVERY_LEASE_MS)) } });
+    const deadline = effectiveDiscoveryDeadline({ setupDeadlineAt: job.setupDeadlineAt, deadlineAt: job.deadlineAt! });
+    return tx.courseDiscoveryJob.update({ where: { id: job.id }, data: { leaseExpiresAt: new Date(Math.min(deadline.getTime(), now.getTime() + DISCOVERY_LEASE_MS)) } });
   });
 }
 export async function checkpointDiscoveryJob(jobId: string, leaseToken: string, checkpoint: unknown) {
@@ -591,7 +677,7 @@ export async function currentDiscoveryEngineeringFailure(tx: Pick<Tx, "courseDis
   if (!search || !activeSearch(search, source, now) || search.alertGeneration !== request.demand.alertGeneration ||
       canonical(requestFor(source, search)) !== canonical(request)) return null;
   const preferences = await tx.coursePreference.findMany({ where: { teeSearchId: search.id,
-    courseId: job.courseId, offeringId: job.offeringId }, select: { courseId: true }, take: 2 });
+    ...courseMonitoringPreferenceTarget(job) }, select: { courseId: true }, take: 2 });
   if (preferences.length !== 1) return null;
   if (await tx.courseProbe.findFirst({ where: { teeSearchId: search.id, courseId: job.courseId, offeringId: job.offeringId,
     outcome: { in: ["MATCH_FOUND", "NO_MATCH"] }, observedAt: { gte: job.completedAt } }, select: { id: true } })) return null;

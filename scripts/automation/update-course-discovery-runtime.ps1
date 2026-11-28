@@ -132,6 +132,12 @@ try {
   $phase='VALIDATE_ACTIVATION'
   if($activation.enabled -ne $true -or $activation.workspacePath -ine $runtimeRoot -or $activation.model -cne 'gpt-6.1-sol' -or
      $activation.authentication -notlike '*ChatGPT*' -or $activation.runtimeMode -cne 'STAGEHAND_SOL'){throw 'ACTIVE_SOL_READER_SCOPE_REQUIRED'}
+  $phase='VALIDATE_MANAGED_CHECKOUT'
+  if(-not (Test-Path -LiteralPath (Join-Path $runtimeRoot '.git')) -or
+     -not (Test-Path -LiteralPath $wrapper -PathType Leaf) -or
+     -not (Test-Path -LiteralPath (Join-Path $runtimeRoot 'scripts\automation\course-discovery-supervisor.mjs') -PathType Leaf)){
+    throw 'MANAGED_RUNTIME_CHECKOUT_MISSING'
+  }
   $phase='VALIDATE_SOURCE'
   if((GitText $sourceRoot @('rev-parse','HEAD')) -cne $RuntimeVersion -or (GitText $sourceRoot @('status','--porcelain'))){throw 'CLEAN_COMMITTED_SOURCE_REQUIRED'}
   if((GitText $sourceRoot @('branch','--show-current')) -in @('main','')){throw 'OWNED_SOURCE_BRANCH_REQUIRED'}
@@ -206,7 +212,7 @@ try {
   # calls; stateChanged=false alone is not proof that no mutation occurred.
   $codes=@('ORIGINAL_NATIVE_OWNER_REQUIRED','EXPECTED_RUNNING_MANAGED_TASK_REQUIRED','MANAGED_TASK_ACTION_CHANGED',
     'MANAGED_TASK_PATHS_CHANGED','ACTIVE_SOL_READER_SCOPE_REQUIRED','CLEAN_COMMITTED_SOURCE_REQUIRED','OWNED_SOURCE_BRANCH_REQUIRED',
-    'CURRENT_PUBLISHED_RUNTIME_REQUIRED','RUNTIME_REPOSITORY_CHANGED','DIRTY_MANAGED_RUNTIME',
+    'CURRENT_PUBLISHED_RUNTIME_REQUIRED','RUNTIME_REPOSITORY_CHANGED','DIRTY_MANAGED_RUNTIME','MANAGED_RUNTIME_CHECKOUT_MISSING',
     'DEPENDENCY_SCHEMA_OR_INSTALLED_READER_ROLLOUT_REQUIRED','EXACT_RELEASE_PROOF_REQUIRED','RUNTIME_VALIDATION_FAILED',
     'NATIVE_DRAIN_PROTOCOL_BOOTSTRAP_REQUIRED','CURRENT_STAGEHAND_MODE_REQUIRED','SINGLE_MANAGED_SUPERVISOR_REQUIRED',
     'INVALID_DRAIN_CONTROL','DRAIN_CONTROL_CHANGED','RUNTIME_DRAIN_OR_STARTUP_NOT_PROVED','MANAGED_RUNTIME_CHANGED_DURING_DRAIN',

@@ -10,8 +10,29 @@ const metadata = {
   bookingBaseUrl:
     "https://sgnavigator.app/portal/gillette-ridge-golf-club/book"
 };
+const input = { courseId: "course-1", date: new Date("2026-07-30T00:00:00Z"), players: 2,
+  metadata: { ...metadata, bookingBaseUrl: `${metadata.bookingBaseUrl}/66` } };
 
 describe("Supreme Golf adapter", () => {
+  it("cannot verify tee-time availability from a grid shell", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response('<div data-testid="portal-book-grid">Loading</div>'));
+    await expect(fetchSupremeGolfTeeSheet(input, fetchImpl)).resolves.toMatchObject({ slots: [], targetDateStatus: "UNKNOWN" });
+  });
+
+  it("rejects a card that cannot establish availability or filtering", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      '<div data-testid="portal-book-grid"><button data-testid="portal-book-tee-time-card-09:12">Loading</button></div>',
+    ));
+    await expect(fetchSupremeGolfTeeSheet(input, fetchImpl)).rejects.toThrow("unverified tee-time card");
+  });
+
+  it("recognizes an empty result when confirmed cards exclude the requested party", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      '<div data-testid="portal-book-grid"><button data-testid="portal-book-tee-time-card-09:12">3-4 players</button></div>',
+    ));
+    await expect(fetchSupremeGolfTeeSheet(input, fetchImpl)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+  });
+
   it("validates only public SG Navigator booking routes", () => {
     expect(isSupremeGolfMetadata(metadata)).toBe(true);
     expect(isSupremeGolfMetadata({

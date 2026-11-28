@@ -8,6 +8,15 @@ const metadata = {
   bookingBaseUrl: "https://app.whoosh.io/patron/club/yale-golf-course"
 };
 
+const input = { courseId: "yale", date: new Date("2026-07-22T00:00:00Z"), players: 2, metadata };
+
+function exactAgenda(timeSlots: unknown) {
+  return whooshResponse({ facilities: { edges: [{ node: { type: "GOLF_COURSE",
+    publicBookingPermissionSet: { isFacilityVisible: true, isFacilityBookable: true },
+    agendas: { edges: [{ node: { date: "2026-07-22", timeSlots } }] },
+  } }] } });
+}
+
 function whooshResponse(overrides: Record<string, unknown> = {}) {
   return new Response(
     JSON.stringify({
@@ -124,6 +133,23 @@ function whooshResponse(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Whoosh adapter", () => {
+  it.each([undefined, null, {}, { edges: null }])("cannot verify a date agenda without explicit tee-time edges %#", async timeSlots => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(exactAgenda(timeSlots));
+    await expect(fetchWhooshTeeSheet(input, fetchImpl)).rejects.toThrow("complete tee-time connection");
+  });
+
+  it("recognizes intentional empty edges on the exact public date agenda", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(exactAgenda({ edges: [] }));
+    await expect(fetchWhooshTeeSheet(input, fetchImpl)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+  });
+
+  it.each([{}, { node: { id: "TimeSlot:wrong", dateTime: "2026-07-23 10:00:00", availability: "BLOCKED_BY_BOOKING" } },
+    { node: { id: "TimeSlot:incomplete", dateTime: "2026-07-22 10:00:00", availability: "AVAILABLE" } },
+  ])("rejects an unverified tee-time edge on an exact public date agenda %#", async edge => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(exactAgenda({ edges: [edge] }));
+    await expect(fetchWhooshTeeSheet(input, fetchImpl)).rejects.toThrow("unverified tee-time row");
+  });
+
   it("accepts only exact public club landing metadata", () => {
     expect(isWhooshMetadata(metadata)).toBe(true);
     expect(

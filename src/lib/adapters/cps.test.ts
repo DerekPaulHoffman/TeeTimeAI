@@ -359,7 +359,7 @@ describe("fetchCpsSlots", () => {
       })
     ).resolves.toEqual({
       slots: [],
-      targetDateStatus: "UNKNOWN",
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: null
     });
     expect(fetchMock).toHaveBeenCalledTimes(4);
@@ -891,7 +891,7 @@ describe("fetchCpsSlots", () => {
       fetchCpsTeeSheet(persistedCpsInput({ holes: [18, 9] }))
     ).resolves.toEqual({
       slots: [],
-      targetDateStatus: "UNKNOWN",
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: null
     });
     expect(
@@ -969,6 +969,36 @@ describe("fetchCpsSlots", () => {
         input.toString().endsWith("/RegisterTransactionId")
       )
     ).toHaveLength(1);
+  });
+
+  it("uses a validated empty participant list without borrowing a configured capacity", async () => {
+    mockPersistedCpsFetch(() => jsonResponse({ transactionId: "tx", content: [{
+      teeSheetId: 500, startTime: "2026-07-18T09:10:00", availableParticipantNo: [], maxPlayer: 4,
+    }] }));
+    await expect(fetchCpsTeeSheet(persistedCpsInput({ holes: [18] })))
+      .resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+  });
+
+  it("retains the verified older capacity field when the participant list is absent", async () => {
+    mockPersistedCpsFetch(() => jsonResponse([{ teeSheetId: 501, startTime: "2026-07-18 09:10:00", maxPlayer: 4 }]));
+    await expect(fetchCpsTeeSheet(persistedCpsInput({ holes: [18] })))
+      .resolves.toMatchObject({ targetDateStatus: "OPEN", slots: [{ startsAt: "2026-07-18T09:10", availableSpots: 4 }] });
+  });
+
+  it.each([
+    { content: [], isSuccess: false },
+    { content: [], error: "busy" },
+    { content: [], data: [{ teeSheetId: 501 }] },
+    [null],
+    [{ teeSheetId: 501, availableParticipantNo: [1, 2] }],
+    [{ teeSheetId: 501, startTime: "2026-07-19T09:10:00", availableParticipantNo: [1, 2] }],
+    [{ teeSheetId: 501, startTime: "2026-07-18T09:10:00", availableParticipantNo: "invalid" }],
+    [{ teeSheetId: 501, startTime: "2026-07-18T09:10:00", courseId: 9999, availableParticipantNo: [] }],
+    [{ teeSheetId: 501, startTime: "2026-07-18T09:10:00", availableParticipantNo: [1, 2] }, {}],
+  ].map(payload => [payload] as const))("rejects incomplete or contradictory tee-sheet content without reporting an empty day (%j)", async payload => {
+    mockPersistedCpsFetch(() => jsonResponse(payload));
+    await expect(fetchCpsTeeSheet(persistedCpsInput({ holes: [18] })))
+      .rejects.toThrow("CPS tee times returned an invalid response schema");
   });
 
   it.each([

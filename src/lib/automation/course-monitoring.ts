@@ -32,6 +32,8 @@ import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { prisma } from "@/lib/prisma";
 import { assertCurrentSearchCheckWrite } from "@/lib/automation/search-check-write-context";
 import { isGenericCourseName } from "@/lib/places/course-identity";
+import { courseMonitoringPreferenceTarget } from "@/lib/searches/course-monitoring-target";
+import { readCourseSetupStartedAt } from "@/lib/searches/course-setup-deadline";
 
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { appendCourseSupportLineage } from "./course-support-lineage";
@@ -65,7 +67,7 @@ import {
 import { MONITORING_STRATEGY_ACTIONS } from "./monitoring-strategy";
 import { evaluateMonitoringGate } from "./policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
-import { getCourseLocalDateStorageBoundary } from "./date-boundary";
+import { getCourseLocalDateStorageBoundary, isSearchWindowActive } from "./date-boundary";
 import {
   COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS,
   canonicalizeCourseProviderExecutionEvidence,
@@ -3843,8 +3845,141 @@ export async function revalidateHumanReviewCoursesForDeployment(input: {
   };
 }
 
+/** Called under the course writer lock after the original owner's closeout proof. */
+export async function parkCourseSupportIncidentAfterEndedDemand(
+  transaction: Prisma.TransactionClient,
+  input: { incidentId: string; courseId: string; cycle: number; batchId: string; now: Date },
+) {
+  const [incident, status] = await Promise.all([
+    transaction.courseSupportIncident.findFirst({
+      where: {
+        id: input.incidentId, courseId: input.courseId, cycle: input.cycle,
+        activeBatchId: input.batchId, status: { in: ["AUTO_INVESTIGATING", "NEEDS_HUMAN"] },
+        resolution: null, resolvedAt: null, decisionAt: null,
+      },
+      select: { status: true, revision: true, failureFingerprint: true },
+    }),
+    transaction.courseMonitoringStatus.findUnique({
+      where: { courseId: input.courseId },
+      select: { state: true, revision: true },
+    }),
+  ]);
+  if (!incident || !status ||
+      !["UNKNOWN", "DEGRADED_RETRYING", "AUTO_INVESTIGATING", "ENGINEERING_VERIFICATION_NEEDED"].includes(status.state)) return false;
+
+  const parked = await transaction.courseSupportIncident.updateMany({
+    where: {
+      id: input.incidentId, revision: incident.revision, cycle: input.cycle,
+      status: incident.status, activeBatchId: input.batchId,
+    },
+    data: {
+      status: "NEEDS_HUMAN", humanReviewReason: "AUTOMATION_STALLED", activeBatchId: null,
+      activeRealSearchCount: 0, earliestTargetDate: null,
+      escalatedAt: input.now, nextReminderAt: null, nextAttemptAt: null,
+      nextAction: "Wait for a new saved alert or materially changed provider evidence before starting another repair.",
+      revision: { increment: 1 },
+    },
+  });
+  if (parked.count !== 1) return false;
+  const monitoringParked = await transaction.courseMonitoringStatus.updateMany({
+    where: { courseId: input.courseId, revision: status.revision, state: status.state },
+    data: {
+      state: "ENGINEERING_VERIFICATION_NEEDED", stateChangedAt: input.now,
+      nextAutomaticAttemptAt: null, revalidationRequestedAt: null, revision: { increment: 1 },
+    },
+  });
+  if (monitoringParked.count !== 1) throw new Error("Monitoring changed while ended demand was closed.");
+  await appendMonitoringEvent(transaction, {
+    courseId: input.courseId, incidentId: input.incidentId, eventType: "HUMAN_REVIEW_REQUESTED",
+    source: "COURSE_SUPPORT_RESPONDER", fromState: status.state, toState: "ENGINEERING_VERIFICATION_NEEDED",
+    failureFingerprint: incident.failureFingerprint, occurredAt: input.now,
+    message: "The original alert completed without a verified repair result. No active alert remains for this course.",
+    idempotencyKey: `ended-demand:${input.batchId}:${input.cycle}`,
+    audit: {
+      reason: "ORIGINAL_DEMAND_ENDED", batchId: input.batchId, cycle: input.cycle,
+      activeDemand: false, customerState: "NEEDS_HUMAN_REVIEW", automationStalled: true,
+      parkedUntilMaterialChange: true, customerDataIncluded: false,
+    },
+  });
+  return true;
+}
+
+async function reopenCourseSupportForNewDemand(
+  transaction: Prisma.TransactionClient,
+  input: {
+    incident: DeadlineIncidentSnapshot & { decisionAt: Date | null }; status: DeadlineMonitoringStatusSnapshot;
+    courseTimeZone: string; searchId: string; parkedAt: Date; now: Date;
+  },
+) {
+  const { incident, status } = input;
+  if (incident.activeBatchId || incident.decisionAt || incident.resolvedAt || incident.resolution) return false;
+  const preferenceScope = courseMonitoringPreferenceTarget({ courseId: incident.courseId });
+  const search = await transaction.teeSearch.findFirst({
+    where: {
+      id: input.searchId, status: "ACTIVE", mode: "OUTDOOR",
+      trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+      preferences: { some: preferenceScope },
+    },
+    select: {
+      id: true, createdAt: true, setupStartedAt: true, date: true, endTime: true,
+      preferences: { where: preferenceScope, take: 1, select: { id: true, offeringId: true } },
+    },
+  });
+  const preference = search?.preferences[0];
+  if (!search || !preference) return false;
+  const startedAt = readCourseSetupStartedAt(search);
+  if (startedAt <= input.parkedAt || startedAt > input.now || !isSearchWindowActive({
+    date: search.date, endTime: search.endTime, courseTimeZones: [input.courseTimeZone],
+    fallbackTimeZone: input.courseTimeZone, now: input.now,
+  })) return false;
+  const receipt = await transaction.courseSetupReceipt.findFirst({
+    where: {
+      preferenceId: preference.id, courseId: incident.courseId, offeringId: preference.offeringId, startedAt, legacy: false,
+      OR: [{ outcome: null }, { outcome: "UNCONFIRMED" }],
+    },
+    select: { id: true },
+  });
+  if (!receipt) return false;
+
+  const incidentUpdated = await transaction.courseSupportIncident.updateMany({
+    where: {
+      id: incident.id, cycle: incident.cycle, revision: incident.revision,
+      status: "NEEDS_HUMAN", activeBatchId: null, humanReviewReason: "AUTOMATION_STALLED", nextAttemptAt: null,
+    },
+    data: {
+      cycle: { increment: 1 }, status: "AUTO_INVESTIGATING", humanReviewReason: null,
+      firstAffectedSearchId: search.id, firstSeenAt: startedAt, lastSeenAt: input.now,
+      escalatedAt: null, nextReminderAt: null, nextAttemptAt: input.now,
+      escalationDeadlineAt: getCourseMonitoringEscalationDeadline(startedAt, 1),
+      ownerNotifiedAt: null, escalationNotifiedAt: null, confirmedAt: null, lastAttemptAt: null, attemptCount: 0,
+      engineeringOnly: false, activeRealSearchCount: 1, earliestTargetDate: search.date,
+      nextAction: "Check the current saved request with the bounded public-reader playbook.",
+      revision: { increment: 1 },
+    },
+  });
+  if (incidentUpdated.count !== 1) return false;
+  const monitoringUpdated = await transaction.courseMonitoringStatus.updateMany({
+    where: { courseId: incident.courseId, revision: status.revision, state: status.state },
+    data: {
+      state: "AUTO_INVESTIGATING", stateChangedAt: input.now, firstDegradedAt: startedAt,
+      nextAutomaticAttemptAt: input.now, revalidationRequestedAt: null, revision: { increment: 1 },
+    },
+  });
+  if (monitoringUpdated.count !== 1) throw new Error("Monitoring changed while fresh course demand was opened.");
+  await appendMonitoringEvent(transaction, {
+    courseId: incident.courseId, incidentId: incident.id, eventType: "REVALIDATION_REQUESTED",
+    source: "SEARCH_WORKFLOW", fromState: status.state, toState: "AUTO_INVESTIGATING",
+    failureFingerprint: incident.failureFingerprint, occurredAt: input.now,
+    message: "A newly saved, still-open course request started a fresh repair cycle.",
+    idempotencyKey: `fresh-demand:${receipt.id}`,
+    audit: { reason: "NEW_SAVED_DEMAND", priorCycle: incident.cycle, cycle: incident.cycle + 1, customerDataIncluded: false },
+  });
+  return true;
+}
+
 export async function reconcileCourseMonitoringDeadlines(input: {
   courseIds?: string[];
+  demandSearchId?: string;
   now?: Date;
   source?: Extract<
     CourseMonitoringEventSource,
@@ -3926,6 +4061,7 @@ export async function reconcileCourseMonitoringDeadlines(input: {
   for (const candidate of candidates) {
     const outcome = await reconcileCourseMonitoringDeadline({
       courseId: candidate.courseId,
+      demandSearchId: input.demandSearchId,
       now,
       source: input.source ?? "RECOVERY_CRON",
     });
@@ -3962,6 +4098,7 @@ export async function reconcileCourseMonitoringDeadlines(input: {
 
 export async function reconcileCourseMonitoringDeadline(input: {
   courseId: string;
+  demandSearchId?: string;
   now: Date;
   source: Extract<
     CourseMonitoringEventSource,
@@ -4002,6 +4139,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
                 heartbeatAt: true,
                 completedAt: true,
                 deployedAt: true,
+                verificationRuntimeHold: true,
                 recheckDispatchKey: true,
                 recheckDispatchStartedAt: true,
                 recheckDispatchedAt: true,
@@ -4346,6 +4484,9 @@ export async function reconcileCourseMonitoringDeadline(input: {
         incident.escalationDeadlineAt <= input.now,
       );
       const activeBatch = incident.activeBatch;
+      if (activeBatch?.verificationRuntimeHold != null && activeBatch.status === "VERIFYING" && activeBatch.completedAt === null) {
+        return { outcome: "OWNED" as const, incidentId: incident.id };
+      }
       const liveBatchOwner = Boolean(
         activeBatch &&
         ACTIVE_COURSE_SUPPORT_BATCH_STATUSES.has(activeBatch.status) &&
@@ -4637,6 +4778,21 @@ export async function reconcileCourseMonitoringDeadline(input: {
         status.state === "ENGINEERING_VERIFICATION_NEEDED" &&
         status.nextAutomaticAttemptAt === null &&
         status.revalidationRequestedAt === null;
+      if (parkedWithoutNewMaterial && durableMaterialChangeParking &&
+          asMonitoringJsonRecord(humanReviewEndpointEvent?.audit).reason === "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED") {
+        return { outcome: "RETAINED_PARKED" as const, incidentId: incident.id };
+      }
+      if (parkedWithoutNewMaterial && durableMaterialChangeParking &&
+          humanReviewEndpointEvent?.occurredAt &&
+          asMonitoringJsonRecord(humanReviewEndpointEvent.audit).reason === "ORIGINAL_DEMAND_ENDED") {
+        const resumed = input.source === "SEARCH_WORKFLOW" && input.demandSearchId
+          ? await reopenCourseSupportForNewDemand(transaction, {
+              incident, status, courseTimeZone: course.timeZone, searchId: input.demandSearchId,
+              parkedAt: humanReviewEndpointEvent.occurredAt, now: input.now,
+            })
+          : false;
+        return { outcome: resumed ? "RETRYING" as const : "RETAINED_PARKED" as const, incidentId: incident.id };
+      }
       if (
         parkedWithoutNewMaterial &&
         durableAutomationStalledEndpoint &&

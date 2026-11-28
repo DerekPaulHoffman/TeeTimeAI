@@ -50,15 +50,18 @@ import {
   type CurrentMatchSearchSettings,
   type CurrentMatchSettings,
 } from "@/lib/searches/current-match-settings";
-import { projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
+import { getCourseSetupProbe, projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
+import { getCourseSetupDeadline, readCourseSetupStartedAt } from "@/lib/searches/course-setup-deadline";
+import { registerCourseSetupReceipts } from "@/lib/searches/course-setup-receipts";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
+import { readSavedSimulatorBookingOpening } from "@/lib/simulators/booking-window";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
 import { assertSimulatorSessionFitsWindow } from "@/lib/searches/simulator-window";
 import { DEFAULT_SIMULATOR_DURATION_MINUTES } from "@/lib/searches/search-mode";
 import { getSimulatorVenueForDemand } from "@/lib/places/simulator-google";
 import type { CourseCandidate } from "@/lib/places/google";
 import { enrollDiscoveryPilotInTransaction } from "@/lib/course-discovery/enrollment";
-import { dashboardDiscoveryJobSelect, getDashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
+import { dashboardDiscoveryJobSelect, getDashboardDiscoveryOffering, getDashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
 import { readSharedFacilityScope } from "@/lib/courses/shared-facility-scope";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
@@ -71,6 +74,16 @@ function runCustomerProjectionTransaction<T>(
   return prisma.$transaction(worker, {
     isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
   });
+}
+
+async function readSearchSaveTime(transaction: Prisma.TransactionClient) {
+  const [clock] = await transaction.$queryRaw<Array<{ savedAt: Date }>>(
+    Prisma.sql`SELECT statement_timestamp() AS "savedAt"`,
+  );
+  if (!(clock?.savedAt instanceof Date) || !Number.isFinite(clock.savedAt.getTime())) {
+    throw new Error("The search save database clock is unavailable.");
+  }
+  return clock.savedAt;
 }
 
 export type CoursePreferenceRankUpdateInput = {
@@ -139,9 +152,12 @@ export async function createTeeSearchForUser(
       }
     }
 
+    const savedAt = await readSearchSaveTime(transaction);
     const created = await transaction.teeSearch.create({
       data: {
         userId,
+        createdAt: savedAt,
+        setupStartedAt: savedAt,
         date: parseLocalDate(input.date),
         startTime: input.startTime,
         endTime: input.endTime,
@@ -159,6 +175,7 @@ export async function createTeeSearchForUser(
       },
       include: searchInclude,
     });
+    await registerCourseSetupReceipts(transaction, created);
     await enrollDiscoveryPilotInTransaction(transaction, created);
     await enqueueOperatorNotification(transaction, created);
     return created;
@@ -309,9 +326,12 @@ async function createSimulatorTeeSearchForUser(
     assertSimulatorSessionFitsWindow({ date: input.date, startTime: input.startTime,
       endTime: input.endTime, durationMinutes,
       timeZones: currentOfferings.map((offering) => offering.course.timeZone) });
+    const savedAt = await readSearchSaveTime(transaction);
     const created = await transaction.teeSearch.create({
       data: {
         userId,
+        createdAt: savedAt,
+        setupStartedAt: savedAt,
         mode: "SIMULATOR",
         durationMinutes,
         date: parseLocalDate(input.date),
@@ -338,6 +358,7 @@ async function createSimulatorTeeSearchForUser(
       },
       include: searchInclude,
     });
+    await registerCourseSetupReceipts(transaction, created);
     await enrollDiscoveryPilotInTransaction(transaction, created);
     await enqueueOperatorNotification(transaction, created);
     return created;
@@ -736,19 +757,30 @@ export async function listTeeSearchesForUser(userId: string) {
         matchCourseIds,
       );
 
-    const latestProbeIds = await transaction.$queryRaw<Array<{ id: string }>>(
+    const probeSnapshot = await transaction.$queryRaw<Array<{ id: string | null; availabilityObservedAt: Date | null }>>(
       Prisma.sql`
-        SELECT DISTINCT ON ("teeSearchId", "courseId") id
-        FROM "CourseProbe"
-        WHERE "teeSearchId" IN (${Prisma.join(searches.map((search) => search.id))})
-        ORDER BY "teeSearchId", "courseId", "observedAt" DESC, id DESC
+        SELECT NULL::text AS id, statement_timestamp() AS "availabilityObservedAt"
+        UNION ALL
+        SELECT latest.id, NULL::timestamptz
+        FROM (
+          SELECT DISTINCT ON ("teeSearchId", "courseId") id
+          FROM "CourseProbe"
+          WHERE "teeSearchId" IN (${Prisma.join(searches.map((search) => search.id))})
+          ORDER BY "teeSearchId", "courseId", "observedAt" DESC, id DESC
+        ) AS latest
       `,
     );
+    // The clock row is present even when this snapshot contains no probes.
+    const availabilityObservedAt = probeSnapshot.find(row => row.id === null)?.availabilityObservedAt;
+    if (!(availabilityObservedAt instanceof Date) || !Number.isFinite(availabilityObservedAt.getTime())) {
+      throw new Error("The search availability database clock is unavailable.");
+    }
+    const latestProbeIds = probeSnapshot.map(row => row.id).filter(id => id !== null);
     const latestProbes =
       latestProbeIds.length === 0
         ? []
         : await transaction.courseProbe.findMany({
-            where: { id: { in: latestProbeIds.map((probe) => probe.id) } },
+            where: { id: { in: latestProbeIds } },
             orderBy: { observedAt: "desc" },
             include: { course: true },
           });
@@ -768,10 +800,12 @@ export async function listTeeSearchesForUser(userId: string) {
     const discoveryJobs = new Map<string,
       Prisma.CourseDiscoveryJobGetPayload<{ select: typeof dashboardDiscoveryJobSelect }> | null>();
     await Promise.all(discoveryTargets.map(async ({ search, preference }) => {
+      const offering = getDashboardDiscoveryOffering(search.mode, preference.courseId, preference.offering ?? null);
+      if (offering === undefined || (preference.offering?.id ?? null) !== (preference.offeringId ?? null)) return;
       const job = await transaction.courseDiscoveryJob.findFirst({
         where: {
-          targetKey: preference.offeringId ? `offering:${preference.offeringId}` : `course:${preference.courseId}`,
-          courseId: preference.courseId, offeringId: preference.offeringId,
+          targetKey: offering ? `offering:${offering.id}` : `course:${preference.courseId}`,
+          courseId: preference.courseId, offeringId: offering?.id ?? null,
           AND: [
             { request: { path: ["demand", "searchId"], equals: search.id } },
             { request: { path: ["demand", "alertGeneration"], equals: search.alertGeneration } },
@@ -784,21 +818,39 @@ export async function listTeeSearchesForUser(userId: string) {
     }));
 
     return searches.map((search) => {
+      const probes = probesBySearch.get(search.id) ?? [];
       const current = projectCurrentCustomerMatches(
-        projectCurrentCheckEvidence({
-          ...search,
-          probes: probesBySearch.get(search.id) ?? [],
-        }),
+        projectCurrentCheckEvidence({ ...search, probes }, availabilityObservedAt),
         completedLocalReaderSources,
         providerObservationFences,
+        availabilityObservedAt,
       );
-      return { ...current, preferences: current.preferences.map(preference => ({
-        ...preference,
-        discoveryStatus: getDashboardDiscoveryStatus(current, preference,
-          discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null,
-          current.probes.find(probe => probe.courseId === preference.courseId &&
-            (current.mode !== "SIMULATOR" || probe.offeringId === preference.offeringId))),
-      })) };
+      return { ...current, availabilityObservedAt, preferences: current.preferences.map(preference => {
+        const { setupReceipts, ...visiblePreference } = preference;
+        const setupReceipt = setupReceipts?.find(receipt =>
+          receipt.startedAt.getTime() === readCourseSetupStartedAt(search).getTime() &&
+          receipt.courseId === preference.courseId && receipt.offeringId === preference.offeringId);
+        const matchesTarget = (probe: typeof probes[number]) => probe.courseId === preference.courseId &&
+          (current.mode !== "SIMULATOR" || (probe.offeringId !== null && probe.offeringId === preference.offeringId));
+        const currentProbe = current.probes.find(matchesTarget);
+        const setupProbe = search.status === "ACTIVE" && !currentProbe
+          ? getCourseSetupProbe(search, probes.find(matchesTarget), availabilityObservedAt) : undefined;
+        const setupDeadlineAt = setupReceipt?.deadlineAt ?? getCourseSetupDeadline(search, preference.course.timeZone);
+        return {
+          ...visiblePreference,
+          setupDeadlineAt,
+          setupDeadlineReached: search.status === "ACTIVE" && (setupReceipt?.outcome === "UNCONFIRMED" ||
+            setupReceipt?.outcome === "LEGACY_UNVERIFIED" || setupDeadlineAt <= availabilityObservedAt),
+          setupBookingOpensAt: current.mode === "SIMULATOR" && setupReceipt && preference.offering
+            ? readSavedSimulatorBookingOpening({ receipt: setupReceipt, offering: preference.offering,
+                targetDate: search.date.toISOString().slice(0, 10), timeZone: preference.course.timeZone })
+            : undefined,
+          setupProbe,
+          discoveryStatus: getDashboardDiscoveryStatus(current, preference,
+            discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null,
+            currentProbe, availabilityObservedAt),
+        };
+      }) };
     });
   });
 }
@@ -906,49 +958,14 @@ export async function updateTeeSearchForUser(
     );
   }
 
-  const buildTeeSearchData = (lockedSearch: {
-    status: string;
-    alertGeneration: number;
-  }) => {
-    const nextStatus = input.status ?? lockedSearch.status;
-    const nextAlertGeneration = lockedSearch.alertGeneration + 1;
-    return {
-      scheduleVersion: { increment: 1 } as const,
-      alertGeneration: { increment: 1 } as const,
-      workflowRunId: null,
-      checkLeaseToken: null,
-      checkLeaseExpiresAt: null,
-      recheckRequestedAt: null,
-      ...(nextStatus === "ACTIVE"
-        ? {
-            statusEmailSentAt: null,
-            statusEmailSnapshot: buildAlertGenerationStartMarker({
-              alertGeneration: nextAlertGeneration,
-            }),
-          }
-        : {}),
-      ...(input.date ? { date: parseLocalDate(input.date) } : {}),
-      ...(input.startTime ? { startTime: input.startTime } : {}),
-      ...(input.endTime ? { endTime: input.endTime } : {}),
-      ...(input.userTimeZone
-        ? { userTimeZone: normalizeTimeZone(input.userTimeZone) }
-        : {}),
-      ...(input.players ? { players: input.players } : {}),
-      ...(input.durationMinutes !== undefined ? { durationMinutes: input.durationMinutes } : {}),
-      ...(input.requestedLayoutHoles !== undefined
-        ? { requestedLayoutHoles: input.requestedLayoutHoles }
-        : {}),
-      ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
-      ...(input.alertEmail
-        ? { alertEmail: normalizeAlertEmail(input.alertEmail) }
-        : {}),
-      ...(input.additionalEmails
-        ? {
-            additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
-          }
-        : {}),
-      ...(input.status ? { status: input.status } : {}),
-    };
+  const updatedDate = input.date ? parseLocalDate(input.date) : undefined;
+  const availabilityUpdates = {
+    ...(updatedDate ? { date: updatedDate } : {}),
+    ...(input.startTime ? { startTime: input.startTime } : {}),
+    ...(input.endTime ? { endTime: input.endTime } : {}),
+    ...(input.players ? { players: input.players } : {}),
+    ...(input.durationMinutes !== undefined ? { durationMinutes: input.durationMinutes } : {}),
+    ...(input.requestedLayoutHoles !== undefined ? { requestedLayoutHoles: input.requestedLayoutHoles } : {}),
   };
   const coursePreferences = normalizeCoursePreferenceRankUpdates(
     input.coursePreferences,
@@ -985,26 +1002,6 @@ export async function updateTeeSearchForUser(
       durationMinutes, timeZones: current.preferences.flatMap(({ offering }) => offering ? [offering.course.timeZone] : []) });
   }
 
-  if (coursePreferences.length === 0) {
-    return runCustomerProjectionTransaction(async (transaction) => {
-      const lockedSearch = await lockSearchForAlertMutation(transaction, {
-        searchId,
-        userId,
-      });
-      await assertCurrentSimulatorIntent(transaction);
-      await assertUpdatedSearchDate(transaction, userId, searchId, input.date);
-      const updatedSearch = await transaction.teeSearch.update({
-        where: {
-          id: searchId,
-          userId,
-        },
-        data: buildTeeSearchData(lockedSearch),
-        include: searchInclude,
-      });
-      return projectCurrentCustomerSearch(transaction, updatedSearch);
-    });
-  }
-
   return runCustomerProjectionTransaction(async (transaction) => {
     const lockedSearch = await lockSearchForAlertMutation(transaction, {
       searchId,
@@ -1012,6 +1009,22 @@ export async function updateTeeSearchForUser(
     });
     await assertCurrentSimulatorIntent(transaction);
     await assertUpdatedSearchDate(transaction, userId, searchId, input.date);
+    // The dashboard sends the full form even for an alert-only edit. Compare
+    // the persisted criteria under the same lock that fences email delivery.
+    const currentCriteria = Object.keys(availabilityUpdates).length === 0 && lockedSearch.alertGeneration !== 0 ? null
+      : await transaction.teeSearch.findUniqueOrThrow({
+        where: { id: searchId, userId },
+        select: { date: true, startTime: true, endTime: true, players: true, durationMinutes: true, requestedLayoutHoles: true,
+          setupStartedAt: true, createdAt: true },
+      });
+    const availabilityChanged = currentCriteria && (
+      (updatedDate !== undefined && input.date !== currentCriteria.date.toISOString().slice(0, 10)) ||
+      (availabilityUpdates.startTime !== undefined && availabilityUpdates.startTime !== currentCriteria.startTime) ||
+      (availabilityUpdates.endTime !== undefined && availabilityUpdates.endTime !== currentCriteria.endTime) ||
+      (availabilityUpdates.players !== undefined && availabilityUpdates.players !== currentCriteria.players) ||
+      (availabilityUpdates.durationMinutes !== undefined && availabilityUpdates.durationMinutes !== currentCriteria.durationMinutes) ||
+      (availabilityUpdates.requestedLayoutHoles !== undefined && availabilityUpdates.requestedLayoutHoles !== currentCriteria.requestedLayoutHoles)
+    );
     for (const [index, preference] of coursePreferences.entries()) {
       await transaction.coursePreference.updateMany({
         where: {
@@ -1030,14 +1043,45 @@ export async function updateTeeSearchForUser(
         data: { rank: preference.rank },
       });
     }
+    const savedAt = await readSearchSaveTime(transaction);
+    const setupStartedAt = availabilityChanged && currentCriteria
+      // Receipt identity is unique per preference and millisecond. Keep history ordered.
+      ? new Date(Math.max(savedAt.getTime(), readCourseSetupStartedAt(currentCriteria).getTime() + 1))
+      : lockedSearch.alertGeneration === 0 && !currentCriteria?.setupStartedAt ? currentCriteria?.createdAt : undefined;
     const updatedSearch = await transaction.teeSearch.update({
       where: {
         id: searchId,
         userId,
       },
-      data: buildTeeSearchData(lockedSearch),
+      data: {
+        ...availabilityUpdates,
+        ...(setupStartedAt ? { setupStartedAt } : {}),
+        scheduleVersion: { increment: 1 },
+        alertGeneration: { increment: 1 },
+        workflowRunId: null,
+        checkLeaseToken: null,
+        checkLeaseExpiresAt: null,
+        recheckRequestedAt: null,
+        ...((input.status ?? lockedSearch.status) === "ACTIVE"
+          ? {
+              statusEmailSentAt: null,
+              statusEmailSnapshot: buildAlertGenerationStartMarker({
+                alertGeneration: lockedSearch.alertGeneration + 1,
+                generationStartedAt: savedAt,
+              }),
+            }
+          : {}),
+        ...(input.userTimeZone ? { userTimeZone: normalizeTimeZone(input.userTimeZone) } : {}),
+        ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
+        ...(input.alertEmail ? { alertEmail: normalizeAlertEmail(input.alertEmail) } : {}),
+        ...(input.additionalEmails ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) } : {}),
+        ...(input.status ? { status: input.status } : {}),
+      },
       include: searchInclude,
     });
+    if (availabilityChanged) {
+      await registerCourseSetupReceipts(transaction, updatedSearch, { supersedes: true });
+    }
     return projectCurrentCustomerSearch(transaction, updatedSearch);
   });
 }
@@ -1144,6 +1188,7 @@ function projectCurrentCustomerMatches<
     string,
     CourseProviderObservationFence
   >,
+  now = new Date(),
 ) {
   return {
     ...hideInternalGenerationMarker(search),
@@ -1156,7 +1201,7 @@ function projectCurrentCustomerMatches<
         if (!match.offeringId || !match.endsAt || !match.bookingUrl || !match.lastConfirmedAt ||
           !preference || !generationStartedAt || match.lastConfirmedAt < generationStartedAt ||
           !isCurrentSimulatorMatch({ ...match, offeringId: match.offeringId, endsAt: match.endsAt, bookingUrl: match.bookingUrl,
-            lastConfirmedAt: match.lastConfirmedAt, capacity: match.capacity ?? null }, new Date())) return [];
+            lastConfirmedAt: match.lastConfirmedAt, capacity: match.capacity ?? null }, now)) return [];
         const matching = filterSimulatorSessionsForSearch({ date: search.date.toISOString().slice(0, 10), startTime: search.startTime,
           endTime: search.endTime, players: search.players, durationMinutes: search.durationMinutes ?? null,
           preferredOfferings: [{ offeringId: match.offeringId, rank: 1 }] }, [{ offeringId: match.offeringId, sourceId: "projection",
@@ -1377,6 +1422,11 @@ const searchListInclude = {
   preferences: {
     orderBy: { rank: "asc" },
     include: {
+      setupReceipts: {
+        orderBy: { startedAt: "desc" }, take: 1,
+        select: { courseId: true, offeringId: true, startedAt: true, deadlineAt: true, outcome: true,
+          legacy: true, closedAt: true, evidenceProbeId: true, evidenceObservedAt: true, request: true },
+      },
       offering: true,
       course: {
         include: {

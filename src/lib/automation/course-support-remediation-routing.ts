@@ -76,6 +76,7 @@ export type CourseSupportRemediationRoutingReason =
   | "UNCHANGED_ATTEMPT_ALREADY_RECORDED"
   | "STARTED_LOCAL_READER_CONTINUATION"
   | "OPERATIONAL_RETRY_BUDGET_EXHAUSTED"
+  | "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED"
   | "MATERIAL_CHANGE_REOPENED";
 
 export type CourseSupportRemediationRoutingInput = MonitoringStrategyInput & {

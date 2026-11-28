@@ -6,6 +6,17 @@ import {
   isChronogolfMetadata
 } from "./chronogolf";
 
+const input = {
+  courseId: "blue-rock",
+  date: new Date("2026-07-14T00:00:00.000Z"),
+  players: 2,
+  metadata: {
+    clubId: 7221,
+    courseIds: ["7657db51-4e0c-4bc7-8e98-bd0a705370af"],
+    bookingBaseUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
+  }
+};
+
 describe("Chronogolf adapter", () => {
   it("validates reusable public marketplace metadata", () => {
     expect(
@@ -47,8 +58,8 @@ describe("Chronogolf adapter", () => {
   it("normalizes public tee times without entering the booking flow", async () => {
     const requestMock = vi.fn()
       .mockResolvedValueOnce({
-        total: 25,
-        perPage: 24,
+        total: 2,
+        perPage: 1,
         payload: {
           status: "open",
           teetimes: [
@@ -66,21 +77,15 @@ describe("Chronogolf adapter", () => {
               green_fee: 40,
               bookable_holes: 9
             }
-          },
-          {
-            uuid: "slot-frozen",
-            date: "2026-07-14",
-            start_time: "8:00",
-            max_player_size: 4,
-            frozen: true
           }
           ]
         }
       })
       .mockResolvedValueOnce({
-        total: 25,
-        perPage: 24,
-        payload: { status: "open", teetimes: [] }
+        total: 2,
+        perPage: 1,
+        payload: { status: "open", teetimes: [{ uuid: "slot-frozen", date: "2026-07-14", start_time: "8:00",
+          max_player_size: 4, frozen: true }] }
       });
 
     const slots = await fetchChronogolfSlots({
@@ -119,6 +124,59 @@ describe("Chronogolf adapter", () => {
           "https://www.chronogolf.com/marketplace/v2/teetimes?start_date=2026-07-14&free_slots=3&course_ids=7657db51-4e0c-4bc7-8e98-bd0a705370af&page=1"
       }
     ]);
+  });
+
+  it.each([
+    { teetimes: null },
+    { tee_times: [] },
+    { teetimes: {} },
+    { status: "login_required", teetimes: [] }
+  ])("rejects a malformed tee sheet instead of certifying it empty (%j)", async (payload) => {
+    const request = vi.fn().mockResolvedValue({ total: 0, perPage: 12, payload });
+    await expect(fetchChronogolfSlots(input, request)).rejects.toMatchObject({ failureClass: "SCHEMA" });
+  });
+
+  it.each([
+    { date: "2026-07-15" },
+    { course: { uuid: "different-course" } },
+    { start_time: "25:00" },
+    { max_player_size: undefined }
+  ])("rejects a malformed or foreign tee time row (%j)", async (overrides) => {
+    const request = vi.fn().mockResolvedValue({ total: 1, perPage: 12, payload: { teetimes: [{
+      uuid: "slot", date: "2026-07-14", start_time: "07:40", max_player_size: 4, ...overrides
+    }] } });
+    await expect(fetchChronogolfSlots(input, request)).rejects.toMatchObject({ failureClass: "SCHEMA" });
+  });
+
+  it("rejects a prematurely empty later page and inventory over the existing page bound", async () => {
+    const row = { uuid: "slot", date: "2026-07-14", start_time: "07:40", max_player_size: 4 };
+    const request = vi.fn()
+      .mockResolvedValueOnce({ total: 2, perPage: 1, payload: { teetimes: [row] } })
+      .mockResolvedValueOnce({ total: 2, perPage: 1, payload: { teetimes: [] } });
+    await expect(fetchChronogolfSlots(input, request)).rejects.toThrow("pagination could not be verified");
+    expect(request).toHaveBeenCalledTimes(2);
+    const oversized = vi.fn().mockResolvedValue({ total: 11, perPage: 1, payload: { teetimes: [row] } });
+    await expect(fetchChronogolfSlots(input, oversized)).rejects.toThrow("pagination could not be verified");
+    expect(oversized).toHaveBeenCalledTimes(1);
+    const repeated = vi.fn().mockResolvedValue({ total: 2, perPage: 1, payload: { teetimes: [row] } });
+    await expect(fetchChronogolfSlots(input, repeated)).rejects.toMatchObject({ failureClass: "SCHEMA" });
+  });
+
+  it.each([
+    { body: { teetimes: [] }, headers: {} },
+    { body: { teetimes: [], pagination: { total: 0, perPage: 12 } }, headers: { total: "2", "per-page": "12" } },
+  ])("rejects absent or conflicting native pagination evidence (%j)", async ({ body, headers }) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("profile"))
+      .mockResolvedValueOnce(Response.json(body, { headers: new Headers(headers as Record<string, string>) }));
+    await expect(fetchChronogolfSlots(input, undefined, fetchMock as typeof fetch)).rejects.toThrow("pagination could not be verified");
+  });
+
+  it("preserves a native explicit zero with coherent pagination headers", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("profile"))
+      .mockResolvedValueOnce(Response.json({ status: "sold_out", teetimes: [], total_count: 0 }, { headers: { total: "0", "per-page": "12" } }));
+    await expect(fetchChronogolfSlots(input, undefined, fetchMock as typeof fetch)).resolves.toEqual([]);
   });
 
   it("bootstraps a bounded signed-out session and reads the current response shape", async () => {

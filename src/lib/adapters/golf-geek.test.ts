@@ -9,6 +9,9 @@ const metadata = {
   bookingBaseUrl: "https://booking.gatewaynational.com/",
   officialWebsite: "https://www.gatewaynational.com/", bookingWindowDaysAhead: 14
 };
+const scopedSlot = { id: slotId, date: "2026-09-24", startTime: "07:54", freeSlots: 3,
+  allowedSlots: [1, 2, 3], rates: [{ id: publicRateId, name: "Public", price: 85.95 }] };
+const input = { courseId: "saved-course", date: new Date("2026-09-24T00:00:00Z"), players: 2, metadata };
 
 describe("Golf Geek public tee sheet", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -48,5 +51,25 @@ describe("Golf Geek public tee sheet", () => {
       evidenceUrl: `https://xq8v7un6ad.execute-api.us-east-1.amazonaws.com/prod/course/${courseId}/tee-times?cached=false&date=2026-09-24`
     }]);
     expect(result.bookingWindowEvidence).toMatchObject({ daysAhead: 14 });
+  });
+
+  it.each([[], [
+    { ...scopedSlot, freeSlots: 0, rates: undefined },
+    { ...scopedSlot, allowedSlots: [1] },
+    { ...scopedSlot, rates: [{ name: "Annual Passholder" }] },
+  ]].map(data => ({ data })))("recognizes an empty or explicitly filtered public tee sheet %#", async payload => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(Response.json(payload)));
+    await expect(fetchGolfGeekTeeSheet(input)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+  });
+
+  it.each([
+    {}, { data: null }, { data: [null] },
+    { data: [{ ...scopedSlot, date: "2026-09-25" }] },
+    { data: [{ ...scopedSlot, startTime: "24:10" }] },
+    { data: [{ ...scopedSlot, courseId: slotId }] },
+    { data: [{ ...scopedSlot, freeSlots: 0 }, { ...scopedSlot, rates: [{ name: "Public", price: 85.95 }] }] },
+  ])("rejects an incomplete or unscoped public tee sheet %#", async payload => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(Response.json(payload)));
+    await expect(fetchGolfGeekTeeSheet(input)).rejects.toThrow("unexpected tee-time schema");
   });
 });

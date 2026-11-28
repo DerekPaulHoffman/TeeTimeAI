@@ -5,6 +5,7 @@ import {
 } from "@/lib/customer-monitoring-status";
 import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
 import type { DashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
+import { hasReachedCourseSetupDeadline } from "@/lib/searches/course-setup-deadline";
 
 export type DashboardMonitoringVerdictInput = {
   alertSupport: CourseAlertSupport | null;
@@ -39,6 +40,9 @@ export type DashboardMonitoringVerdictInput = {
   automationPlaybookExhausted?: boolean | null;
   automationStalledAtEndpoint?: boolean | null;
   now?: Date;
+  setupDeadlineAt?: Date;
+  setupDeadlineReached?: boolean;
+  currentMatchCount?: number;
   firstTimeLookup: boolean;
   alertStatus?: string;
   discoveryStatus?: DashboardDiscoveryStatus | null;
@@ -48,7 +52,9 @@ export function getDashboardMonitoringVerdict(
   input: DashboardMonitoringVerdictInput
 ) {
   const active = !input.alertStatus || input.alertStatus === "ACTIVE";
+  const now = input.now ?? new Date();
   const terminalDiscovery = active && input.discoveryStatus?.state === "TERMINAL_FAILURE";
+  const setupDeadlineReached = active && (input.setupDeadlineReached || hasReachedCourseSetupDeadline(input.setupDeadlineAt, now));
   const lifecycleDetail = active
     ? "Your alert remains active."
     : input.alertStatus === "PAUSED"
@@ -65,7 +71,7 @@ export function getDashboardMonitoringVerdict(
     escalationDeadlineAt: input.escalationDeadlineAt,
     automationPlaybookExhausted: input.automationPlaybookExhausted,
     automationStalledAtEndpoint: input.automationStalledAtEndpoint,
-    now: input.now,
+    now,
     automationReason: input.automationReason,
     directActionAvailable: Boolean(input.alertSupport)
   });
@@ -87,8 +93,11 @@ export function getDashboardMonitoringVerdict(
     };
   }
 
-  if (!terminalDiscovery && customerStatus === "MONITORED" &&
-    (input.latestProbe?.outcome === "MATCH_FOUND" || input.latestProbe?.outcome === "NO_MATCH")) {
+  if (!terminalDiscovery && (
+    (customerStatus !== "FINAL_DIRECT_ACTION" && (input.currentMatchCount ?? 0) > 0) ||
+    (customerStatus === "MONITORED" &&
+      (input.latestProbe?.outcome === "MATCH_FOUND" || input.latestProbe?.outcome === "NO_MATCH"))
+  )) {
     return {
       label: "Tee-time alerts available",
       detail: "The latest check completed successfully.",
@@ -98,7 +107,7 @@ export function getDashboardMonitoringVerdict(
     };
   }
 
-  if (customerStatus === "NEEDS_HUMAN_REVIEW") {
+  if (customerStatus === "NEEDS_HUMAN_REVIEW" && !setupDeadlineReached) {
     return {
       label: "Manual review needed",
       detail: active
@@ -110,8 +119,7 @@ export function getDashboardMonitoringVerdict(
     };
   }
 
-  if (terminalDiscovery &&
-      customerStatus !== "FINAL_DIRECT_ACTION") {
+  if (customerStatus !== "FINAL_DIRECT_ACTION" && (terminalDiscovery || setupDeadlineReached)) {
     return {
       label: "Automatic availability not confirmed",
       detail: "Your alert remains active. We couldn't confirm automatic checks for this course. Use the official site for current tee times.",
@@ -182,8 +190,8 @@ export function getDashboardMonitoringVerdict(
       input.automationEligibility === "ALLOWED"
         ? "The first check is starting now and will confirm the current result."
         : input.firstTimeLookup
-          ? "Tee Time Spot hasn't checked this course before. We'll email whether alerts are available after the first check, usually within 10 minutes."
-          : "We'll email whether tee-time alerts are available after the first check, usually within 10 minutes.",
+          ? "Tee Time Spot hasn't checked this course before. Check here for your setup result within 15 minutes."
+          : "Check here for your setup result within 15 minutes.",
     emoji: "⏳",
     icon: "scheduled" as const,
     className: "is-detail"

@@ -25,6 +25,7 @@ describe("ForeUP adapter", () => {
   it.each([false, { error: "unavailable" }, null, [null], [{}],
     [{ time: "bad", available_spots: 4 }],
     [{ time: "2026-02-30 13:40", available_spots: 4 }],
+    [{ time: "2026-08-11 13:40", available_spots: 0 }],
     [{ time: "2026-08-10 13:40", available_spots: "4" }],
     [{ time: "2026-08-10 13:40", available_spots: -1 }],
   ])("keeps malformed Public availability %j incomplete rather than empty", async payload => {
@@ -43,8 +44,8 @@ describe("ForeUP adapter", () => {
       metadata: { scheduleId: 792, bookingClassId: 4931,
         bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes" },
       requireMatchingIds: true, fetchImpl };
-    await expect(fetchForeupTeeSheet(input)).resolves.toMatchObject({ slots: [], targetDateStatus: "UNKNOWN" });
-    await expect(fetchForeupTeeSheet(input)).resolves.toMatchObject({ slots: [], targetDateStatus: "UNKNOWN" });
+    await expect(fetchForeupTeeSheet(input)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+    await expect(fetchForeupTeeSheet(input)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
   });
 
   it("normalizes every official ForeUP booking option", async () => {

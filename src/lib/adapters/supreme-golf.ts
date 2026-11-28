@@ -78,7 +78,7 @@ export async function fetchSupremeGolfTeeSheet(
   const resolvedBookingUrl = datedUrl.toString();
   datedUrl.searchParams.set("day", targetDate);
   const html = await fetchHtml(datedUrl, "Supreme Golf tee times", fetchImpl);
-  const slots = parseSlots(html, {
+  const { slots, hasTeeTimeCards } = parseSlots(html, {
     courseId: input.courseId,
     players: input.players,
     routeId,
@@ -89,7 +89,7 @@ export async function fetchSupremeGolfTeeSheet(
 
   return {
     slots,
-    targetDateStatus: /data-testid=["']portal-book-grid["']/i.test(html)
+    targetDateStatus: hasTeeTimeCards && /<[a-z][^>]*\bdata-testid=["']portal-book-grid["']/i.test(html)
       ? "OPEN"
       : "UNKNOWN",
     bookingWindowEvidence: null
@@ -142,30 +142,27 @@ function parseSlots(
     evidenceUrl: string;
   }
 ) {
-  return [
+  const cards = [
     ...html.matchAll(
-      /<button\b[^>]*data-testid=["']portal-book-tee-time-card-(\d{2}):(\d{2})["'][^>]*>([\s\S]*?)<\/button>/gi
+      /<button\b[^>]*data-testid=["']portal-book-tee-time-card-([^"']*)["'][^>]*>([\s\S]*?)<\/button>/gi
     )
-  ].flatMap((match): TeeTimeSlot[] => {
-    const hour = Number(match[1]);
-    const minute = Number(match[2]);
-    const playerRange = /\b(\d+)\s*-\s*(\d+)\s+players?\b/i.exec(
-      stripHtml(match[3])
-    );
+  ];
+  const slots = cards.flatMap((card): TeeTimeSlot[] => {
+    const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(card[1]) ? card[1] : null;
+    const text = stripHtml(card[2]);
+    const playerRange = /\b(\d+)\s*-\s*(\d+)\s+players?\b/i.exec(text);
+    const minimumPlayers = Number(playerRange?.[1]);
     const maximumPlayers = Number(playerRange?.[2]);
-    if (
-      hour > 23 ||
-      minute > 59 ||
-      !Number.isInteger(maximumPlayers) ||
-      maximumPlayers < input.players
-    ) {
-      return [];
+    if (!time || !Number.isSafeInteger(minimumPlayers) || !Number.isSafeInteger(maximumPlayers) ||
+      minimumPlayers < 1 || maximumPlayers < minimumPlayers) {
+      throw new Error("Supreme Golf booking grid contained an unverified tee-time card");
     }
-    const price = /\$\s*(\d{1,4})(?:\.(\d{2}))?/.exec(stripHtml(match[3]));
+    if (input.players < minimumPlayers || input.players > maximumPlayers) return [];
+    const price = /\$\s*(\d{1,4})(?:\.(\d{2}))?/.exec(text);
     return [{
-      sourceId: `supreme-golf-${input.routeId}-${match[1]}${match[2]}`,
+      sourceId: `supreme-golf-${input.routeId}-${time.replace(":", "")}`,
       courseId: input.courseId,
-      startsAt: `${input.targetDate}T${match[1]}:${match[2]}`,
+      startsAt: `${input.targetDate}T${time}`,
       availableSpots: maximumPlayers,
       bookingUrl: input.bookingUrl,
       ...(price
@@ -175,6 +172,7 @@ function parseSlots(
       evidenceUrl: input.evidenceUrl
     }];
   });
+  return { slots, hasTeeTimeCards: cards.length > 0 };
 }
 
 function stripHtml(value: string) {

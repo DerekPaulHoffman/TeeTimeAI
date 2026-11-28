@@ -40,6 +40,19 @@ describe("pilot ownership boundary", () => {
     expect(preferences.mock.calls[0][0].where.teeSearchId).toEqual({ in: ["search-one"] });
     expect(activeMethod).not.toHaveBeenCalled();
   });
+  it("keeps the migrated outdoor alias in the authorized course-scoped lane", async () => {
+    const migrated = row("migrated", "outdoor-migrated");
+    const invalid = row("invalid", "outdoor-invalid");
+    preferences.mockResolvedValue([
+      { ...migrated, teeSearch: { ...migrated.teeSearch, mode: "OUTDOOR" },
+        offering: { ...migrated.offering!, id: migrated.offeringId, kind: "OUTDOOR" } },
+      { ...invalid, teeSearch: { ...invalid.teeSearch, mode: "OUTDOOR" },
+        offering: { ...invalid.offering!, id: invalid.offeringId, kind: "SIMULATOR" } },
+    ]);
+    const targets = [{ courseId: "migrated" }, { courseId: "migrated", offeringId: "outdoor-migrated" }, { courseId: "invalid" }];
+    expect(await excludeDiscoveryPilotTargets(targets, reader, now)).toEqual(targets.slice(1));
+    expect(preferences.mock.calls[0][0].where.teeSearchId).toEqual({ in: ["search-one"] });
+  });
   it("rejects a new legacy claim after enrollment but does not mutate existing work", async () => {
     preferences.mockResolvedValue([row("venue", "rental")]);
     await expect(assertNotDiscoveryPilotTarget(reader, { courseId: "venue", offeringId: "rental" }, now)).rejects.toThrow("assigned to the course discovery pilot");

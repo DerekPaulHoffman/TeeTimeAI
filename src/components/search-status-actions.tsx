@@ -48,6 +48,8 @@ export function SearchStatusActions({
   initialScheduleVersion,
   initialLastCheckedAt,
   initialNextCheckAt,
+  availabilityRefreshAt,
+  availabilityRefreshDelayMs,
   initialCoursePreferences
 }: {
   mode?: SearchMode;
@@ -65,6 +67,8 @@ export function SearchStatusActions({
   initialScheduleVersion?: number;
   initialLastCheckedAt: string | null;
   initialNextCheckAt: string | null;
+  availabilityRefreshAt?: string | null;
+  availabilityRefreshDelayMs?: number;
   initialCoursePreferences: CoursePreferenceFormValue[];
 }) {
   const router = useRouter();
@@ -120,6 +124,21 @@ export function SearchStatusActions({
   useEffect(() => {
     if (removalRequested) keepButtonRef.current?.focus();
   }, [removalRequested]);
+
+  useEffect(() => {
+    if (localStatus !== "ACTIVE" || !availabilityRefreshAt) return;
+    const remaining = availabilityRefreshDelayMs ?? Date.parse(availabilityRefreshAt) - Date.now();
+    if (!Number.isFinite(remaining)) return;
+    const refreshAt = performance.now() + Math.max(0, remaining);
+    const maxDelay = 2 ** 31 - 1;
+    let timeout: number;
+    function scheduleRefresh() {
+      const delay = Math.max(0, Math.ceil(refreshAt - performance.now()));
+      timeout = window.setTimeout(delay > maxDelay ? scheduleRefresh : () => router.refresh(), Math.min(delay, maxDelay));
+    }
+    scheduleRefresh();
+    return () => window.clearTimeout(timeout);
+  }, [localStatus, router, availabilityRefreshAt, availabilityRefreshDelayMs]);
 
   useEffect(() => {
     if (localStatus !== "ACTIVE" ||

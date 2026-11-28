@@ -15,7 +15,7 @@ describe("buildSearchSavedMessage", () => {
     const message = buildSearchSavedMessage([{
       name: "Pending Reader Course", monitoringSupport: "AUTOMATIC", monitoringReadiness,
     }]);
-    expect(message).toContain("whether alerts are available for Pending Reader Course");
+    expect(message).toContain("the setup result for Pending Reader Course");
     expect(message).not.toContain("the moment a matching tee time opens up");
   });
 
@@ -34,16 +34,15 @@ describe("buildSearchSavedMessage", () => {
     ]);
 
     expect(message).toContain("We haven't checked Unreviewed Golf Course before");
-    expect(message).toContain("usually within 10 minutes");
-    expect(message).toContain("whether alerts are available");
+    expect(message).toContain("Check your dashboard for a setup result within 15 minutes");
     expect(message).not.toContain("the moment a matching tee time opens up");
   });
 
-  it("gives a ten-minute expectation without calling a reused course a first lookup", () => {
+  it("gives a setup deadline for an unconfirmed reused course", () => {
     const message = buildSearchSavedMessage([{ name: "Pending Golf Course" }]);
 
     expect(message).toContain(
-      "We'll email whether alerts are available for Pending Golf Course after the first check, usually within 10 minutes"
+      "Check your dashboard within 15 minutes for the setup result for Pending Golf Course"
     );
     expect(message).not.toContain("haven't checked");
   });

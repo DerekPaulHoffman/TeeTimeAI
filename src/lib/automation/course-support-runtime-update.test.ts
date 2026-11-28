@@ -8,6 +8,12 @@ const blocked = { schemaVersion: 1, outcome: "blocked", reasonCode: "ORIGINAL_NA
   runtimeUpdateAttempted: false, taskStartAttempted: false, activationWriteAttempted: false, acceptanceRestartProof: false };
 
 describe("safe managed runtime update diagnostics", () => {
+  it("distinguishes missing managed source from a dependency or extension rollout", () => {
+    const result = projectRuntimeUpdateDiagnostic(JSON.stringify({ ...blocked,
+      reasonCode: "MANAGED_RUNTIME_CHECKOUT_MISSING", phase: "VALIDATE_MANAGED_CHECKOUT" }));
+    expect(result).toMatchObject({ attributed: true, reasonCode: "MANAGED_RUNTIME_CHECKOUT_MISSING",
+      phase: "VALIDATE_MANAGED_CHECKOUT", mutationAttempted: false, taskStopAttempted: false });
+  });
   it("retains bounded stopped-start reconciliation evidence without guessing fields from older receipts", () => {
     expect(projectRuntimeUpdateDiagnostic(JSON.stringify({ ...blocked, phase: "RECONCILE_STOPPED_UPDATED_RUNTIME",
       taskStartRequests: 2, firstStoppedTaskResult: 1 }))).toMatchObject({ attributed: true, taskStartRequests: 2, firstStoppedTaskResult: 1 });

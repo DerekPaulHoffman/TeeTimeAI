@@ -106,7 +106,7 @@ const date = new Date("2026-07-24T00:00:00.000Z");
 const metadata = { provider: "TEST", facilityId: "facility-1" };
 const providerResult = {
   slots: [],
-  targetDateStatus: "UNKNOWN" as const,
+  targetDateStatus: "OPEN" as const,
   bookingWindowEvidence: null
 };
 
@@ -139,6 +139,20 @@ describe("fetchCourseTeeSheet", () => {
     expect(result).toMatchObject({ ...providerResult, facilityCourses: [{ courseId: "course-1" }, { courseId: "other-course" }] });
     expect(adapterMocks.fetchForeupTeeSheet.mock.invocationCallOrder[0]).toBeLessThan(facilityMocks.save.mock.invocationCallOrder[0]);
   });
+
+  it.each([1, 2])("defers only eligible shared-facility detections from a successful provider read (members=%s)", async memberCount => {
+    const detection = { method: "FOREUP_PUBLIC_CATALOG", courses: Array.from({ length: memberCount }, (_, index) => ({ key: String(792 + index) })) };
+    foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValueOnce({ bookingClassId: 4931,
+      bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes", detectedFacility: detection });
+    const onSharedFacilityDetected = vi.fn();
+
+    await expect(fetchCourseTeeSheet(buildCourse("FOREUP"), date, 2, false, { onSharedFacilityDetected })).resolves.toBe(providerResult);
+
+    expect(facilityMocks.save).not.toHaveBeenCalled();
+    if (memberCount === 2) expect(onSharedFacilityDetected).toHaveBeenCalledExactlyOnceWith("course-1", detection);
+    else expect(onSharedFacilityDetected).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     capabilityMocks.resolveProviderCapability.mockImplementation((course) => ({
@@ -224,7 +238,7 @@ describe("fetchCourseTeeSheet", () => {
       fetchCourseTeeSheet(buildCourse("CHRONOGOLF"), date, 3, true)
     ).resolves.toEqual({
       slots: [],
-      targetDateStatus: "UNKNOWN",
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: null
     });
     expect(adapterMocks.fetchChronogolfSlots).toHaveBeenCalledWith({
@@ -372,21 +386,35 @@ describe("fetchCourseTeeSheet", () => {
 
     await expect(
       fetchCourseTeeSheet(buildCourse("CPS"), date, 2, false)
-    ).resolves.toEqual({
-      slots: [],
-      targetDateStatus: "UNKNOWN",
-      bookingWindowEvidence: null
-    });
+    ).rejects.toThrow(/invalid response/u);
     expect(adapterMocks.fetchCpsTeeSheet).not.toHaveBeenCalled();
 
     adapterMocks.isGolfNowMetadata.mockReturnValue(false);
     await expect(
       fetchCourseTeeSheet(buildCourse("GOLFNOW"), date, 2, false)
-    ).resolves.toEqual({
-      slots: [],
-      targetDateStatus: "UNKNOWN",
-      bookingWindowEvidence: null
-    });
+    ).rejects.toThrow(/invalid response/u);
     expect(adapterMocks.fetchGolfNowTeeSheet).not.toHaveBeenCalled();
+  });
+
+  it.each(["UNKNOWN", "NOT_OPEN"])("requires a verified release before accepting %s", async targetDateStatus => {
+    const course = buildCourse("TEEITUP");
+    const bookingWindowEvidence = {
+      daysAhead: 7, releaseTimeLocal: "09:00", confidence: 0.99,
+      source: "PROVIDER_CONFIG", evidenceUrl: "https://booking.example/policy",
+    };
+    const read = () => fetchCourseTeeSheet(course, date, 2, true);
+    adapterMocks.fetchTeeItUpTeeSheet.mockResolvedValueOnce({ ...providerResult, targetDateStatus });
+    await expect(read()).rejects.toThrow(/requested date/u);
+
+    const clock = vi.spyOn(Date, "now");
+    try {
+      adapterMocks.fetchTeeItUpTeeSheet.mockResolvedValue({ ...providerResult, targetDateStatus, bookingWindowEvidence });
+      clock.mockReturnValue(Date.parse("2026-07-17T12:59:59Z"));
+      await expect(read()).resolves.toMatchObject({ targetDateStatus: "NOT_OPEN", bookingWindowEvidence });
+      clock.mockReturnValue(Date.parse("2026-07-17T13:00:00Z"));
+      await expect(read()).rejects.toThrow(/requested date/u);
+    } finally {
+      clock.mockRestore();
+    }
   });
 });

@@ -355,6 +355,33 @@ describe("SearchStatusActions", () => {
     expect(refreshMock).toHaveBeenCalledTimes(2);
   });
 
+  it("refreshes an idle simulator alert once at a saved opening beyond the browser timer limit", () => {
+    vi.useFakeTimers();
+    const start = new Date("2026-08-14T12:00:00Z");
+    vi.setSystemTime(start);
+    const delay = (2 ** 31 - 1) + 600;
+    render(<SearchStatusActions {...savedSearch} mode="SIMULATOR"
+      availabilityRefreshAt={new Date(start.getTime() + delay).toISOString()} />);
+
+    act(() => vi.advanceTimersByTime(delay - 1));
+    expect(refreshMock).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(refreshMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([-20, 20])("refreshes from the server's remaining time with a %i-minute browser clock skew", (skewMinutes) => {
+    vi.useFakeTimers();
+    const serverTime = new Date("2026-08-14T12:00:00Z");
+    vi.setSystemTime(new Date(serverTime.getTime() + skewMinutes * 60_000));
+    render(<SearchStatusActions {...savedSearch} availabilityRefreshDelayMs={1000}
+      availabilityRefreshAt={new Date(serverTime.getTime() + 1000).toISOString()} />);
+
+    act(() => vi.advanceTimersByTime(999));
+    expect(refreshMock).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(refreshMock).toHaveBeenCalledOnce();
+  });
+
   it.each(["COMPLETED", "CANCELLED"] as const)(
     "replaces paused controls when the saved alert becomes %s",
     (status) => {

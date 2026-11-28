@@ -120,6 +120,12 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
       endsAt: new Date(`${target}T16:00:00.000Z`), maxPartySize: 8, bookingUrl };
   }
 
+  async function registerReceipts(searchId: string) {
+    const { courseSetupSearchSelect, registerCourseSetupReceipts } = await import("@/lib/searches/course-setup-receipts");
+    await client.$transaction(async transaction => registerCourseSetupReceipts(transaction,
+      await transaction.teeSearch.findUniqueOrThrow({ where: { id: searchId }, select: courseSetupSearchSelect })));
+  }
+
   it.each(["date", "duration", "offering"] as const)("fails closed when the slot has the wrong %s", async mismatch => {
     const { search, active, venues, run, lease } = await fixture(1);
     const { offering } = venues[0];
@@ -518,6 +524,95 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     expect(matches).toHaveLength(1);
     expect(matches[0].offeringId).toBe(venues[1].offering.id);
     expect(mocks.sendMatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks an unrelated venue while a provider read is slow, and aborts the rest of that venue's lengths on timeout", async () => {
+    const { search, venues, run, lease } = await fixture(2, { setupPending: true });
+    const [slow, fast] = venues;
+    await client.teeSearch.update({ where: { id: search.id }, data: { durationMinutes: null } });
+    await client.courseOffering.update({ where: { id: slow.offering.id }, data: { supportedDurationsMinutes: [60, 120] } });
+    await client.courseOffering.update({ where: { id: fast.offering.id }, data: { providerFamilyKey: "ACUITY" } });
+    await registerReceipts(search.id);
+    const active = (await getSearch(search.id))!;
+    const budget = new AbortController();
+    const originalTimeout = AbortSignal.timeout;
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(milliseconds =>
+      milliseconds > 90_000 && milliseconds < 120_000 ? budget.signal : originalTimeout(milliseconds));
+    let transportSignal: AbortSignal | null | undefined;
+    let stopTransport: ((reason: unknown) => void) | undefined;
+    const transport = vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      transportSignal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        stopTransport = reject;
+        if (transportSignal?.aborted) reject(transportSignal.reason);
+        else transportSignal?.addEventListener("abort", () => reject(transportSignal?.reason), { once: true });
+      });
+    });
+    mocks.fetch.mockImplementation(async (
+      { offering }: { offering: { id: string; bookingUrl: string } }, fetchImpl: typeof fetch,
+    ) => {
+      if (offering.id === slow.offering.id) await fetchImpl(offering.bookingUrl);
+      return { complete: true, observedAt: new Date(), evidenceUrl: fast.offering.evidenceUrl,
+        slots: [providerSlot(offering.id, offering.bookingUrl, search.date)] };
+    });
+    const checking = runCheck(active, run.id, lease);
+    try {
+      await vi.waitFor(async () => {
+        expect(transportSignal?.aborted).toBe(false);
+        expect(await client.courseProbe.count({ where: { teeSearchId: search.id, offeringId: fast.offering.id, outcome: "MATCH_FOUND" } })).toBe(1);
+        expect(await client.courseSetupReceipt.findFirstOrThrow({ where: { offeringId: fast.offering.id } })).toMatchObject({
+          outcome: "MATCHES_AVAILABLE", evidenceProbeId: expect.any(String),
+        });
+      }, { timeout: 4_000 });
+      budget.abort(new DOMException("Venue budget expired", "TimeoutError"));
+      const result = await checking;
+      expect(transportSignal?.aborted).toBe(true);
+      expect(result.courseResults.map(item => item.outcome)).toEqual(["FETCH_FAILED", "MATCH_FOUND"]);
+      expect(mocks.fetch.mock.calls.filter(([input]) => input.offering.id === slow.offering.id).map(([input]) => input.durationMinutes)).toEqual([60]);
+      expect(await client.courseOffering.findUniqueOrThrow({ where: { id: slow.offering.id } })).toMatchObject({
+        observationToken: null, monitoringState: "DEGRADED_RETRYING",
+      });
+      expect(mocks.sendMatch).toHaveBeenCalledOnce();
+      expect(await client.courseSetupReceipt.findFirstOrThrow({ where: { offeringId: slow.offering.id } })).toMatchObject({
+        outcome: null, evidenceProbeId: expect.any(String),
+      });
+    } finally {
+      budget.abort();
+      stopTransport?.(new Error("Test cleanup"));
+      await checking.catch(() => undefined);
+      transport.mockRestore();
+      timeout.mockRestore();
+    }
+  }, 8_000);
+
+  it("keeps checking when a venue's manual-direct source is superseded", async () => {
+    const { search, venues, run, lease } = await fixture(2, { setupPending: true });
+    const [drifting, healthy] = venues;
+    await client.courseOffering.update({ where: { id: drifting.offering.id }, data: { monitoringState: "FINAL_TECHNICAL" } });
+    const stale = (await getSearch(search.id))!;
+    await client.courseOffering.update({ where: { id: drifting.offering.id }, data: { bookingUrl: "https://updated.example.test/book" } });
+    mocks.fetch.mockResolvedValue({ complete: true, observedAt: new Date(), evidenceUrl: healthy.offering.evidenceUrl,
+      slots: [providerSlot(healthy.offering.id, healthy.offering.bookingUrl!, search.date)] });
+    const result = await runCheck(stale, run.id, lease);
+    expect(result.courseResults.map(item => item.outcome)).toEqual(["CHECK_PENDING", "MATCH_FOUND"]);
+    expect(await client.courseProbe.count({ where: { teeSearchId: search.id, offeringId: drifting.offering.id } })).toBe(0);
+    expect(mocks.sendMatch).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("records a verified future booking opening separately from an empty simulator calendar", async () => {
+    const { search, venues, run, lease } = await fixture(1);
+    const [venue] = venues;
+    await registerReceipts(search.id);
+    await client.courseOffering.update({ where: { id: venue.offering.id }, data: {
+      bookingWindowDaysAhead: 0, bookingReleaseTimeLocal: "08:00",
+    } });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(mocks.sendMatch).not.toHaveBeenCalled();
+    const receipt = await client.courseSetupReceipt.findFirstOrThrow({ where: { offeringId: venue.offering.id } });
+    expect(receipt).toMatchObject({ outcome: "BOOKING_NOT_OPEN", evidenceProbeId: expect.any(String) });
+    expect(receipt.closedAt!.getTime() - receipt.startedAt.getTime()).toBeLessThan(15_000);
   });
 
   it("does not persist partial sessions or drifted booking links as alertable", async () => {

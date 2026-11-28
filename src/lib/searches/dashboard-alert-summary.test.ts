@@ -13,9 +13,11 @@ type Outcome = NonNullable<DashboardMonitoringVerdictInput["latestProbe"]>["outc
 function courseStatus(
   outcome?: Outcome,
   availability: Partial<Parameters<typeof getDashboardCourseStatus>[0]["availability"]> = {},
-  monitoring: Partial<DashboardMonitoringVerdictInput> = {}
+  monitoring: Partial<DashboardMonitoringVerdictInput> = {},
+  setupConfirmed = false,
 ) {
   return getDashboardCourseStatus({
+    setupConfirmed,
     availability: {
       alertStatus: "ACTIVE",
       outcome,
@@ -47,6 +49,15 @@ function summary(
 }
 
 describe("dashboard alert summary", () => {
+  it("keeps confirmed setup visible through an alert-only edit without counting current inventory", () => {
+    const setup = courseStatus(undefined, {}, {
+      latestProbe: { outcome: "MATCH_FOUND", observedAt: checkedAt }, monitoringState: "HEALTHY",
+      setupDeadlineAt: checkedAt, now: new Date(checkedAt.getTime() + 60_000),
+    }, true);
+    expect(setup).toMatchObject({ label: "Tee-time alerts available", tone: "available", hasCurrentPublicInventory: false });
+    expect(setup.detail).not.toMatch(/latest check|waiting for the first check|match(es|ing) now/i);
+  });
+
   it("describes an observed public time before the saved window without implying a match", () => {
     const status = courseStatus("NO_MATCH", {
       rawSummary: {
@@ -106,6 +117,32 @@ describe("dashboard alert summary", () => {
     const partial = summary([courseStatus("MATCH_FOUND", { qualifyingMatchCount: 1 }), failed], 1);
     expect(partial.headline).toBe("1 matching time now");
     expect(partial.coverageNotice).toContain("Availability not confirmed for 1 course");
+  });
+
+  it("settles five mixed courses at the saved deadline even without the responder", () => {
+    const deadline = new Date("2026-09-30T06:45:00.000Z");
+    const states = (now: Date) => {
+      const clock = { setupDeadlineAt: deadline, now };
+      return [
+        courseStatus("MATCH_FOUND", { qualifyingMatchCount: 1 }, clock),
+        courseStatus("NO_MATCH", { rawSummary: { visibleSlotCount: 0, playerEligibleSlotCount: 0 } }, clock),
+        courseStatus("NEEDS_ADAPTER", {}, { ...clock, alertSupport: "PHONE_ONLY", monitoringState: "FINAL_MANUAL" }),
+        courseStatus(undefined, {}, { ...clock, upcomingBookingWindow: { opensAt: "later" } }),
+        courseStatus(undefined, {}, clock),
+      ];
+    };
+
+    const before = states(new Date(deadline.getTime() - 1));
+    expect(before.map(status => status.tone)).toEqual(["matching", "empty", "unavailable", "scheduled", "pending"]);
+    const at = states(deadline);
+    expect(at.map(status => status.label)).toEqual([
+      "1 matching time", "No public times listed", "Call the course",
+      "Checks start when booking opens", "Automatic availability not confirmed",
+    ]);
+    expect(summary(at, 1)).toMatchObject({
+      headline: "1 matching time now",
+      coverageNotice: "Availability not confirmed for 2 courses · 1 course open for booking later",
+    });
   });
 
   it.each(["NEEDS_ADAPTER", "FETCH_FAILED", "BLOCKED_TOOLING"] as const)(

@@ -140,10 +140,10 @@ describe("original Desktop full-repair continuation", () => {
     expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
   });
 
-  it("uses a separate closeout-only intent for expired demand and published code", async () => {
+  it.each(["REGISTERED_IMPLEMENTATION", "PUBLISHED_IMPLEMENTATION"] as const)("uses a separate closeout-only intent for %s and expired demand", async continuationMode => {
     const f = fixture();
     const registered = "c".repeat(40);
-    const item = { ...f.item, releaseSha: registered, continuationMode: "REGISTERED_IMPLEMENTATION",
+    const item = { ...f.item, releaseSha: registered, continuationMode,
       continuationTrigger: "UNFINISHED_FULL_REPAIR", plannedPaths: ["src/lib/course-discovery/public-calendar.ts"],
       expiredDemandRecoveryOnly: true };
     const originalGit = f.deps.git.getMockImplementation()!;
@@ -162,11 +162,13 @@ describe("original Desktop full-repair continuation", () => {
       .toMatchObject({ outcome: "already_requested", messageRequired: false });
     f.deps.git.mockImplementation((cwd, args) => {
       if (args[0] === "merge-base" && args[1] === "--all") return BEFORE;
+      if (continuationMode === "PUBLISHED_IMPLEMENTATION" && args[0] === "merge-base" && args[1] === "--is-ancestor" && args[2] === registered)
+        throw new Error("Fixture release is absent from tested main");
       if (args[0] === "rev-parse" && args[1] === "HEAD" && cwd === f.worker) return registered;
       return originalGit(cwd, args);
     });
     await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
-      .rejects.toThrow("EXPIRED_COURSE_RELEASE_NOT_PUBLISHED");
+      .rejects.toThrow(continuationMode === "PUBLISHED_IMPLEMENTATION" ? "Fixture release is absent from tested main" : "EXPIRED_COURSE_RELEASE_NOT_PUBLISHED");
   });
 
   it.each(["RESEARCH", "SETTLED_READ_FAILURE"] as const)("resumes a simulator's original %s checkpoint once", async mode => {

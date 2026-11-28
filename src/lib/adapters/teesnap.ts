@@ -19,8 +19,8 @@ export type TeesnapMetadata = {
 export const TEESNAP_PUBLIC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
 
 type TeesnapBooking = {
-  bookingId?: number;
-  golfers?: unknown[];
+  bookingId: number;
+  golfers: unknown[];
 };
 
 type TeesnapPrice = {
@@ -29,22 +29,20 @@ type TeesnapPrice = {
 };
 
 type TeesnapSection = {
-  teeOff?: string;
   bookings?: number[];
-  isHeld?: boolean;
+  isHeld: boolean;
 };
 
 type TeesnapApiSlot = {
-  teeTime?: string;
+  teeTime: string;
   prices?: TeesnapPrice[];
-  teeOffSections?: TeesnapSection[];
+  teeOffSections: TeesnapSection[];
 };
 
 type TeesnapResponse = {
-  errors?: string;
-  teeTimes?: {
-    bookings?: TeesnapBooking[];
-    teeTimes?: TeesnapApiSlot[];
+  teeTimes: {
+    bookings: TeesnapBooking[];
+    teeTimes: TeesnapApiSlot[];
   };
 };
 
@@ -66,7 +64,7 @@ export type TeesnapTeeSheetInput = {
   players: number;
   metadata: TeesnapMetadata;
   discoverBookingWindow?: boolean;
-  /** Learned recipes must prove the complete public day before returning slots. */
+  /** Learned recipes also require the response to declare a JSON media type. */
   strictPublicEvidence?: true;
 };
 
@@ -107,7 +105,7 @@ export async function fetchTeesnapTeeSheet(input: TeesnapTeeSheetInput, fetchImp
 async function fetchTeesnapAvailability(input: TeesnapTeeSheetInput, fetchImpl: typeof fetch): Promise<Pick<TeesnapTeeSheetResult, "slots" | "targetDateStatus">> {
   const modern = input.metadata.publicApiVersion === "BOOKINGSITE_V1";
   if (input.metadata.publicApiVersion !== undefined && !modern) incomplete();
-  if ((input.strictPublicEvidence || modern) && !Number.isFinite(input.date.getTime())) incomplete();
+  if (!Number.isFinite(input.date.getTime())) incomplete();
   if (modern && (!positiveId(input.metadata.courseId) || !Number.isInteger(input.players) || input.players < 1 || input.players > 4 ||
       !isTeesnapMetadata(input.metadata))) incomplete();
   const holes = input.metadata.defaultHoles ?? 18;
@@ -115,40 +113,32 @@ async function fetchTeesnapAvailability(input: TeesnapTeeSheetInput, fetchImpl: 
   const response = await fetchWithProviderTimeout(url, {
     headers: teesnapHeaders(input.metadata.bookingBaseUrl)
   }, fetchImpl);
-  let payload = (await response.json().catch(() => null)) as TeesnapResponse | null;
+  const body: unknown = await response.json().catch(() => null);
 
   if (!response.ok) {
-    if (!modern && payload?.errors === "date_not_allowed") {
+    if (!modern && record(body) && body.errors === "date_not_allowed") {
       return { slots: [], targetDateStatus: "NOT_OPEN" };
     }
     throw providerHttpError("Teesnap tee times", response);
   }
 
-  if (input.strictPublicEvidence || modern) {
-    if (!/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) incomplete();
-    payload = strictPublicDay(payload, input.date, modern);
+  if ((input.strictPublicEvidence || modern) &&
+      !/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) {
+    incomplete();
   }
-
-  const teeTimes = payload?.teeTimes?.teeTimes;
-  if (!Array.isArray(teeTimes)) {
-    return { slots: [], targetDateStatus: "UNKNOWN" };
-  }
+  // The direct reader decides availability from this same response. Validate the
+  // day before filtering rows so an incomplete reply cannot look like zero openings.
+  const { bookings, teeTimes } = strictPublicDay(body, input.date, modern).teeTimes;
 
   const bookingSizes = new Map(
-    (payload?.teeTimes?.bookings ?? [])
-      .filter((booking) => typeof booking.bookingId === "number")
-      .map((booking) => [booking.bookingId as number, booking.golfers?.length ?? 0])
+    bookings.map((booking) => [booking.bookingId, booking.golfers.length])
   );
   const slots: TeeTimeSlot[] = [];
 
   for (const teeTime of teeTimes) {
-    if (!teeTime.teeTime) {
-      continue;
-    }
-
     const availableSpots = Math.max(
       0,
-      ...(teeTime.teeOffSections ?? [])
+      ...teeTime.teeOffSections
         .filter((section) => !section.isHeld)
         .map((section) => getAvailableSpots(section, bookingSizes))
     );

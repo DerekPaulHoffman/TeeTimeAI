@@ -94,25 +94,37 @@ export async function fetchGolfGeekTeeSheet(input: {
     redirect: "error", credentials: "omit", headers: { accept: "application/json" }
   });
   if (!response.ok) throw providerHttpError("Golf Geek tee times", response);
-  const payload = await response.json().catch(() => null);
+  const payload = (await response.json().catch(() => null)) as { data?: unknown } | null;
   const data = payload?.data;
   if (!Array.isArray(data) || data.length > 500) {
-    return { slots: [], targetDateStatus: "UNKNOWN", bookingWindowEvidence: null };
+    throw new Error("Golf Geek returned an unexpected tee-time schema");
   }
   const slots: TeeTimeSlot[] = [];
-  for (const item of data) {
-    if (!item || typeof item !== "object" || !UUID.test(item.id ?? "") ||
+  for (const item of data as Array<Record<string, unknown> | null>) {
+    if (!item || typeof item !== "object" || typeof item.id !== "string" || !UUID.test(item.id) ||
         item.date !== date || typeof item.startTime !== "string" ||
         !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(item.startTime) ||
-        !Number.isInteger(item.freeSlots) || item.freeSlots < input.players ||
-        !Array.isArray(item.allowedSlots) || !item.allowedSlots.includes(input.players) ||
-        !Array.isArray(item.rates)) continue;
-    const publicRate = item.rates.find((rate: unknown) => {
-      const row = rate as Record<string, unknown> | null;
-      return row?.name === "Public" && typeof row.id === "string" && UUID.test(row.id) &&
-        typeof row.price === "number" && Number.isFinite(row.price) && row.price >= 0;
-    });
-    if (!publicRate) continue;
+        (item.courseId !== undefined && (typeof item.courseId !== "string" ||
+          item.courseId.toLowerCase() !== input.metadata.courseId.toLowerCase())) ||
+        typeof item.freeSlots !== "number" || !Number.isInteger(item.freeSlots) || item.freeSlots < 0) {
+      throw new Error("Golf Geek returned an unexpected tee-time schema");
+    }
+    if (item.freeSlots < input.players) continue;
+    if (!Array.isArray(item.allowedSlots) || item.allowedSlots.some(count => !Number.isInteger(count) || count < 1)) {
+      throw new Error("Golf Geek returned an unexpected tee-time schema");
+    }
+    if (!item.allowedSlots.includes(input.players)) continue;
+    if (!Array.isArray(item.rates)) throw new Error("Golf Geek returned an unexpected tee-time schema");
+    const rates = item.rates as Array<{ id?: unknown; name?: unknown; price?: unknown } | null>;
+    const publicRate = rates.find((rate): rate is { id: string; name: "Public"; price: number } =>
+      rate?.name === "Public" && typeof rate.id === "string" && UUID.test(rate.id) &&
+      typeof rate.price === "number" && Number.isFinite(rate.price) && rate.price >= 0);
+    if (!publicRate) {
+      if (rates.some(rate => typeof rate?.name !== "string" || !rate.name.trim() || rate.name === "Public")) {
+        throw new Error("Golf Geek returned an unexpected tee-time schema");
+      }
+      continue;
+    }
     slots.push({
       courseId: input.courseId,
       sourceId: `golf-geek-${item.id}`,

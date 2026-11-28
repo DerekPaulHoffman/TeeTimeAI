@@ -179,9 +179,14 @@ describe("fetchGolfWithAccessTeeSheet", () => {
     });
   });
 
-  it("fails closed on a nonempty incompatible provider schema", async () => {
+  it.each([
+    {}, null, { teeTimes: [{ unexpected: true }] },
+    { teeTimes: [teeTime({ displayRate: { isAvailableToUser: false } }),
+      teeTime({ course: { id: "33333333-3333-4333-8333-333333333333" } })] },
+    { teeTimes: [teeTime(), teeTime({ displayRate: {} })] },
+  ])("fails closed on an incomplete or unscoped tee sheet %#", async payload => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      response({ teeTimes: [{ unexpected: true }] })
+      response(payload)
     );
     await expect(
       fetchGolfWithAccessTeeSheet(
@@ -194,6 +199,17 @@ describe("fetchGolfWithAccessTeeSheet", () => {
         fetchMock
       )
     ).rejects.toThrow("unexpected tee-time schema");
+  });
+
+  it("treats explicitly unavailable and party-filtered rows as checked with no availability", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response({ teeTimes: [
+      teeTime({ displayRate: { isAvailableToUser: false }, players: undefined }),
+      teeTime({ players: { min: 3, max: 4 } }),
+      teeTime({ players: { min: 1, max: 1 } }),
+    ] }));
+    await expect(fetchGolfWithAccessTeeSheet({ courseId: "course-1", date: new Date("2026-07-24T00:00:00Z"),
+      players: 2, metadata }, fetchMock)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("preserves provider HTTP status and retry headers", async () => {

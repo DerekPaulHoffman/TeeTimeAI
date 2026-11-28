@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { queueSearchCheck, requestSearchRecheck } from "@/lib/automation/db-service";
 import { consumeSearchScheduleQueueMessage } from "@/lib/automation/search-schedule-consumer";
 import { recoverSearchScheduleStartFailure } from "@/lib/automation/search-recheck-queue";
+import { courseMonitoringPreferenceTarget } from "@/lib/searches/course-monitoring-target";
 import { isDiscoveryPilotSearch } from "./config";
 import { attachRecipeResumeVersion } from "./runtime";
 import type { DiscoveryTarget } from "./service";
@@ -31,8 +32,9 @@ export async function queueDiscoverySearchRecheck(searchId: string, executionJob
 }
 
 export async function queueDiscoveryTargetRechecks(target: DiscoveryTarget) {
-  const preferences = await prisma.coursePreference.findMany({ where: { courseId: target.courseId,
-    ...(target.offeringId ? { offeringId: target.offeringId } : { offeringId: null }), teeSearch: { status: "ACTIVE" } }, select: { teeSearchId: true } });
+  const preferences = await prisma.coursePreference.findMany({ where: {
+    ...courseMonitoringPreferenceTarget(target), teeSearch: { status: "ACTIVE", mode: target.kind },
+  }, select: { teeSearchId: true } });
   let queued = 0;
   for (const id of new Set(preferences.map(preference => preference.teeSearchId))) {
     if (await queueDiscoverySearchRecheck(id)) queued++;

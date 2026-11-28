@@ -240,8 +240,29 @@ describe("strict learned Teesnap evidence", () => {
   it("keeps not-open and incomplete legacy evidence distinct", async () => {
     const unavailable = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ errors: "date_not_allowed" }, { status: 400 }));
     expect(await fetchTeesnapTeeSheet(input(), unavailable)).toMatchObject({ targetDateStatus: "NOT_OPEN", slots: [] });
-    expect(await fetchTeesnapTeeSheet({ ...input(), strictPublicEvidence: undefined }, read({ teeTimes: {} }))).toMatchObject({ targetDateStatus: "UNKNOWN", slots: [] });
     await expect(fetchTeesnapTeeSheet(input(), read({ teeTimes: {} }))).rejects.toThrow(TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE);
+  });
+
+  it("keeps the ordinary reader's verified empty and explicit not-open days distinct with one request each", async () => {
+    const ordinary = { ...input(), strictPublicEvidence: undefined };
+    const empty = read({ teeTimes: { bookings: [], teeTimes: [] } });
+    const unavailable = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ errors: "date_not_allowed" }, { status: 400 }));
+    await expect(fetchTeesnapTeeSheet(ordinary, empty)).resolves.toEqual({ slots: [], targetDateStatus: "OPEN", bookingWindowEvidence: null });
+    await expect(fetchTeesnapTeeSheet(ordinary, unavailable)).resolves.toEqual({ slots: [], targetDateStatus: "NOT_OPEN", bookingWindowEvidence: null });
+    expect(empty).toHaveBeenCalledOnce();
+    expect(unavailable).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["missing calendar", { teeTimes: {} }],
+    ["missing booking list", { teeTimes: { teeTimes: [] } }],
+    ["provider error in an HTTP success", { errors: "date_not_allowed", teeTimes: { bookings: [], teeTimes: [] } }],
+    ["incomplete listed time", { teeTimes: { bookings: [], teeTimes: [{ teeTime: "2030-06-12T12:30:00", teeOffSections: [] }] } }],
+    ["malformed row next to a valid time", { teeTimes: { ...day().teeTimes, teeTimes: [...day().teeTimes.teeTimes, { teeOffSections: [] }] } }],
+  ])("fails an ordinary legacy HTTP success with %s closed before filtering rows", async (_name, payload) => {
+    const fetch = read(payload);
+    await expect(fetchTeesnapTeeSheet({ ...input(), strictPublicEvidence: undefined }, fetch)).rejects.toThrow(/^TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE$/u);
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   const invalid: Array<[string, (value: Day) => void]> = [

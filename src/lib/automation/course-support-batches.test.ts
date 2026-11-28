@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fullRepairReadProgressMatchesClaim } from "./course-support-full-repair";
@@ -189,6 +189,7 @@ import {
   isDurableTerminalProof,
   isRetryableCourseSupportWriteConflict,
   isRemediatedSearchSchedulerHealthy,
+  listCourseSupportDispatchCandidates,
   markCourseSupportBatchNeedsHuman,
   mergeCourseSupportClaimCandidatePools,
   recordCourseSupportClaimStateChurn,
@@ -9023,8 +9024,9 @@ describe("course-support claim demand fencing", () => {
     ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
 
     expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ take: 15 }),
+      expect.objectContaining({ select: expect.objectContaining({ verificationRuntimeHold: true }) }),
     );
+    expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).not.toHaveProperty("take");
     expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -9389,6 +9391,53 @@ describe("course-support claim demand fencing", () => {
       }),
     );
   });
+
+  it.each(["unchanged", "changed source", "mixed execution", "only one miss", "reserved course", "duplicate receipt"] as const)(
+    "bounds proven orchestration misses in scheduled dispatch: %s",
+    async (scenario) => {
+      const entry = (runtimeVersion: string, changed = false, executed = false) => {
+        const history = remediationHistoryEntry({ consumed: false, runtimeVersion,
+          ...(changed ? { providerSnapshotFingerprint: "a".repeat(64) } : {}) });
+        Object.assign(history.batch.summary.closeout.remediationAttempts[0]!, {
+          countsTowardOperationalNoProgress: false,
+          executionEvidence: { claimedImplementationPaths: false, newReleaseRecorded: false,
+            deploymentRecorded: false, postProbeRecorded: false, providerAttemptRecorded: executed,
+            providerExecutionAttemptRecorded: executed, playbookAttemptRecorded: false,
+            terminalResultRecorded: false, providerExecutionStarted: executed },
+        });
+        return { ...history, batchId: scenario === "duplicate receipt" ? "batch-unchanged" : runtimeVersion };
+      };
+      const history = [entry("e".repeat(40))];
+      if (scenario !== "only one miss") history.push(entry("f".repeat(40), scenario === "changed source", scenario === "mixed execution"));
+      const incident = { ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+        attemptCount: history.length, batchIncidents: history };
+      prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+      mockMaterialChangeParking(incident);
+      const client = { ...monitoringTransactionClient,
+        courseSupportIncident: { ...monitoringTransactionClient.courseSupportIncident, findMany: prismaMocks.supportIncidentFindMany },
+      };
+      const result = await listCourseSupportDispatchCandidates(now, client as never, {
+        parkExhaustedOrchestration: true,
+        occupiedCourseIds: scenario === "reserved course" ? new Set([incident.courseId]) : undefined,
+      });
+      if (scenario === "unchanged") {
+        expect(result).toEqual([]);
+        expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({ data: expect.objectContaining({
+          eventType: "HUMAN_REVIEW_REQUESTED", audit: expect.objectContaining({
+            reason: "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED", orchestrationRetryBudgetExhausted: true,
+            orchestrationAttemptLimit: 2, operationalRetryBudgetExhausted: false,
+          }),
+        }) });
+        expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+          where: expect.objectContaining({ activeBatchId: null, revision: 3 }),
+          data: expect.objectContaining({ status: "NEEDS_HUMAN", nextAttemptAt: null }),
+        }));
+      } else {
+        expect(result).toMatchObject(scenario === "reserved course" ? [] : [{ courseId: incident.courseId }]);
+        expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it("parks after two unchanged zero-work closeouts even when unrelated commits changed HEAD", async () => {
     const incident = {
@@ -20820,6 +20869,7 @@ describe("course-support inspection ownership", () => {
       where: {
         status: { in: expect.any(Array) },
         leaseExpiresAt: { lte: now },
+        verificationRuntimeHold: { equals: Prisma.DbNull },
       },
     });
   });

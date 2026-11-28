@@ -1,6 +1,7 @@
 import { Prisma, type CourseDiscoveryJob } from "@prisma/client";
 import { isSearchWindowActive } from "@/lib/automation/date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
+import { isCanonicalLegacyOutdoorOffering } from "@/lib/searches/course-monitoring-target";
 import { activeDiscoveryPilotSearchIds, isCourseDiscoveryEnabled, isGeneralDiscoveryEnabled } from "./config";
 
 type Target = { courseId: string; offeringId?: string | null };
@@ -16,12 +17,16 @@ export async function discoveryPilotTargetKeys(reader: Reader, now: Date) {
     teeSearchId: { in: await activeDiscoveryPilotSearchIds(process.env, reader) }, teeSearch: { status: "ACTIVE" },
   }, select: { courseId: true, offeringId: true,
     course: { select: { timeZone: true, isPublic: true, monitoringMode: true } },
-    offering: { select: { courseId: true, kind: true, active: true, publicAccessStatus: true } },
+    offering: { select: { id: true, courseId: true, kind: true, active: true, publicAccessStatus: true } },
     teeSearch: {
     select: { status: true, mode: true, date: true, endTime: true, userTimeZone: true, createdAt: true,
       trafficClass: true, syntheticMultiCycle: true, syntheticTestWindow: true, alertGeneration: true },
   } } });
-  const eligible = preferences.filter(preference => {
+  const eligible = preferences.map(preference => {
+    const { teeSearch, courseId, offeringId, offering } = preference;
+    return teeSearch.mode === "OUTDOOR" && isCanonicalLegacyOutdoorOffering(courseId, offeringId, offering)
+      ? { ...preference, offeringId: null, offering: null } : preference;
+  }).filter(preference => {
     const search = preference.teeSearch;
     const synthetic = search.trafficClass === "TEST" || search.trafficClass === "AUTOMATION";
     const expiry = getSyntheticMultiCycleExpiresAt(search, now);

@@ -44,9 +44,7 @@ type GolfNowResponse = {
   ttResults?: {
     teeTimes?: unknown;
   };
-  ttException?: {
-    errorType?: unknown;
-  };
+  ttException?: unknown;
 };
 
 export function isGolfNowMetadata(value: unknown): value is GolfNowMetadata {
@@ -147,9 +145,11 @@ export async function fetchGolfNowTeeSheet(
   }
 
   const payload = await readGolfNowResponse(response);
-  const teeTimes = Array.isArray(payload.ttResults?.teeTimes)
-    ? (payload.ttResults.teeTimes as GolfNowTeeTime[])
-    : [];
+  const teeTimes = payload.ttResults?.teeTimes;
+  const exception = payload.ttException;
+  if (!Array.isArray(teeTimes) || (exception != null && (!isRecord(exception) || exception.errorType != null))) {
+    throw golfNowSchemaError("GolfNow tee times response did not contain a verified tee sheet");
+  }
   const slots = teeTimes.flatMap((teeTime) =>
     normalizeGolfNowSlot(teeTime, {
       courseId: input.courseId,
@@ -213,7 +213,7 @@ function buildGolfNowRequest(facilityId: number, date: string, players: number) 
 }
 
 function normalizeGolfNowSlot(
-  teeTime: GolfNowTeeTime,
+  row: unknown,
   input: {
     courseId: string;
     targetDate: string;
@@ -221,22 +221,26 @@ function normalizeGolfNowSlot(
     metadata: GolfNowMetadata;
   }
 ): TeeTimeSlot[] {
+  if (!isRecord(row)) throw golfNowSchemaError("GolfNow tee time row could not be verified");
+  const teeTime = row as GolfNowTeeTime;
   if (
     teeTime.facilityId !== input.metadata.facilityId ||
-    teeTime.isReservationRestricted === true ||
     typeof teeTime.time?.date !== "string" ||
     teeTime.time.date.slice(0, 10) !== input.targetDate ||
-    typeof teeTime.time.formatted !== "string"
+    typeof teeTime.time.formatted !== "string" ||
+    (teeTime.isReservationRestricted !== undefined && typeof teeTime.isReservationRestricted !== "boolean")
   ) {
-    return [];
+    throw golfNowSchemaError("GolfNow tee time row could not be verified for the requested facility and date");
   }
   const time = normalizeGolfNowTime(teeTime.time.formatted);
   if (!time) {
-    return [];
+    throw golfNowSchemaError("GolfNow tee time row returned an invalid time");
   }
-  const rates = Array.isArray(teeTime.teeTimeRates)
-    ? (teeTime.teeTimeRates as GolfNowRate[])
-    : [];
+  if (teeTime.isReservationRestricted) return [];
+  if (!Array.isArray(teeTime.teeTimeRates) || !teeTime.teeTimeRates.every(isRecord)) {
+    throw golfNowSchemaError("GolfNow tee time row returned an invalid rate list");
+  }
+  const rates: GolfNowRate[] = teeTime.teeTimeRates;
   const options = rates.flatMap(normalizeGolfNowRate);
   if (options.length === 0) {
     return [];
@@ -263,6 +267,14 @@ function normalizeGolfNowSlot(
     priceOptions,
     evidenceUrl: GOLFNOW_SEARCH_ENDPOINT
   }];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function golfNowSchemaError(message: string) {
+  return Object.assign(new Error(message), { failureClass: "SCHEMA" as const });
 }
 
 function normalizeGolfNowRate(rate: GolfNowRate) {
@@ -313,7 +325,7 @@ async function readGolfNowResponse(response: Response): Promise<GolfNowResponse>
   }
   try {
     const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    if (!isRecord(parsed)) {
       throw new Error();
     }
     return parsed as GolfNowResponse;

@@ -33,13 +33,6 @@ type AgilysysRate = {
   };
 };
 
-type AgilysysSlot = {
-  scheduleDateTime?: unknown;
-  availability?: unknown;
-  teeTimeId?: unknown;
-  rateType?: unknown;
-};
-
 type AgilysysTeeSheetResponse = {
   success?: unknown;
   availableTeeSlots?: unknown;
@@ -143,7 +136,7 @@ export async function fetchAgilysysTeeSheet(
   }
   return {
     slots,
-    targetDateStatus: slots.length > 0 ? ("OPEN" as const) : ("UNKNOWN" as const),
+    targetDateStatus: "OPEN" as const,
     bookingWindowEvidence: null
   };
 }
@@ -178,17 +171,14 @@ async function fetchAgilysysCourseSlots(
     "Agilysys tee times"
   );
   if (payload.success !== true || !Array.isArray(payload.availableTeeSlots)) {
-    throw new Error("Agilysys tee times returned an invalid response");
+    invalidAgilysysTeeSheet();
   }
 
   const slots = payload.availableTeeSlots
-    .flatMap((group) =>
-      group &&
-      typeof group === "object" &&
-      Array.isArray((group as { slots?: unknown }).slots)
-        ? (group as { slots: AgilysysSlot[] }).slots
-        : []
-    )
+    .flatMap((group: unknown) => {
+      if (!isRecord(group) || !Array.isArray(group.slots)) invalidAgilysysTeeSheet();
+      return group.slots as unknown[];
+    })
     .flatMap((slot) =>
       normalizeAgilysysSlot(slot, {
         courseId: input.courseId,
@@ -256,7 +246,7 @@ function buildAgilysysTeeSheetUrl(
 }
 
 function normalizeAgilysysSlot(
-  slot: AgilysysSlot,
+  slot: unknown,
   input: {
     courseId: string;
     players: number;
@@ -266,21 +256,28 @@ function normalizeAgilysysSlot(
   }
 ): TeeTimeSlot[] {
   if (
+    !isRecord(slot) ||
     typeof slot.scheduleDateTime !== "string" ||
     !new RegExp(`^${input.targetDate}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d$`).test(
       slot.scheduleDateTime
     ) ||
-    !Number.isInteger(slot.availability) ||
-    (slot.availability as number) < input.players ||
-    (slot.availability as number) > 4 ||
-    !Array.isArray(slot.rateType)
+    typeof slot.availability !== "number" || !Number.isInteger(slot.availability) ||
+    slot.availability < 0 || slot.availability > 4 ||
+    !Array.isArray(slot.rateType) || !slot.rateType.every(isRecord)
   ) {
-    return [];
+    invalidAgilysysTeeSheet();
   }
-  const rates = (slot.rateType as AgilysysRate[])
+  if (slot.availability < input.players) return [];
+
+  const offeredRates = slot.rateType as AgilysysRate[];
+  const rates = offeredRates
     .flatMap(normalizeAgilysysRate)
     .sort(compareAgilysysRates);
   if (rates.length === 0) {
+    // A listed, potentially bookable time without a known rate scope cannot
+    // settle the customer's search as empty.
+    if (offeredRates.length === 0 || offeredRates.some(rate =>
+      typeof rate.isPrivate !== "boolean" && !isConditionalAgilysysRate(rate))) invalidAgilysysTeeSheet();
     return [];
   }
   const options = rates
@@ -303,7 +300,7 @@ function normalizeAgilysysSlot(
       courseId: input.courseId,
       sourceId: `agilysys-${input.metadata.tenantId}-${input.metadata.courseId}-${sourceId}`,
       startsAt: slot.scheduleDateTime,
-      availableSpots: slot.availability as number,
+      availableSpots: slot.availability,
       bookingUrl: bookingUrl.toString(),
       priceCents: preferred.priceCents,
       holes: preferred.holes,
@@ -314,15 +311,28 @@ function normalizeAgilysysSlot(
   ];
 }
 
-function normalizeAgilysysRate(rate: AgilysysRate) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function invalidAgilysysTeeSheet(): never {
+  throw new Error("Agilysys tee times returned an invalid response");
+}
+
+function isConditionalAgilysysRate(rate: AgilysysRate) {
   const unrestrictedName = typeof rate.name === "string"
     ? rate.name.replace(/\bnon[- ]?residents?\b/giu, "") : "";
-  if (
-    rate.isPrivate !== false || (rate.holeType !== 9 && rate.holeType !== 18) ||
-    /\b(?:members?|membership|residents?|resort|mvc|package|passholders?|cardholders?|locals?)\b/iu.test(unrestrictedName)
-  ) {
-    return [];
-  }
+  return /\b(?:members?|membership|residents?|resort|mvc|package|passholders?|cardholders?|locals?)\b/iu.test(unrestrictedName);
+}
+
+function normalizeAgilysysRate(rate: AgilysysRate): Array<{
+  holes: 9 | 18;
+  priceCents: number;
+  generalPublic: boolean;
+  rateId: number | null;
+}> {
+  if (rate.isPrivate !== false || isConditionalAgilysysRate(rate)) return [];
+  if (rate.holeType !== 9 && rate.holeType !== 18) invalidAgilysysTeeSheet();
   const parts = [rate.rates?.greenFee, rate.rates?.cartFee, rate.rates?.otherFee];
   if (
     parts.some(
@@ -330,14 +340,14 @@ function normalizeAgilysysRate(rate: AgilysysRate) {
         typeof value !== "number" || !Number.isFinite(value) || value < 0
     )
   ) {
-    return [];
+    invalidAgilysysTeeSheet();
   }
   const priceCents = Math.round(
     (parts as number[]).reduce((total, value) => total + value, 0) * 100
   );
   return [
     {
-      holes: rate.holeType as 9 | 18,
+      holes: rate.holeType,
       priceCents,
       generalPublic:
         typeof rate.name === "string" &&

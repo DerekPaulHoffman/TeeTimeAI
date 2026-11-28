@@ -139,6 +139,38 @@ describe("Chelsea Reservations adapter", () => {
     expect(posts[1]).toContain("btnDisplayTimes=GO+%3E");
     expect(posts.join(" ")).not.toMatch(/Compare|Reserve/i);
   });
+
+  const emptyResults = '<span id="lblTimes"></span>';
+  const selectedDay = calendarHtml("07/18/2026");
+  const readRequestedDate = (result: string, selected = selectedDay) => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(htmlResponse(calendarHtml("07/13/2026")))
+      .mockResolvedValueOnce(htmlResponse(selected))
+      .mockResolvedValueOnce(htmlResponse(result));
+    return fetchChelseaTeeSheet({ courseId: "dennis-highland", date: new Date("2026-07-18T00:00:00Z"),
+      players: 2, metadata }, fetchImpl as typeof fetch, new Date("2026-07-13T21:00:00Z"));
+  };
+
+  it("accepts a newly displayed empty result envelope for the requested date", async () => {
+    await expect(readRequestedDate(selectedDay + emptyResults)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+  });
+
+  it.each([
+    ["missing results", selectedDay],
+    ["different date", calendarHtml("07/19/2026") + emptyResults],
+    ["incomplete results", selectedDay + '<span id="lblTimes">'],
+    ["hidden results", selectedDay + '<span id="lblTimes" hidden></span>'],
+    ["duplicate result envelopes", selectedDay + emptyResults + emptyResults],
+    ["an unrecognized error envelope", selectedDay + '<span id="lblTimes">Service disconnected</span>'],
+    ["a malformed card beside a valid card", resultsHtml().replace('id="Compare72165401002"', '')],
+  ])("does not certify %s as complete tee-time inventory", async (_, result) => {
+    await expect(readRequestedDate(result)).rejects.toMatchObject({ failureClass: "SCHEMA" });
+  });
+
+  it("rejects an unchanged blank placeholder on the selected-date page", async () => {
+    const unchanged = selectedDay + emptyResults;
+    await expect(readRequestedDate(unchanged, unchanged)).rejects.toMatchObject({ failureClass: "SCHEMA" });
+  });
 });
 
 function htmlResponse(html: string, setCookie = false) {

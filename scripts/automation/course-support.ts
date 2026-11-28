@@ -35,12 +35,14 @@ import {
   getOwnedGenericCourseSourceResearchInput,
   getOwnedCourseSupportSourceSearchContext,
   heartbeatCourseSupportBatch,
+  holdOwnedCourseSupportVerificationRuntime,
   inspectCourseSupportQueue,
   markCourseSupportBatchNeedsHuman,
   recordOwnedCourseSupportSourceSearchResult,
   recoverCourseSupportBatch,
   recordCourseSupportClaimStateChurn,
   renewCourseSupportBatchOperationLease,
+  resumeOwnedCourseSupportVerificationRuntime,
   resolveCourseSupportBatchReference,
   verifyCourseSupportBatch,
   type CourseSupportReleaseAdvanceProof
@@ -1439,6 +1441,14 @@ async function verifyRelease(args: string[]) {
     persistedReleaseSha: releaseProvenance.releaseSha,
     requestedReleaseSha: releaseSha
   });
+  if (releaseProvenance.verificationRuntimeHeld) {
+    // The registered release is already deployed. Resume the original learning
+    // verification using the separately qualified published runtime checkout.
+    const verification = await recoverPublishedLearning({ batchId, ownerThreadId, releaseSha }, { heldOnly: true });
+    if (!verification) throw new Error("OWNED_OUTDOOR_LEARNING_REPAIR_REQUIRED");
+    if ("verificationRuntimeHold" in verification) return verification;
+    return { outcome: "release_learning_recovery" as const, verification };
+  }
   await assertReleaseGitProvenance(batchId, releaseSha);
 
   const deploymentProof = await runWithCourseSupportOperationHeartbeat(
@@ -1569,6 +1579,7 @@ async function verifyRelease(args: string[]) {
   }
   try {
     const learning = await recoverPublishedLearning({ batchId, ownerThreadId, releaseSha });
+    if (learning && "verificationRuntimeHold" in learning) return learning;
     if (learning) return { outcome: "release_learning_recovery" as const,
       deployment: { source: deploymentProof.source, state: deploymentProof.state,
         deployedAt: deploymentProof.deployedAt, verifiedAliasCount: deploymentProof.aliases.length },
@@ -1649,27 +1660,75 @@ export async function recoverLearning(args: string[], dependencies = {
   return result;
 }
 
+export async function inspectHeldCourseSupportLearningRuntime(input: { runtimeVersion: string; ownerThreadId: string }, dependencies: {
+  platform: NodeJS.Platform;
+  nativeOwnerThreadId: string | undefined;
+  execute: (file: string, args: string[], options: {
+    encoding: "utf8"; windowsHide: true; timeout: number; maxBuffer: number;
+  }) => Promise<{ stdout: string }>;
+} = { platform: process.platform, nativeOwnerThreadId: process.env.CODEX_THREAD_ID, execute: execFileAsync }) {
+  const { isQualifiedCourseSupportLearningRuntime, readCourseSupportLearningRuntimeReadyReceipt } =
+    await import("@/lib/automation/course-support-learning-recovery");
+  if (dependencies.platform !== "win32" || dependencies.nativeOwnerThreadId !== input.ownerThreadId) return null;
+  const executable = resolve(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const baseArgs = ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-File"];
+  const execOptions = { encoding: "utf8", maxBuffer: 128 * 1024, windowsHide: true } as const;
+  try {
+    const qualification = await dependencies.execute(executable, [...baseArgs,
+      resolve("scripts/automation/update-course-discovery-runtime.ps1"), "-RuntimeVersion", input.runtimeVersion,
+      "-OwnerThreadId", input.ownerThreadId], { ...execOptions, timeout: 36 * 60_000 });
+    if (!isQualifiedCourseSupportLearningRuntime(qualification.stdout, input.runtimeVersion)) return null;
+    const inspection = await dependencies.execute(executable, [...baseArgs,
+      resolve("scripts/automation/manage-course-discovery-task.ps1"), "-Action", "Inspect"], { ...execOptions, timeout: 20_000 });
+    return readCourseSupportLearningRuntimeReadyReceipt(inspection.stdout, input.runtimeVersion);
+  } catch {
+    return null;
+  }
+}
+
+function learningRuntimeHoldResult(runtimeVersion: string, state: "held" | "already_held" | "not_ready" | "busy" | "capacity_full", failureCode: string) {
+  return { outcome: "repair_required" as const, repairPhase: "LEARNING_RUNTIME" as const, failureCode,
+    verificationRuntimeHold: state, runtimeVersion, stateChanged: state === "held", ownershipRetained: true,
+    durableCloseoutRecorded: false, monitoringVerified: false, deliveryVerified: false, threadDisposition: "KEEP_VISIBLE" as const };
+}
+
 /** Executes shared, tested runtime P without registering P as this owner's
  * implementation R. Existing terminal learner jobs and budgets stay intact. */
-async function recoverPublishedLearning(input: { batchId: string; ownerThreadId: string; releaseSha: string }) {
+async function recoverPublishedLearning(input: { batchId: string; ownerThreadId: string; releaseSha: string },
+  options?: { heldOnly?: boolean }) {
   const { prisma } = await import("@/lib/prisma");
   const { loadOwnedOutdoorRepairBatch, readLearningRecipeHandoff } = await import("@/lib/course-discovery/learning-repair-recovery");
-  const eligible = await loadOwnedOutdoorRepairBatch(prisma, { batchId: input.batchId, now: new Date() });
+  const provenance = await getCourseSupportBatchRecoveryProvenance(input.batchId);
+  if (options?.heldOnly && !provenance.verificationRuntimeHeld) return null;
+  const eligible = await loadOwnedOutdoorRepairBatch(prisma, { batchId: input.batchId, now: new Date(),
+    allowVerificationRuntimeHeld: provenance.verificationRuntimeHeld });
   if (!eligible) return null;
   if (eligible.batch.ownerThreadId !== input.ownerThreadId || eligible.batch.releaseSha !== input.releaseSha)
     throw Error("ORIGINAL_NATIVE_OWNER_REQUIRED");
   runGit(["fetch", "origin", "main"]);
   const git = readGitState();
-  const provenance = await getCourseSupportBatchRecoveryProvenance(input.batchId);
   if (git.dirtyPaths.length || git.branch !== provenance.branch || git.headSha !== git.originMainSha ||
       !isGitAncestor(provenance.baseSha, git.headSha) || !isGitAncestor(input.releaseSha, git.headSha))
     throw Error("CLEAN_PUBLISHED_DESCENDANT_RUNTIME_REQUIRED");
   const runtimeVersion = git.headSha;
+  const readiness = provenance.verificationRuntimeHeld
+    ? await inspectHeldCourseSupportLearningRuntime({ runtimeVersion, ownerThreadId: input.ownerThreadId }) : null;
+  if (provenance.verificationRuntimeHeld) {
+    if (!readiness) return learningRuntimeHoldResult(runtimeVersion, "not_ready", "EXACT_WINDOWS_RUNTIME_NOT_READY");
+    const resumed = await resumeOwnedCourseSupportVerificationRuntime({ ...input, evidence: readiness });
+    if (resumed.outcome === "not_eligible") throw new Error("OWNED_VERIFICATION_RUNTIME_RESUME_NOT_ELIGIBLE");
+    if (resumed.outcome !== "resumed") return learningRuntimeHoldResult(runtimeVersion, resumed.outcome, "VERIFICATION_RUNTIME_RESUME_DEFERRED");
+  }
   const { watchOwnedLearningRecovery } = await import("@/lib/automation/course-support-learning-recovery");
   const { requestOwnedOutdoorLearningRecovery, ownedOutdoorLearningRecoveryProgress, DiscoveryConflictError } = await import("@/lib/course-discovery/service");
-  return runWithCourseSupportOperationHeartbeat({ ...input, allowDurableCloseout: true }, async (leaseToken, signal) => {
-    return watchOwnedLearningRecovery({ signal,
+  const operation = await runWithCourseSupportOperationHeartbeat({ ...input, allowDurableCloseout: true }, async (leaseToken, signal) => {
+    const result = await watchOwnedLearningRecovery({ signal, runtimeVersion,
       prepareRuntime: async () => {
+        if (readiness) {
+          const heartbeatAge = Date.now() - readiness.heartbeatAt.getTime();
+          if (heartbeatAge < 0 || heartbeatAge > 60_000) throw new Error("EXACT_WINDOWS_RUNTIME_READINESS_EXPIRED");
+          return;
+        }
         if (process.platform !== "win32") throw Error("LOCAL_WINDOWS_RUNTIME_REQUIRED");
         const executable = resolve(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
         await prepareCourseSupportRuntime({ executable, scriptPath: resolve("scripts/automation/update-course-discovery-runtime.ps1"),
@@ -1696,7 +1755,13 @@ async function recoverPublishedLearning(input: { batchId: string; ownerThreadId:
         } } : {}) };
       },
     });
+    return result.outcome === "runtime_blocked_before_admission" ? { ...result, leaseToken } : result;
   });
+  if (operation.outcome !== "runtime_blocked_before_admission") return operation;
+  // Stop the normal heartbeat before placing the original owner in a hold.
+  const held = await holdOwnedCourseSupportVerificationRuntime({ ...input, leaseToken: operation.leaseToken, evidence: operation.blocker });
+  if (held.outcome !== "held" && held.outcome !== "already_held") throw operation.error;
+  return learningRuntimeHoldResult(runtimeVersion, held.outcome, operation.blocker.diagnostic.reasonCode);
 }
 
 export function assertCourseSupportVerificationReleaseLane(input: {

@@ -1,5 +1,6 @@
 import type { CourseDiscoveryJob, Prisma } from "@prisma/client";
 import { getDiscoverySourceFingerprint } from "@/lib/course-discovery/service";
+import { isCanonicalLegacyOutdoorOffering } from "@/lib/searches/course-monitoring-target";
 
 export type DashboardDiscoveryStatus = {
   state: "TERMINAL_FAILURE";
@@ -33,6 +34,15 @@ export const dashboardDiscoveryJobSelect = {
   request: true, createdAt: true, completedAt: true,
 } satisfies Prisma.CourseDiscoveryJobSelect;
 
+export function getDashboardDiscoveryOffering(mode: string, courseId: string, offering: FingerprintOffering | null) {
+  if (mode === "OUTDOOR") {
+    return !offering || isCanonicalLegacyOutdoorOffering(courseId, offering.id, offering)
+      ? null : undefined;
+  }
+  return mode === "SIMULATOR" && offering?.kind === "SIMULATOR" && offering.courseId === courseId &&
+    offering.active && offering.publicAccessStatus !== "NOT_PUBLIC" ? offering : undefined;
+}
+
 function exactRecord(value: unknown, expected: Record<string, unknown>) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
@@ -49,9 +59,9 @@ export function getDashboardDiscoveryStatus(search: Search, preference: Preferen
       !(search.date instanceof Date) || !Number.isFinite(search.date.getTime()) ||
       !(job.completedAt instanceof Date) || !Number.isFinite(job.completedAt.getTime()) || job.completedAt > now ||
       !(job.createdAt instanceof Date) || !Number.isFinite(job.createdAt.getTime()) || job.completedAt < job.createdAt) return null;
-  const { course, offering } = preference;
-  if (search.mode === "SIMULATOR" ? !offering || !offering.active || offering.courseId !== course.id || offering.kind !== "SIMULATOR" || offering.publicAccessStatus === "NOT_PUBLIC"
-    : Boolean(offering) || course.isPublic === false) return null;
+  const { course } = preference;
+  const offering = getDashboardDiscoveryOffering(search.mode, course.id, preference.offering);
+  if (offering === undefined || (search.mode === "OUTDOOR" && course.isPublic === false)) return null;
   const targetKey = offering ? `offering:${offering.id}` : `course:${course.id}`;
   if (job.targetKey !== targetKey || job.courseId !== course.id || job.offeringId !== (offering?.id ?? null) ||
       job.baseRecipeId !== (offering ? offering.activeAccessRecipeId : course.activeAccessRecipeId) ||

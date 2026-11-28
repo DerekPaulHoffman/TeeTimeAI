@@ -25,6 +25,15 @@ function fixture(outcome?: string) {
 }
 
 describe("simulator dashboard status", () => {
+  it("keeps setup proof for unchanged criteria and preserves exact-source and current-availability checks", () => {
+    const { probe: setupProbe, ...input } = fixture("MATCH_FOUND");
+    const clock = { ...input, setupDeadlineAt: observedAt };
+    expect(getSimulatorDashboardStatus({ ...clock, setupProbe })).toMatchObject({ kind: "MONITORING", label: "Simulator alerts available" });
+    expect(getSimulatorDashboardStatus({ ...clock, setupProbe,
+      offering: { ...clock.offering, providerMetadata: { location: "different" } } })).toMatchObject({ kind: "UNCONFIRMED" });
+    expect(getSimulatorDashboardStatus({ ...clock, setupProbe, probe: fixture("FETCH_FAILED").probe })).toMatchObject({ kind: "UNCONFIRMED" });
+  });
+
   it.each([undefined, "NEEDS_ADAPTER", "FETCH_FAILED"])("does not promise pending support or retries for terminal discovery over %s", outcome => {
     const input = fixture(outcome);
     const status = getSimulatorDashboardStatus({ ...input,
@@ -63,6 +72,32 @@ describe("simulator dashboard status", () => {
     expect(getSimulatorDashboardStatus(fixture("FETCH_FAILED")).label).toBe("Availability check will retry");
   });
 
+  it("settles independently when its learner never runs and preserves verified outcomes and expiry", () => {
+    const setupDeadlineAt = new Date(now.getTime());
+    const waiting = fixture();
+    expect(getSimulatorDashboardStatus({ ...waiting, setupDeadlineAt, now: new Date(now.getTime() - 1) }).kind).toBe("PENDING");
+    expect(getSimulatorDashboardStatus({ ...waiting, setupDeadlineAt }).kind).toBe("UNCONFIRMED");
+    expect(getSimulatorDashboardStatus({ ...fixture("FETCH_FAILED"), setupDeadlineAt }).kind).toBe("UNCONFIRMED");
+    expect(getSimulatorDashboardStatus({ ...fixture("NO_MATCH"), setupDeadlineAt }).kind).toBe("NO_MATCH");
+    expect(getSimulatorDashboardStatus({ ...waiting, setupDeadlineAt, windowEnded: true }).kind).toBe("ENDED");
+  });
+
+  it("holds verified saved opening guidance through the setup cutoff and lets current evidence supersede it", () => {
+    const input = { ...fixture(), setupDeadlineAt: now, setupBookingOpensAt: new Date(now.getTime() + 60_000) };
+    expect(getSimulatorDashboardStatus(input).kind).toBe("BOOKING_NOT_OPEN");
+    expect(getSimulatorDashboardStatus({ ...input, now: input.setupBookingOpensAt }).kind).toBe("UNCONFIRMED");
+    expect(getSimulatorDashboardStatus({ ...input, probe: fixture("NO_MATCH").probe }).kind).toBe("NO_MATCH");
+    expect(getSimulatorDashboardStatus({ ...input, probe: fixture("MATCH_FOUND").probe, currentMatchCount: 1 }).kind).toBe("AVAILABLE");
+    expect(getSimulatorDashboardStatus({ ...input, alertStatus: "PAUSED" }).kind).toBe("PAUSED");
+    expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, monitoringState: "FINAL_TECHNICAL" } }).kind).toBe("UNAVAILABLE");
+  });
+
+  it("honors a durable cutoff with a lagging clock and retains a newer verified observation", () => {
+    const input = { ...fixture(), setupDeadlineAt: new Date(now.getTime() + 60_000), setupDeadlineReached: true };
+    expect(getSimulatorDashboardStatus(input).kind).toBe("UNCONFIRMED");
+    expect(getSimulatorDashboardStatus({ ...input, probe: fixture("NO_MATCH").probe }).kind).toBe("NO_MATCH");
+  });
+
   it("uses the venue's official site while rental details are unknown", () => {
     const input = fixture("NEEDS_ADAPTER");
     const pending = { ...input, offering: { ...input.offering, publicAccessStatus: "UNVERIFIED", bookingUrl: null,
@@ -77,7 +112,8 @@ describe("simulator dashboard status", () => {
   it("labels only verified rental URLs as official booking pages", () => {
     expect(getSimulatorDashboardStatus(fixture()).officialLinkLabel).toBe("Official booking page");
     const input = fixture();
-    expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, verifiedAt: null } }).officialLinkLabel).toBe("Official site");
+    expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, verifiedAt: null } }))
+      .toMatchObject({ officialLinkLabel: "Official site", officialUrl: input.website });
     expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, verifiedAt: new Date("2026-10-07T18:00:00Z") } }).officialLinkLabel).toBe("Official site");
   });
 

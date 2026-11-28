@@ -121,7 +121,8 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const sourceReconciliationOnly = item?.sourceReconciliationOnly === true;
   const expiredDemandRecoveryOnly = item?.expiredDemandRecoveryOnly === true;
   if (item?.expiredDemandRecoveryOnly !== undefined &&
-      (!expiredDemandRecoveryOnly || !registeredImplementation || sourceReconciliationOnly || item.failedLearningProgress !== undefined)) {
+      (!expiredDemandRecoveryOnly || (!registeredImplementation && !publishedImplementation) ||
+        sourceReconciliationOnly || item.failedLearningProgress !== undefined)) {
     fail("EXPIRED_COURSE_DEMAND_PROOF_REQUIRED");
   }
   if (item?.sourceReconciliationOnly !== undefined &&
@@ -161,7 +162,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     ? `desktop-simulator-research-${item.assignmentRef}-${item.checkpoint.readCount}.private.json`
     : simulator
     ? `desktop-simulator-wait-${item.assignmentRef}-${item.claimRevision}.private.json`
-    : registeredImplementation
+    : registeredImplementation || expiredDemandRecoveryOnly
     ? `desktop-repair-${expiredDemandRecoveryOnly ? "expired-demand" : "registered"}-${item.assignmentRef}-${item.releaseSha}.private.json`
     : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
   if (simulator && workerHead !== (simulatorPublished || simulatorRelease ? item.releaseSha : item.baseSha)) {
@@ -210,7 +211,11 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       localCandidate = { headSha: workerHead, sharedBaseSha: sharedBase, paths };
     }
   }
-  if (!simulatorPublished && !simulatorResearch && workerHead !== originalWorkerHead) {
+  if (publishedImplementation && expiredDemandRecoveryOnly) {
+    // The closure-only turn has no authority to merge an unpublished candidate.
+    execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, workerHead]);
+    execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
+  } else if (!simulatorPublished && !simulatorResearch && workerHead !== originalWorkerHead) {
     // A previous automatic continuation let this same owner fast-forward its
     // own clean branch. Retain that exact request as provenance; never adopt
     // arbitrary clean commits or an unrelated worker's checkout.

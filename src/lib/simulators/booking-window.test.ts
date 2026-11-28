@@ -8,6 +8,11 @@ describe("simulator booking-window scheduling", () => {
     expect(getSimulatorBookingOpening("2026-11-15", offering, "America/New_York")?.toISOString()).toBe("2026-11-08T14:00:00.000Z");
     expect(getSimulatorBookingOpening("2026-11-15", { ...offering, evidenceUrl: null }, "America/New_York")).toBeNull();
   });
+  it.each([{ bookingReleaseTimeLocal: "27:10" }, { bookingWindowDaysAhead: 2_147_483_647 }])(
+    "leaves a malformed saved opening unverified: %j", (changes) => {
+      expect(getSimulatorBookingOpening("2026-11-15", { ...offering, ...changes }, "America/New_York")).toBeNull();
+    },
+  );
   it("sleeps to release when all simulator calendars are closed", () => {
     const now = new Date("2026-10-05T12:00:00Z");
     expect(calculateNextSimulatorCheckAt({ date: new Date("2026-10-15T00:00:00Z"), now, checkStartedAt: now, cadenceMinutes: 5,

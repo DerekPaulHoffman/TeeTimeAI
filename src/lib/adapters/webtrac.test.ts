@@ -128,4 +128,26 @@ describe("WebTrac adapter", () => {
     }, fetchImpl as typeof fetch)).rejects.toThrow("WebTrac tee times returned 503");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
+
+  const input = { courseId: "casa-linda", date: new Date("2026-07-18T00:00:00Z"), players: 2, metadata };
+  const caption = '<caption class="sr-only">Tee Time Search Results</caption>';
+  const row = (date: string, openSlots: string) => `<tr>
+    <td data-title="Item Action"><a href="/addtocart.html?GRFMIDList=1313965726">Add To Cart</a></td>
+    <td data-title="Time">9:08 am</td><td data-title="Date">${date}</td><td data-title="Open Slots">${openSlots}</td>
+  </tr>`;
+
+  it("cannot verify tee-time availability from the search caption", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(caption));
+    await expect(fetchWebTracTeeSheet(input, fetchImpl)).resolves.toMatchObject({ slots: [], targetDateStatus: "UNKNOWN" });
+  });
+
+  it.each([row("07/19/2026", "4"), row("07/18/2026", "Loading")])("rejects a foreign date or incomplete result row %#", async invalidRow => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(`${caption}${invalidRow}`));
+    await expect(fetchWebTracTeeSheet(input, fetchImpl)).rejects.toThrow("unverified tee-time row");
+  });
+
+  it("recognizes valid exact-date rows with too few open slots", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(`${caption}${row("07/18/2026", "1")}`));
+    await expect(fetchWebTracTeeSheet(input, fetchImpl)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+  });
 });

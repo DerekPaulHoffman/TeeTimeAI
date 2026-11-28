@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { runWithCourseSupportWriterTransitionLease, withCourseSupportWriteConflictRetry, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES, isRuntimeBearingCourseSupportPath } from "./course-support-batches";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
+import { isCourseSupportVerificationRuntimeHeld } from "./course-support-runtime-hold";
 import { SIMULATOR_IMPLEMENTATION_BUSY } from "./simulator-support-path-admission";
 import { currentSimulatorFullRepair, hasConsumedSimulatorFullRepair, loadSimulatorRecoveryClaim, readSimulatorFullRepair } from "./simulator-full-repair";
 import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
@@ -583,9 +584,16 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
       if (!handoff || handoff.receipt.incidentId !== source.incident.id) throw new Error("Simulator claim requires a current offering-scoped failure probe.");
     }
     const live = await dispatch.listLiveCourseSupportDispatchReservations(tx);
-    const batches = await tx.courseSupportBatch.findMany({ where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } }, select: { id: true, incidents: { select: { courseId: true } } }, take: 16 });
-    const occupied = new Set([...live.map(entry => entry.audit.target.courseId), ...batches.flatMap(batch => batch.incidents.length ? batch.incidents.map(entry => entry.courseId) : [batch.id])]);
-    if (batches.length + live.length > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES || occupied.size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES || live.some(entry => entry.runId !== row.runId && entry.audit.target.offeringId === source.offering.id)) throw new Error("Simulator support shared capacity or offering ownership changed.");
+    const batches = await tx.courseSupportBatch.findMany({ where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } },
+      select: { id: true, verificationRuntimeHold: true, incidents: { select: { courseId: true } } } });
+    const capacityBatches = batches.filter(batch => !isCourseSupportVerificationRuntimeHeld(batch.verificationRuntimeHold));
+    const occupied = new Set([...live.map(entry => entry.audit.target.courseId), ...capacityBatches.flatMap(batch => batch.incidents.length ? batch.incidents.map(entry => entry.courseId) : [batch.id])]);
+    const heldCourseCollision = batches.some(batch => batch.verificationRuntimeHold != null &&
+      batch.incidents.some(entry => entry.courseId === source.offering.courseId));
+    if (capacityBatches.length + live.length > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES || occupied.size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
+        heldCourseCollision || live.some(entry => entry.runId !== row.runId && entry.audit.target.offeringId === source.offering.id)) {
+      throw new Error("Simulator support shared capacity or offering ownership changed.");
+    }
     const claim: SimulatorSupportClaim = { token: randomUUID(), revision: 1, phase: "CLAIMED", claimedAt: now.toISOString(),
       leaseExpiresAt: new Date(now.getTime() + SIMULATOR_SUPPORT_LEASE_MS).toISOString(), sourceFingerprint: source.fingerprint, originalSourceFingerprint: source.fingerprint,
       offeringRevision: source.offering.monitoringRevision, plannedPaths: [], releaseSha: null, branch: input.branch, deployment: null, recheckQueuedAt: null, verificationCycle: 0 };
@@ -817,6 +825,63 @@ export async function reconcileExpiredSimulatorResearchExecutions(tx: Prisma.Tra
     run.status = "COMPLETED";
     run.parsed = updated;
   }
+}
+
+/** Close only expired metadata-only verification with no customer or execution owner. */
+export async function reconcileExpiredSimulatorMetadataVerification(tx: Prisma.TransactionClient, now: Date,
+  runs: Array<{ id: string; status: string; parsed: CourseDispatchAudit | null }>) {
+  let closed = 0;
+  for (const run of runs) {
+    const audit = run.parsed;
+    const claim = audit?.simulatorClaim;
+    if (run.status !== "RUNNING" || !audit || audit.state !== "CONSUMED" || audit.target.mode !== "SIMULATOR" ||
+        !audit.target.engineeringAuthority || audit.target.fullRepair || !claim || claim.phase !== "VERIFYING" ||
+        !claim.releaseSha || !claim.deployment || claim.plannedPaths.length || claim.recheckQueuedAt ||
+        Date.parse(claim.leaseExpiresAt) + SIMULATOR_SUPPORT_LEASE_MS > now.getTime() ||
+        audit.simulatorContinuation?.receipts.length) continue;
+    const details = audit as CourseDispatchAudit & { simulatorEngineeringVerification?: unknown; simulatorRepairPending?: unknown };
+    if (details.simulatorRepairPending) continue;
+    const verification = readSimulatorEngineeringVerificationState(details.simulatorEngineeringVerification);
+    if ((details.simulatorEngineeringVerification !== undefined && !verification) || verification?.inFlight) continue;
+    if (readSimulatorResearchState(audit.simulatorResearch, claim.sourceFingerprint).inFlight) continue;
+    try { assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, now); }
+    catch { continue; }
+    let source: Awaited<ReturnType<typeof lockSource>>;
+    try { source = await lockSource(tx, audit, now); }
+    catch (error) {
+      if (error instanceof Error && (error.message.startsWith("Simulator engineering authority") ||
+          error.message.startsWith("Simulator source demand changed") ||
+          error.message.startsWith("Simulator offering source changed"))) continue;
+      throw error;
+    }
+    if (source.verificationTargets.length || source.incident.status !== "AUTO_INVESTIGATING") continue;
+
+    const auditWithCloseout = {
+      ...audit,
+      simulatorVerificationCloseout: {
+        version: 1, reason: "VERIFICATION_LEASE_EXPIRED", observedAt: now.toISOString(),
+        claimRevision: claim.revision, originalLeaseExpiresAt: claim.leaseExpiresAt,
+        monitoringVerified: false, customerAcceptance: false,
+      },
+    };
+    const runUpdated = await tx.automationRun.updateMany({ where: {
+      id: run.id, status: "RUNNING", completedAt: null,
+      AND: [
+        { audit: { path: ["simulatorClaim", "token"], equals: claim.token } },
+        { audit: { path: ["simulatorClaim", "revision"], equals: claim.revision } },
+      ],
+    }, data: { status: "COMPLETED", completedAt: now, outcome: "simulator_verification_lease_expired",
+      audit: auditWithCloseout as unknown as Prisma.InputJsonValue } });
+    if (runUpdated.count !== 1) continue;
+    const incidentUpdated = await tx.simulatorSupportIncident.updateMany({ where: {
+      id: source.incident.id, status: "AUTO_INVESTIGATING", updatedAt: source.incident.updatedAt,
+    }, data: { status: "NEEDS_HUMAN", retryAt: null } });
+    if (incidentUpdated.count !== 1) throw new Error("Simulator incident changed during expired verification closeout.");
+    run.status = "COMPLETED";
+    run.parsed = auditWithCloseout;
+    closed += 1;
+  }
+  return closed;
 }
 
 export function recordSimulatorSupportDeployment(input: Owner & { proof: GitDeploymentProof }) {
