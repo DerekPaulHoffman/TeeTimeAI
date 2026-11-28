@@ -1,6 +1,7 @@
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { getSimulatorOfferingSourceFingerprint } from "./source-fingerprint";
 import type { DashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
+import { hasReachedCourseSetupDeadline } from "@/lib/searches/course-setup-deadline";
 
 type Offering = Parameters<typeof getSimulatorOfferingSourceFingerprint>[0] & {
   automationEligibility: string;
@@ -19,8 +20,10 @@ export type SimulatorDashboardStatusKind = "ENDED" | "PAUSED" | "STOPPED" | "UNA
 export function getSimulatorAlertSummary(statuses: { kind: SimulatorDashboardStatusKind; label: string }[]) {
   if (statuses.length === 1) return statuses[0].label;
   if (!statuses.length) return "Simulator checks pending";
-  if (statuses.every(status => status.kind === "NO_MATCH")) return "Checked · No matching sessions";
-  if (statuses.every(status => status.kind === "BOOKING_NOT_OPEN")) return "Public booking windows have not opened yet";
+  const active = statuses.filter(status => status.kind !== "ENDED");
+  if (!active.length) return "Search window ended";
+  if (active.every(status => status.kind === "NO_MATCH")) return "Checked · No matching sessions";
+  if (active.every(status => status.kind === "BOOKING_NOT_OPEN")) return "Public booking windows have not opened yet";
   if (statuses.some(status => status.kind === "UNAVAILABLE")) return "Some simulator alerts unavailable";
   if (statuses.some(status => status.kind === "UNCONFIRMED")) return "Some simulator availability not confirmed";
   if (statuses.some(status => status.kind === "ADDING_SUPPORT")) return "Adding simulator alert support";
@@ -37,6 +40,7 @@ export function getSimulatorDashboardStatus(input: {
   windowEnded: boolean;
   website: string | null;
   now?: Date;
+  setupDeadlineAt?: Date;
   discoveryStatus?: DashboardDiscoveryStatus | null;
 }) {
   const { offering, probe, currentMatchCount, alertStatus, windowEnded, website } = input;
@@ -71,6 +75,7 @@ export function getSimulatorDashboardStatus(input: {
     : bookingNotOpen ? "BOOKING_NOT_OPEN"
     : current && currentMatchCount > 0 ? "AVAILABLE"
     : current && probe?.outcome === "NO_MATCH" ? "NO_MATCH"
+    : hasReachedCourseSetupDeadline(input.setupDeadlineAt, now) ? "UNCONFIRMED"
     : currentProbe && probe?.outcome === "NEEDS_ADAPTER" ? "ADDING_SUPPORT"
     : (currentProbe && probe?.outcome === "FETCH_FAILED") || offering?.monitoringState === "DEGRADED_RETRYING" ? "RETRYING"
     : "PENDING";

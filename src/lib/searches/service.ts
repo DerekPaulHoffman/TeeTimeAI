@@ -51,6 +51,7 @@ import {
   type CurrentMatchSettings,
 } from "@/lib/searches/current-match-settings";
 import { projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
+import { getCourseSetupDeadline } from "@/lib/searches/course-setup-deadline";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
 import { assertSimulatorSessionFitsWindow } from "@/lib/searches/simulator-window";
@@ -794,6 +795,7 @@ export async function listTeeSearchesForUser(userId: string) {
       );
       return { ...current, preferences: current.preferences.map(preference => ({
         ...preference,
+        setupDeadlineAt: getCourseSetupDeadline(search, preference.course.timeZone),
         discoveryStatus: getDashboardDiscoveryStatus(current, preference,
           discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null,
           current.probes.find(probe => probe.courseId === preference.courseId &&

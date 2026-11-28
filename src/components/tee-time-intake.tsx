@@ -2263,8 +2263,8 @@ function CourseMonitoringStatus({
                 : course.monitoringReadinessObservedAt
                   ? `Last checked ${new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: course.timeZone ?? "America/New_York" }).format(new Date(course.monitoringReadinessObservedAt))}. Start an alert to check the official booking page again.`
                 : course.firstTimeLookup
-                  ? "Tee Time Spot hasn't checked this course's booking page before. We'll email whether alerts are available after the first check, usually within 10 minutes."
-                  : "We'll email whether tee-time alerts are available after the first check, usually within 10 minutes."}
+                  ? "Tee Time Spot hasn't checked this course's booking page before. Check your dashboard for a setup result within 15 minutes."
+                  : "Check your dashboard for a setup result within 15 minutes."}
           </small>
         ) : null}
       </span>

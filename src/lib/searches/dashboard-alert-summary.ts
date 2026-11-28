@@ -8,7 +8,8 @@ import {
   type DashboardMonitoringVerdictInput
 } from "@/lib/searches/dashboard-monitoring-verdict";
 
-export type DashboardCourseStatus = DashboardAvailabilityView & {
+export type DashboardCourseStatus = Omit<DashboardAvailabilityView, "tone"> & {
+  tone: DashboardAvailabilityView["tone"] | "ended";
   emoji: string;
   hasCurrentPublicInventory: boolean;
 };
@@ -16,9 +17,22 @@ export type DashboardCourseStatus = DashboardAvailabilityView & {
 export function getDashboardCourseStatus(input: {
   availability: Parameters<typeof getDashboardAvailabilityView>[0];
   monitoring: DashboardMonitoringVerdictInput;
+  windowEnded?: boolean;
 }): DashboardCourseStatus {
+  if (input.windowEnded && input.availability.alertStatus === "ACTIVE") {
+    return {
+      label: "Search window ended",
+      detail: "The requested time has passed for this course.",
+      emoji: "🕒",
+      tone: "ended",
+      hasCurrentPublicInventory: false,
+    };
+  }
   const availability = getDashboardAvailabilityView(input.availability);
-  const monitoring = getDashboardMonitoringVerdict(input.monitoring);
+  const monitoring = getDashboardMonitoringVerdict({
+    ...input.monitoring,
+    currentMatchCount: input.availability.qualifyingMatchCount,
+  });
   const monitoringOverridesAvailability =
     monitoring.icon === "unavailable" ||
     Boolean(input.monitoring.upcomingBookingWindow);
@@ -57,13 +71,14 @@ export function getDashboardAlertSummary(input: {
 }) {
   const active = input.alertStatus === "ACTIVE";
   const lifecycleLabel = active ? "Active" : input.alertStatus;
-  const unavailableCount = input.courseStatuses.filter(
+  const courseStatuses = input.courseStatuses.filter(course => course.tone !== "ended");
+  const unavailableCount = courseStatuses.filter(
     (course) => course.tone === "unavailable"
   ).length;
-  const pendingCount = input.courseStatuses.filter(
+  const pendingCount = courseStatuses.filter(
     (course) => course.tone === "pending"
   ).length;
-  const scheduledCount = input.courseStatuses.filter(
+  const scheduledCount = courseStatuses.filter(
     (course) => course.tone === "scheduled"
   ).length;
   const coverageNotice = active
@@ -98,8 +113,11 @@ export function getDashboardAlertSummary(input: {
     };
   }
 
-  if (input.courseStatuses.length === 0 ||
-      pendingCount === input.courseStatuses.length) {
+  if (!courseStatuses.length && input.courseStatuses.length > 0) {
+    return { lifecycleLabel, headline: "Search window ended", coverageNotice: null };
+  }
+
+  if (courseStatuses.length === 0 || pendingCount === courseStatuses.length) {
     return {
       lifecycleLabel,
       headline: "Waiting for a check of these settings",
@@ -107,26 +125,26 @@ export function getDashboardAlertSummary(input: {
     };
   }
 
-  if (input.courseStatuses.length === 1) {
+  if (courseStatuses.length === 1) {
     return {
       lifecycleLabel,
-      headline: input.courseStatuses[0].label,
+      headline: courseStatuses[0].label,
       coverageNotice: null
     };
   }
 
   const unconfirmedCount = unavailableCount + pendingCount;
   const headline = unconfirmedCount > 0
-    ? unconfirmedCount === input.courseStatuses.length
+    ? unconfirmedCount === courseStatuses.length
       ? "Current availability not confirmed"
       : "Some course availability is not confirmed"
     : scheduledCount > 0
-      ? scheduledCount === input.courseStatuses.length
+      ? scheduledCount === courseStatuses.length
         ? "Booking not open yet"
         : "No matching times; some courses open later"
-      : input.courseStatuses.some((course) => course.hasCurrentPublicInventory)
+      : courseStatuses.some((course) => course.hasCurrentPublicInventory)
         ? "Other tee times listed; none match your request"
-        : input.courseStatuses.some((course) => course.tone === "available")
+        : courseStatuses.some((course) => course.tone === "available")
           ? "No current matches confirmed"
           : "No matching times for your request";
 

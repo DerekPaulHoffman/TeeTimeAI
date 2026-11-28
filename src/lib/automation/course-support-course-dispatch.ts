@@ -469,8 +469,9 @@ export async function planCourseSupportCourseDispatch(input: {
     const runs = await readRuns(tx, new Date(Math.floor(now.getTime() / TICK_MS) * TICK_MS));
     await expireUnlaunched(tx, now, input.baseSha, runs);
     await revokeStaleBound(tx, now, input.baseSha, runs);
-    const { reconcileExpiredSimulatorResearchExecutions } = await import("./simulator-support-ownership");
+    const { reconcileExpiredSimulatorMetadataVerification, reconcileExpiredSimulatorResearchExecutions } = await import("./simulator-support-ownership");
     await reconcileExpiredSimulatorResearchExecutions(tx, now, runs);
+    const expiredSimulatorVerifications = await reconcileExpiredSimulatorMetadataVerification(tx, now, runs);
     const tick = tickRef(now);
     const retryOf = input.controlledRetryOf;
     const retryTarget = retryOf ? await readSportsHausRetry(tx, retryOf) : null;
@@ -667,6 +668,7 @@ export async function planCourseSupportCourseDispatch(input: {
       continuationItems: continuation.continuationItems,
       continuationAttentionCount: continuation.attentionCount,
       continuationEligibleCount: continuation.continuationItems.length,
+      expiredSimulatorVerifications,
       fullRepairContinuationItems,
       launchItems: runs.filter((run) => run.parsed?.tickRef === tick && (retryOf ? run.parsed.controlledRetryOf === retryOf && run.parsed.ownerThreadId === input.ownerThreadId && Boolean(retryTarget) : !run.parsed.controlledRetryOf) && run.status === "RUNNING" && ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
         .map((run) => ({ assignmentRef: run.parsed!.assignmentRef, state: run.parsed!.state,

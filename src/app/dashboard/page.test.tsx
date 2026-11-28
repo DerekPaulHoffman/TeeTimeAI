@@ -179,4 +179,26 @@ describe("dashboard course and simulator presentation", () => {
     expect(dom.textContent).not.toMatch(/Simulator check pending|will retry|No matching sessions/);
     expect(dom.querySelector('a[href="https://official.example/booking"]')).not.toBeNull();
   });
+
+  it("renders a clear deadline result in outdoor and simulator alerts even if no worker started", async () => {
+    const searches = [fixture("GOLF", "Unverified Course"), fixture("SIMULATOR", "Unverified Venue")].map(search => ({
+      ...search, lastCheckedAt: null, matches: [], probes: [], preferences: search.preferences.map(preference => ({
+        ...preference, setupDeadlineAt: now,
+      })),
+    }));
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue(searches as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    const html = renderToStaticMarkup(await DashboardPage());
+    const dom = document.createElement("div");
+    dom.innerHTML = html;
+    for (const row of dom.querySelectorAll(".dashboard-row")) {
+      expect(row.querySelector(".dashboard-alert-summary-copy")?.textContent).toContain("Automatic availability not confirmed");
+      expect(row.querySelector(".dashboard-alert-summary-checked")?.textContent).toBe("No completed check");
+      expect(row.querySelector('a[href="https://official.example/booking"]')).not.toBeNull();
+    }
+    expect(dom.querySelectorAll(".dashboard-row")).toHaveLength(2);
+    expect(dom.textContent).not.toMatch(/check pending|pending initial check|will retry/i);
+    if (process.env.DASHBOARD_FINALITY_FIXTURE) {
+      writeFileSync(path.resolve(process.env.DASHBOARD_FINALITY_FIXTURE), html);
+    }
+  });
 });

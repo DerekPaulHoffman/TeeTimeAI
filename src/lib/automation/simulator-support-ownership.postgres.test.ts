@@ -246,6 +246,34 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     return { ...f, engineeringOwner: owner, proof, runtime };
   }
 
+  it("retires an abandoned metadata-only verification without restarting the worker or changing customer demand", async () => {
+    const f = await readyEngineeringFixture();
+    const before = await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } });
+    const audit = dispatcher.parseCourseDispatchAudit(before.audit)!;
+    const leaseExpiry = Date.parse(audit.simulatorClaim!.leaseExpiresAt);
+    const run = { id: before.id, parsed: audit, status: before.status };
+    await expect(client.$transaction(tx => lane.reconcileExpiredSimulatorMetadataVerification(tx,
+      new Date(leaseExpiry + 14 * 60_000), [run]))).resolves.toBe(0);
+
+    const now = new Date(leaseExpiry + 15 * 60_000);
+    const planner = () => dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "fixture-parent", baseSha, now });
+    const first = await planner();
+    expect(first).toMatchObject({ acquired: true, value: { expiredSimulatorVerifications: 1, continuationItems: [], reservedCount: 0 } });
+    expect(await planner()).toMatchObject({ acquired: true, value: { expiredSimulatorVerifications: 0, continuationItems: [] } });
+    const closeout = await client.automationRun.findUniqueOrThrow({ where: { id: before.id } });
+    expect(closeout).toMatchObject({ status: "COMPLETED", outcome: "simulator_verification_lease_expired", audit: {
+      childThreadId: audit.childThreadId, simulatorClaim: audit.simulatorClaim,
+      simulatorVerificationCloseout: { version: 1, reason: "VERIFICATION_LEASE_EXPIRED", monitoringVerified: false, customerAcceptance: false },
+    } });
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } }))
+      .toMatchObject({ status: "NEEDS_HUMAN", retryAt: null, reason: "NEEDS_ADAPTER" });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+    await expect(lane.recoverSimulatorSupport(f.engineeringOwner)).rejects.toThrow("Simulator assignment is unavailable");
+    expect(coreMocks.fetch).not.toHaveBeenCalled();
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled();
+    expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
   it.each(["TEESHEET", "UPPER_HAND", "YOUR_GOLF_BOOKING", "ACUITY"] as PublicSimulatorFixtureKind[])("discovers and closes %s through owned research without a manual facts packet", async kind => {
     const f = await engineeringFixture();
     const publicSource = publicSimulatorFixture(kind);

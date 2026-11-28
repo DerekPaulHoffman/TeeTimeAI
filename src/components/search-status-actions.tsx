@@ -48,6 +48,7 @@ export function SearchStatusActions({
   initialScheduleVersion,
   initialLastCheckedAt,
   initialNextCheckAt,
+  setupDeadlineAt,
   initialCoursePreferences
 }: {
   mode?: SearchMode;
@@ -65,6 +66,7 @@ export function SearchStatusActions({
   initialScheduleVersion?: number;
   initialLastCheckedAt: string | null;
   initialNextCheckAt: string | null;
+  setupDeadlineAt?: string | null;
   initialCoursePreferences: CoursePreferenceFormValue[];
 }) {
   const router = useRouter();
@@ -120,6 +122,13 @@ export function SearchStatusActions({
   useEffect(() => {
     if (removalRequested) keepButtonRef.current?.focus();
   }, [removalRequested]);
+
+  useEffect(() => {
+    if (localStatus !== "ACTIVE" || !setupDeadlineAt) return;
+    const delay = Math.max(0, Date.parse(setupDeadlineAt) - Date.now());
+    const timeout = window.setTimeout(() => router.refresh(), delay);
+    return () => window.clearTimeout(timeout);
+  }, [localStatus, router, setupDeadlineAt]);
 
   useEffect(() => {
     if (localStatus !== "ACTIVE" ||

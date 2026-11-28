@@ -51,6 +51,8 @@ expire after 90 seconds. Useful late checks are retained and reported as late,
 not suppressed to make the timing look successful. These budgets do not prove the delivery SLO; the pilot
 must measure discovery, replay, scheduling and delivery together.
 
+The dashboard's setup deadline starts with saved demand or its current accepted generation and ends after fifteen minutes or at the end of the course-local requested window, whichever comes first. A course without a verified result at that point shows that automatic availability could not be confirmed. The hosted one-minute recovery route closes discovery jobs that have waited fifteen minutes in the queue and jobs past their saved execution deadlines. Queue expiry clears the target reservation and leaves the pickup and execution clocks empty. The historical pilot still measures pickup through observed delivery.
+
 Incomplete extraction, challenge pages and unavailable browser capabilities
 remain explicit failures. They cannot create a `NO_MATCH` result. Cancellation,
 edits, source changes and stale schedule versions are checked again before

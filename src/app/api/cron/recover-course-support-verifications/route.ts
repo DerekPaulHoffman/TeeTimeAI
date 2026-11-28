@@ -1,4 +1,5 @@
 import { recoverDueCourseSupportVerificationRequests } from "@/lib/automation/course-support-verification-scheduler";
+import { expireOverdueDiscoveryJobs } from "@/lib/course-discovery/service";
 import { hasDatabaseConfig } from "@/lib/env";
 
 export async function GET(request: Request) {
@@ -20,10 +21,11 @@ export async function GET(request: Request) {
     );
   }
 
-  try {
-    const result = await recoverDueCourseSupportVerificationRequests();
-    return Response.json(result, { status: result.failed > 0 ? 503 : 200 });
-  } catch {
+  const [verification, discovery] = await Promise.allSettled([
+    recoverDueCourseSupportVerificationRequests(),
+    expireOverdueDiscoveryJobs(),
+  ]);
+  if (verification.status === "rejected") {
     return Response.json(
       {
         error:
@@ -32,4 +34,9 @@ export async function GET(request: Request) {
       { status: 503 },
     );
   }
+
+  const discoveryDeadlines = discovery.status === "fulfilled" ? discovery.value : { failed: true };
+  return Response.json({ ...verification.value, discoveryDeadlines }, {
+    status: verification.value.failed > 0 || discovery.status === "rejected" ? 503 : 200,
+  });
 }

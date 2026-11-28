@@ -108,6 +108,32 @@ describe("dashboard alert summary", () => {
     expect(partial.coverageNotice).toContain("Availability not confirmed for 1 course");
   });
 
+  it("settles five mixed courses at the saved deadline even without the responder", () => {
+    const deadline = new Date("2026-09-30T06:45:00.000Z");
+    const states = (now: Date) => {
+      const clock = { setupDeadlineAt: deadline, now };
+      return [
+        courseStatus("MATCH_FOUND", { qualifyingMatchCount: 1 }, clock),
+        courseStatus("NO_MATCH", { rawSummary: { visibleSlotCount: 0, playerEligibleSlotCount: 0 } }, clock),
+        courseStatus("NEEDS_ADAPTER", {}, { ...clock, alertSupport: "PHONE_ONLY", monitoringState: "FINAL_MANUAL" }),
+        courseStatus(undefined, {}, { ...clock, upcomingBookingWindow: { opensAt: "later" } }),
+        courseStatus(undefined, {}, clock),
+      ];
+    };
+
+    const before = states(new Date(deadline.getTime() - 1));
+    expect(before.map(status => status.tone)).toEqual(["matching", "empty", "unavailable", "scheduled", "pending"]);
+    const at = states(deadline);
+    expect(at.map(status => status.label)).toEqual([
+      "1 matching time", "No public times listed", "Call the course",
+      "Checks start when booking opens", "Automatic availability not confirmed",
+    ]);
+    expect(summary(at, 1)).toMatchObject({
+      headline: "1 matching time now",
+      coverageNotice: "Availability not confirmed for 2 courses · 1 course open for booking later",
+    });
+  });
+
   it.each(["NEEDS_ADAPTER", "FETCH_FAILED", "BLOCKED_TOOLING"] as const)(
     "does not describe %s as an empty successful check or trust its slot counters",
     (outcome) => {

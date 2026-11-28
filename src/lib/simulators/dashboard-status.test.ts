@@ -63,6 +63,16 @@ describe("simulator dashboard status", () => {
     expect(getSimulatorDashboardStatus(fixture("FETCH_FAILED")).label).toBe("Availability check will retry");
   });
 
+  it("settles independently when its learner never runs and preserves verified outcomes and expiry", () => {
+    const setupDeadlineAt = new Date(now.getTime());
+    const waiting = fixture();
+    expect(getSimulatorDashboardStatus({ ...waiting, setupDeadlineAt, now: new Date(now.getTime() - 1) }).kind).toBe("PENDING");
+    expect(getSimulatorDashboardStatus({ ...waiting, setupDeadlineAt }).kind).toBe("UNCONFIRMED");
+    expect(getSimulatorDashboardStatus({ ...fixture("FETCH_FAILED"), setupDeadlineAt }).kind).toBe("UNCONFIRMED");
+    expect(getSimulatorDashboardStatus({ ...fixture("NO_MATCH"), setupDeadlineAt }).kind).toBe("NO_MATCH");
+    expect(getSimulatorDashboardStatus({ ...waiting, setupDeadlineAt, windowEnded: true }).kind).toBe("ENDED");
+  });
+
   it("uses the venue's official site while rental details are unknown", () => {
     const input = fixture("NEEDS_ADAPTER");
     const pending = { ...input, offering: { ...input.offering, publicAccessStatus: "UNVERIFIED", bookingUrl: null,

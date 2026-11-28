@@ -33,6 +33,7 @@ import {
 export const DISCOVERY_LEASE_MS = 90_000;
 export const DISCOVERY_DEADLINE_MS = 15 * 60_000;
 export const DISCOVERY_MAX_ATTEMPTS = 2;
+const DISCOVERY_DEADLINE_SWEEP_LIMIT = 100;
 
 export type DiscoveryTarget = { courseId: string; offeringId?: string; kind: "OUTDOOR" | "SIMULATOR" };
 export type DiscoveryRequest = {
@@ -460,6 +461,39 @@ async function handoffLearningRecipeInTransaction(tx: Tx, input: OwnedLearningRe
       monitoringVerified: false as const, deliveryVerified: false as const, handoff };
 }
 
+export async function expireOverdueDiscoveryJobs() {
+  return transaction(async tx => {
+    const now = await databaseNow(tx);
+    const unpicked = {
+      status: "QUEUED", firstPickedUpAt: null, deadlineAt: null,
+      createdAt: { lte: new Date(now.getTime() - DISCOVERY_DEADLINE_MS) },
+    } satisfies Prisma.CourseDiscoveryJobWhereInput;
+    const picked = {
+      status: { in: ["QUEUED", "RUNNING"] }, deadlineAt: { lte: now },
+    } satisfies Prisma.CourseDiscoveryJobWhereInput;
+    const expired = await tx.courseDiscoveryJob.findMany({
+      where: { activeTargetKey: { not: null }, OR: [unpicked, picked] },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true, deadlineAt: true }, take: DISCOVERY_DEADLINE_SWEEP_LIMIT,
+    });
+    const deadlineCloseout = {
+      status: "TIMED_OUT", completedAt: now, activeTargetKey: null,
+      leaseToken: null, leaseExpiresAt: null,
+    } as const;
+    const unpickedIds = expired.filter(job => job.deadlineAt === null).map(job => job.id);
+    const pickedIds = expired.filter(job => job.deadlineAt !== null).map(job => job.id);
+    const queueTimedOut = unpickedIds.length ? (await tx.courseDiscoveryJob.updateMany({
+      where: { ...unpicked, id: { in: unpickedIds }, activeTargetKey: { not: null } },
+      data: { ...deadlineCloseout, outcome: "QUEUE_DEADLINE" },
+    })).count : 0;
+    const executionTimedOut = pickedIds.length ? (await tx.courseDiscoveryJob.updateMany({
+      where: { ...picked, id: { in: pickedIds }, activeTargetKey: { not: null } },
+      data: { ...deadlineCloseout, outcome: "DEADLINE" },
+    })).count : 0;
+    return { queueTimedOut, executionTimedOut };
+  });
+}
+
 export async function claimNextDiscoveryJob(workerId: string, runtimeVersion?: string) {
   z.string().min(3).max(100).regex(/^[a-zA-Z0-9._-]+$/u).parse(workerId);
   if (runtimeVersion !== undefined) z.string().regex(/^[a-f0-9]{40}$/u).parse(runtimeVersion);
@@ -475,6 +509,11 @@ export async function claimNextDiscoveryJob(workerId: string, runtimeVersion?: s
       const finish = async (status: "CANCELLED" | "TIMED_OUT" | "FAILED", outcome: string) => tx.courseDiscoveryJob.update({ where: { id: current.id }, data: {
         status, outcome, activeTargetKey: null, leaseToken: null, leaseExpiresAt: null, completedAt: now,
       } });
+      if (!current.firstPickedUpAt && !current.deadlineAt &&
+          current.createdAt.getTime() + DISCOVERY_DEADLINE_MS <= now.getTime()) {
+        await finish("TIMED_OUT", "QUEUE_DEADLINE");
+        continue;
+      }
       if (current.deadlineAt && current.deadlineAt <= now) { await finish("TIMED_OUT", "DEADLINE"); continue; }
       if (current.attempts >= DISCOVERY_MAX_ATTEMPTS) { await finish("FAILED", "ATTEMPTS_EXHAUSTED"); continue; }
       let source: Source;

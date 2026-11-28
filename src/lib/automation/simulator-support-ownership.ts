@@ -819,6 +819,63 @@ export async function reconcileExpiredSimulatorResearchExecutions(tx: Prisma.Tra
   }
 }
 
+/** Close only expired metadata-only verification with no customer or execution owner. */
+export async function reconcileExpiredSimulatorMetadataVerification(tx: Prisma.TransactionClient, now: Date,
+  runs: Array<{ id: string; status: string; parsed: CourseDispatchAudit | null }>) {
+  let closed = 0;
+  for (const run of runs) {
+    const audit = run.parsed;
+    const claim = audit?.simulatorClaim;
+    if (run.status !== "RUNNING" || !audit || audit.state !== "CONSUMED" || audit.target.mode !== "SIMULATOR" ||
+        !audit.target.engineeringAuthority || audit.target.fullRepair || !claim || claim.phase !== "VERIFYING" ||
+        !claim.releaseSha || !claim.deployment || claim.plannedPaths.length || claim.recheckQueuedAt ||
+        Date.parse(claim.leaseExpiresAt) + SIMULATOR_SUPPORT_LEASE_MS > now.getTime() ||
+        audit.simulatorContinuation?.receipts.length) continue;
+    const details = audit as CourseDispatchAudit & { simulatorEngineeringVerification?: unknown; simulatorRepairPending?: unknown };
+    if (details.simulatorRepairPending) continue;
+    const verification = readSimulatorEngineeringVerificationState(details.simulatorEngineeringVerification);
+    if ((details.simulatorEngineeringVerification !== undefined && !verification) || verification?.inFlight) continue;
+    if (readSimulatorResearchState(audit.simulatorResearch, claim.sourceFingerprint).inFlight) continue;
+    try { assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, now); }
+    catch { continue; }
+    let source: Awaited<ReturnType<typeof lockSource>>;
+    try { source = await lockSource(tx, audit, now); }
+    catch (error) {
+      if (error instanceof Error && (error.message.startsWith("Simulator engineering authority") ||
+          error.message.startsWith("Simulator source demand changed") ||
+          error.message.startsWith("Simulator offering source changed"))) continue;
+      throw error;
+    }
+    if (source.verificationTargets.length || source.incident.status !== "AUTO_INVESTIGATING") continue;
+
+    const auditWithCloseout = {
+      ...audit,
+      simulatorVerificationCloseout: {
+        version: 1, reason: "VERIFICATION_LEASE_EXPIRED", observedAt: now.toISOString(),
+        claimRevision: claim.revision, originalLeaseExpiresAt: claim.leaseExpiresAt,
+        monitoringVerified: false, customerAcceptance: false,
+      },
+    };
+    const runUpdated = await tx.automationRun.updateMany({ where: {
+      id: run.id, status: "RUNNING", completedAt: null,
+      AND: [
+        { audit: { path: ["simulatorClaim", "token"], equals: claim.token } },
+        { audit: { path: ["simulatorClaim", "revision"], equals: claim.revision } },
+      ],
+    }, data: { status: "COMPLETED", completedAt: now, outcome: "simulator_verification_lease_expired",
+      audit: auditWithCloseout as unknown as Prisma.InputJsonValue } });
+    if (runUpdated.count !== 1) continue;
+    const incidentUpdated = await tx.simulatorSupportIncident.updateMany({ where: {
+      id: source.incident.id, status: "AUTO_INVESTIGATING", updatedAt: source.incident.updatedAt,
+    }, data: { status: "NEEDS_HUMAN", retryAt: null } });
+    if (incidentUpdated.count !== 1) throw new Error("Simulator incident changed during expired verification closeout.");
+    run.status = "COMPLETED";
+    run.parsed = auditWithCloseout;
+    closed += 1;
+  }
+  return closed;
+}
+
 export function recordSimulatorSupportDeployment(input: Owner & { proof: GitDeploymentProof }) {
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);

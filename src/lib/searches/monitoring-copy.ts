@@ -45,12 +45,12 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
   const details: string[] = [];
   if (firstTimeLookups.length > 0) {
     details.push(
-      `We haven't checked ${formatCourseNames(firstTimeLookups)} before. We'll email whether alerts are available after the first check, usually within 10 minutes.`
+      `We haven't checked ${formatCourseNames(firstTimeLookups)} before. Check your dashboard for a setup result within 15 minutes.`
     );
   }
   if (otherUnconfirmed.length > 0) {
     details.push(
-      `We'll email whether alerts are available for ${formatCourseNames(otherUnconfirmed)} after the first check, usually within 10 minutes.`
+      `Check your dashboard within 15 minutes for the setup result for ${formatCourseNames(otherUnconfirmed)}.`
     );
   }
   if (unavailable.length > 0) {

@@ -53,6 +53,17 @@ describe("dashboard monitoring verdict", () => {
     expect(verdict.detail).not.toContain("completed successfully");
   });
 
+  it("ends the setup wait at the saved deadline and accepts independently verified recovery", () => {
+    const setupDeadlineAt = new Date("2026-10-22T00:45:00Z");
+    const now = new Date("2026-10-22T00:46:00Z");
+    const input = { ...base, now, setupDeadlineAt, supportIncidentStatus: "AUTO_INVESTIGATING" as const };
+    expect(getDashboardMonitoringVerdict(input).label).toBe("Automatic availability not confirmed");
+    expect(getDashboardMonitoringVerdict({ ...input, latestProbe: { outcome: "FETCH_FAILED", observedAt: now } }).label)
+      .toBe("Automatic availability not confirmed");
+    expect(getDashboardMonitoringVerdict({ ...input, monitoringState: "HEALTHY",
+      latestProbe: { outcome: "NO_MATCH", observedAt: now } }).label).toBe("Tee-time alerts available");
+  });
+
   it.each(["PAUSED", "COMPLETED", "CANCELLED"])("never describes a %s alert as active or starting checks", (alertStatus) => {
     for (const input of [{}, { discoveryStatus: { state: "TERMINAL_FAILURE" as const, completedAt: new Date() } }, { monitoringState: "AUTO_INVESTIGATING" as const }, { supportIncidentStatus: "NEEDS_HUMAN" as const, automationPlaybookExhausted: true }, { upcomingBookingWindow: { opensAt: "later" } }]) {
       const verdict = getDashboardMonitoringVerdict({ ...base, ...input, alertStatus });

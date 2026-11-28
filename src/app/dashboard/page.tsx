@@ -58,6 +58,7 @@ import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { formatCourseDistance } from "@/lib/email/course-facts";
 import { getOwnerEmailState, type OwnerEmailState } from "@/lib/email/owner-email-state";
+import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import {
   buildCoursePriceEstimate,
   buildObservedBookableHoleSummary,
@@ -256,7 +257,9 @@ function DashboardSearchCard({
 }) {
   const now = new Date();
   if (search.mode === "SIMULATOR") return <SimulatorDashboardCard search={search} canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailState} showRecipientEmail={showRecipientEmail} />;
-  const windowEnded = notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
+  const date = search.date.toISOString().slice(0, 10);
+  const windowEnded = notificationWindowEnded(date, search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
+  const pendingSetupDeadline = nextPendingSetupDeadline(search, now);
   const availableSearchMatches = search.matches.filter(
     (match) =>
       match.availabilityStatus === "AVAILABLE" &&
@@ -276,6 +279,7 @@ function DashboardSearchCard({
     const usesPhoneBooking = isPublicCourse &&
       ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(course.bookingMethod);
     const courseStatus = getDashboardCourseStatus({
+      windowEnded: notificationWindowEnded(date, search.endTime, [course.timeZone], now),
       availability: {
         alertStatus: search.status,
         outcome: latestProbe?.outcome,
@@ -294,6 +298,8 @@ function DashboardSearchCard({
       },
       monitoring: {
         alertStatus: search.status,
+        setupDeadlineAt: preference.setupDeadlineAt,
+        now,
         alertSupport: isPublicCourse ? getCourseAlertSupport(course) ?? null : null,
         bookingPhone: usesPhoneBooking ? course.bookingPhone ?? course.phone : null,
         automationEligibility: course.automationEligibility,
@@ -369,7 +375,7 @@ function DashboardSearchCard({
                   ? "Alert email pending for these settings"
                   : ownerEmailState === "NOT_SENT"
                     ? "No email sent for these alert settings"
-                    : "First email pending initial check"}
+                    : pendingSetupDeadline ? "First email pending initial check" : "No email sent for these alert settings"}
             </span>
           </div>
           <span className="dashboard-alert-summary-checked">
@@ -378,7 +384,7 @@ function DashboardSearchCard({
                   search.lastCheckedAt,
                   search.userTimeZone
                 )}`
-              : search.status === "ACTIVE" ? "Check pending" : "Checks stopped"}
+              : search.status === "ACTIVE" ? pendingSetupDeadline ? "Check pending" : "No completed check" : "Checks stopped"}
           </span>
           <ChevronDown
             aria-hidden="true"
@@ -426,6 +432,7 @@ function DashboardSearchCard({
               initialScheduleVersion={search.scheduleVersion}
               initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null}
               initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
+              setupDeadlineAt={pendingSetupDeadline}
               initialCoursePreferences={search.preferences.map((preference) => ({
                 id: preference.id,
                 courseName: preference.course.name,
@@ -462,12 +469,13 @@ function DashboardSearchCard({
             const bookingPhone = usesPhoneBooking
               ? preference.course.bookingPhone ?? preference.course.phone
               : null;
-            const officialCourseUrl = isPublicCourse
-              ? preference.course.detectedBookingUrl ?? preference.course.website
-              : preference.course.website;
+            const safeBookingUrl = isPublicCourse
+              ? getSafeCustomerBookingUrl(preference.course.detectedBookingUrl)
+              : undefined;
+            const officialCourseUrl = safeBookingUrl ?? getSafeCustomerBookingUrl(preference.course.website);
             const officialCourseLinkLabel = !isPublicCourse
               ? "Course information"
-              : preference.course.detectedBookingUrl
+              : safeBookingUrl
                 ? preference.course.bookingMethod === "CONTACT_COURSE"
                   ? "Official request page"
                   : "Official booking page"
@@ -795,7 +803,9 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
   ownerEmailState: OwnerEmailState; showRecipientEmail: boolean;
 }) {
   const now = new Date();
-  const ended = notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
+  const date = search.date.toISOString().slice(0, 10);
+  const ended = notificationWindowEnded(date, search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
+  const pendingSetupDeadline = nextPendingSetupDeadline(search, now);
   const matches = [...new Map(search.matches.filter(match => isCurrentSimulatorMatch(match, now)).map(match =>
     [[match.offeringId, match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
   const venues = search.preferences.map(preference => {
@@ -804,8 +814,9 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
     const venueMatches = [...new Map(matches.filter(match => match.offeringId === offering?.id).map(match =>
       [[match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
     const status = getSimulatorDashboardStatus({ offering, probe, currentMatchCount: venueMatches.length,
-      alertStatus: search.status, windowEnded: ended, website: preference.course.website, now,
-      discoveryStatus: preference.discoveryStatus });
+      alertStatus: search.status, windowEnded: notificationWindowEnded(date, search.endTime, [preference.course.timeZone], now),
+      website: preference.course.website, now, discoveryStatus: preference.discoveryStatus,
+      setupDeadlineAt: preference.setupDeadlineAt });
     return { preference, venueMatches, status };
   });
   return <article className="dashboard-row" data-single-course={search.preferences.length === 1} id={`alert-${search.id}`}>
@@ -818,11 +829,11 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
           <AlertSettings search={search} />
           <span className={`dashboard-email-status${ownerEmailState === "NOT_SENT" ? " dashboard-email-not-sent" : ""}`}>
             <Mail aria-hidden="true" size={12} />
-            {ownerEmailState === "SENT" ? "Alert email sent for these settings" : ownerEmailState === "PREVIOUSLY_SENT" ? "An alert email was sent previously" : ownerEmailState === "PENDING" ? "Alert email pending for these settings" : ownerEmailState === "NOT_SENT" ? "No email sent for these alert settings" : "First email pending initial check"}
+            {ownerEmailState === "SENT" ? "Alert email sent for these settings" : ownerEmailState === "PREVIOUSLY_SENT" ? "An alert email was sent previously" : ownerEmailState === "PENDING" ? "Alert email pending for these settings" : ownerEmailState === "NOT_SENT" || !pendingSetupDeadline ? "No email sent for these alert settings" : "First email pending initial check"}
           </span>
         </div>
         <span className="dashboard-alert-summary-checked">
-          {search.lastCheckedAt ? `Checked ${formatObservationDateTime(search.lastCheckedAt, search.userTimeZone)}` : search.status === "ACTIVE" ? "Check pending" : "Checks stopped"}
+          {search.lastCheckedAt ? `Checked ${formatObservationDateTime(search.lastCheckedAt, search.userTimeZone)}` : search.status === "ACTIVE" ? pendingSetupDeadline ? "Check pending" : "No completed check" : "Checks stopped"}
         </span>
         <ChevronDown aria-hidden="true" className="dashboard-alert-summary-chevron" size={20} />
       </summary>
@@ -840,6 +851,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
             initialPlayers={search.players} initialRequestedLayoutHoles={null}
             initialAdditionalEmails={search.additionalEmails} initialCheckStatus={search.checkStatus} initialScheduleVersion={search.scheduleVersion}
             initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null} initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
+            setupDeadlineAt={pendingSetupDeadline}
             initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : <span className="meta">Sign in to pause, edit, or cancel this alert.</span>}
         </div>
         <div className="watch-course-list">
@@ -870,6 +882,14 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
     </details>
     <DashboardMatchingTimes matches={matches} mode="SIMULATOR" showCourseName={search.preferences.length > 1} />
   </article>;
+}
+
+function nextPendingSetupDeadline(search: DashboardSearches[number], now: Date) {
+  if (search.status !== "ACTIVE") return null;
+  const next = search.preferences.map(preference => preference.setupDeadlineAt)
+    .filter(deadline => deadline > now)
+    .sort((left, right) => left.getTime() - right.getTime())[0];
+  return next?.toISOString() ?? null;
 }
 
 async function loadOwnerEmailStates(userId: string, searches: DashboardSearches) {
