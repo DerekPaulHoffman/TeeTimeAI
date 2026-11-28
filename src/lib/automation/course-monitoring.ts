@@ -4002,6 +4002,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
                 heartbeatAt: true,
                 completedAt: true,
                 deployedAt: true,
+                verificationRuntimeHold: true,
                 recheckDispatchKey: true,
                 recheckDispatchStartedAt: true,
                 recheckDispatchedAt: true,
@@ -4346,6 +4347,9 @@ export async function reconcileCourseMonitoringDeadline(input: {
         incident.escalationDeadlineAt <= input.now,
       );
       const activeBatch = incident.activeBatch;
+      if (activeBatch?.verificationRuntimeHold != null && activeBatch.status === "VERIFYING" && activeBatch.completedAt === null) {
+        return { outcome: "OWNED" as const, incidentId: incident.id };
+      }
       const liveBatchOwner = Boolean(
         activeBatch &&
         ACTIVE_COURSE_SUPPORT_BATCH_STATUSES.has(activeBatch.status) &&

@@ -74,10 +74,13 @@ type OwnedRead = { kind: "OWNED_REPAIR"; batchId: string; ownerThreadId: string;
  * its offering-scoped authority, never an outdoor course exemption. */
 export async function loadOwnedOutdoorRepairBatch(reader: Pick<Reader, "courseSupportBatch">, input: {
   batchId: string; now: Date; allowExpiredDelegation?: boolean; allowCompletedMethodHandoff?: boolean;
+  allowVerificationRuntimeHeld?: boolean;
 }) {
   const batch = await reader.courseSupportBatch.findUnique({ where: { id: input.batchId }, select: {
     id: true, status: true, completedAt: true, createdAt: true, deployedAt: true,
     ownerThreadId: true, ownerAutomationRunId: true, leaseToken: true, leaseExpiresAt: true, baseSha: true, releaseSha: true, summary: true,
+    revision: true, verificationRuntimeHold: true,
+    recheckDispatchKey: true, recheckDispatchStartedAt: true, recheckDispatchedAt: true,
     incidents: { select: { incidentId: true, courseId: true, cycle: true,
       incident: { select: { status: true, resolution: true, courseId: true, activeBatchId: true, cycle: true, revision: true } } } },
   } });
@@ -91,7 +94,9 @@ export async function loadOwnedOutdoorRepairBatch(reader: Pick<Reader, "courseSu
     marker.recovery.ownerThreadId === batch.ownerThreadId && marker.recovery.releaseSha === batch.releaseSha &&
     marker.handedOffAt === batch.completedAt.toISOString();
   const active = batch.status === "VERIFYING" && batch.completedAt === null && batch.leaseExpiresAt !== null &&
-    (batch.leaseExpiresAt > input.now || input.allowExpiredDelegation === true);
+    (batch.verificationRuntimeHold != null
+      ? input.allowVerificationRuntimeHeld === true
+      : batch.leaseExpiresAt > input.now || input.allowExpiredDelegation === true);
   if (!active && !completedHandoff) return null;
   const entry = batch.incidents[0], summary = object(batch.summary), directive = object(summary?.remediation);
   if (!summary || !directive || directive.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" ||

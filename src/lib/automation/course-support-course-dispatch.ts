@@ -43,6 +43,7 @@ import {
 } from "./course-support-batches";
 import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, hasStoppedFullRepairVerification, interruptedClaimedFullRepairPaths, interruptedRegisteredFullRepairPaths } from "./course-support-full-repair";
 import { readOwnedFailedLearningProgress } from "./course-support-learning-followthrough";
+import { isCourseSupportVerificationRuntimeHeld } from "./course-support-runtime-hold";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
@@ -478,21 +479,26 @@ export async function planCourseSupportCourseDispatch(input: {
     const sameTick = runs.filter((run) => run.parsed?.tickRef === tick);
     const activeBatches = await tx.courseSupportBatch.findMany({
       where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } },
-      select: { id: true, status: true, leaseExpiresAt: true, providerFamilyKey: true, failureFingerprint: true, summary: true, incidents: { select: { courseId: true } } },
+      select: { id: true, status: true, leaseExpiresAt: true, providerFamilyKey: true, failureFingerprint: true,
+        summary: true, verificationRuntimeHold: true, incidents: { select: { courseId: true } } },
     });
     const live = runs.filter((run) => run.status === "RUNNING" &&
       (["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "") ||
        (run.parsed?.target.mode === "SIMULATOR" && run.parsed.state === "CONSUMED")));
+    const capacityBatches = activeBatches.filter(batch => !isCourseSupportVerificationRuntimeHeld(batch.verificationRuntimeHold));
+    const batchCourseIds = (batch: (typeof activeBatches)[number]) => batch.incidents.length > 0
+      ? batch.incidents.map((entry) => entry.courseId) : [batch.id];
+    const capacityCourses = new Set(capacityBatches.flatMap(batchCourseIds));
     const occupiedCourses = new Set([
-      ...activeBatches.flatMap((batch) => batch.incidents.length > 0
-        ? batch.incidents.map((entry) => entry.courseId) : [batch.id]),
+      ...capacityCourses,
       ...live.map((run) => run.parsed!.target.courseId),
     ]);
-    const activeCourseCount = new Set(activeBatches.flatMap((batch) =>
-      batch.incidents.length > 0 ? batch.incidents.map((entry) => entry.courseId) : [batch.id])).size;
+    // A runtime hold frees a worker slot. It keeps the original course and
+    // source cohort under the original owner's protection.
+    const ownedCourses = new Set([...occupiedCourses, ...activeBatches.flatMap(batchCourseIds)]);
     const availableCapacity = Math.max(0, Math.min(
       MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - occupiedCourses.size,
-      MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length - live.length,
+      MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - capacityBatches.length - live.length,
     ));
     const availableStarts = Math.max(0, Math.min(maxStarts - sameTick.length, availableCapacity));
     let eligibleCount = 0;
@@ -502,7 +508,7 @@ export async function planCourseSupportCourseDispatch(input: {
     if (availableStarts > 0 || live.length === 0) {
       const outdoorCandidates = retryOf ? [] : (await listCourseSupportDispatchCandidates(now, tx, {
         parkExhaustedOrchestration: true,
-        occupiedCourseIds: occupiedCourses,
+        occupiedCourseIds: ownedCourses,
       }))
         .filter(candidate => !activeBatches.some(batch => courseSupportAssignedCandidateConflicts(candidate, batch)));
       const dueSimulatorCandidates = retryOf && !retryTarget ? [] : await listSimulatorSupportDispatchCandidates(now, tx, retryTarget ?? undefined);
@@ -588,7 +594,7 @@ export async function planCourseSupportCourseDispatch(input: {
       const selection = selectCourseDispatchTargets({
         candidates,
         sourceSearchesByCourse,
-        occupiedCourses,
+        occupiedCourses: ownedCourses,
         ...priorUsage,
         maxStarts: availableStarts,
       });
@@ -655,8 +661,8 @@ export async function planCourseSupportCourseDispatch(input: {
     const fullRepairContinuationItems = retryOf ? [] : await collectOwnedFullRepairContinuations(tx, activeBatches, now);
     return {
       tickRef: tick,
-      activeCount: activeBatches.length,
-      activeCourseCount,
+      activeCount: capacityBatches.length,
+      activeCourseCount: capacityCourses.size,
       occupiedCourseCount: occupiedCourses.size,
       reservedCount: runs.filter(run => run.status === "RUNNING" &&
         (["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "") ||
@@ -664,7 +670,8 @@ export async function planCourseSupportCourseDispatch(input: {
       attention: {
         startingCount: runs.filter((run) => run.status === "RUNNING" && run.parsed?.state === "STARTING").length,
         boundCount: runs.filter((run) => run.status === "RUNNING" && run.parsed?.state === "BOUND").length,
-        expiredBatchCount: activeBatches.filter((batch) => batch.leaseExpiresAt <= now).length +
+        runtimeHoldCount: activeBatches.length - capacityBatches.length,
+        expiredBatchCount: capacityBatches.filter((batch) => batch.leaseExpiresAt <= now).length +
           live.filter(run => run.parsed?.simulatorClaim && new Date(run.parsed.simulatorClaim.leaseExpiresAt) <= now).length,
       },
       eligibleCount,
@@ -685,6 +692,7 @@ export async function planCourseSupportCourseDispatch(input: {
 type RecoveryContinuationBatch = {
   id: string; status: CourseSupportBatchStatus; leaseExpiresAt: Date;
   providerFamilyKey: string; failureFingerprint: string; summary: Prisma.JsonValue | null;
+  verificationRuntimeHold?: Prisma.JsonValue | null;
 };
 
 /** Admission readiness only, never recovery authority. Do not consume a native
@@ -692,7 +700,7 @@ type RecoveryContinuationBatch = {
  * conflict. Reconsider on the next normal tick after that owner releases it. */
 export function isOwnedFullRepairContinuationReady(batch: RecoveryContinuationBatch,
   activeBatches: readonly RecoveryContinuationBatch[], now: Date) {
-  if (!Number.isFinite(now.getTime())) return false;
+  if (batch.verificationRuntimeHold != null || !Number.isFinite(now.getTime())) return false;
   return !activeBatches.some(other => {
     if (other.id === batch.id || !["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(other.status)) return false;
     const expiresAt = other.leaseExpiresAt.getTime();
@@ -705,8 +713,8 @@ export function isOwnedFullRepairContinuationReady(batch: RecoveryContinuationBa
 async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
   activeBatches: readonly RecoveryContinuationBatch[], now: Date) {
   const ids = activeBatches.filter(batch => ["VERIFYING", "IMPLEMENTING"].includes(batch.status) &&
-    readCourseSupportRemediationDirective(batch.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
-    isOwnedFullRepairContinuationReady(batch, activeBatches, now)).map(batch => batch.id);
+    isOwnedFullRepairContinuationReady(batch, activeBatches, now) &&
+    readCourseSupportRemediationDirective(batch.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF").map(batch => batch.id);
   if (!ids.length) return [];
   const batches = await tx.courseSupportBatch.findMany({
     where: { id: { in: ids }, status: { in: ["VERIFYING", "IMPLEMENTING"] } },
@@ -817,7 +825,8 @@ export async function closeExpiredCourseSupportDemand(input: {
       where: { reference: input.batchRef, ownerThreadId: input.ownerThreadId, status: "VERIFYING",
         releaseSha: input.registeredReleaseSha, completedAt: null, leaseExpiresAt: { lte: now } },
       select: { id: true, status: true, revision: true, ownerAutomationRunId: true, leaseExpiresAt: true, providerFamilyKey: true,
-        failureFingerprint: true, summary: true, incidents: { select: { id: true, incidentId: true, courseId: true, cycle: true } } },
+        failureFingerprint: true, summary: true, verificationRuntimeHold: true,
+        incidents: { select: { id: true, incidentId: true, courseId: true, cycle: true } } },
     });
     const entry = batch?.incidents[0];
     if (!batch || !entry) throw new Error("EXPIRED_COURSE_DEMAND_PROOF_REQUIRED");

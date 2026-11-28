@@ -104,6 +104,10 @@ Reservations, binding, expiry, exact claim consumption and cancellation are stor
 
 ## Same-worker recovery
 
+An owned outdoor repair with a published implementation can wait for the Windows learner without occupying a worker slot. The original verification command records this hold only when the managed updater proves either a missing checkout or a required dependency, schema, or installed-reader rollout before any runtime mutation or learner admission. The hold revokes the old lease and retains the original course, owner, published release, and path reservations. The dispatcher skips unchanged held work even when main advances. Unrelated work can use the freed slot.
+
+After the managed runtime is healthy, the original owner can use the existing recovery command. The command qualifies the exact published runtime read-only and checks a fresh, idle heartbeat from the managed Windows task. Recovery rechecks the original source and failed learner and reacquires space under the same writer lock used by new claims. A full queue leaves the hold in place. This runtime hold and its recovery do not change the provider retry count or the saved alert's original setup result.
+
 The human approved bounded continuation of the same existing simulator worker. The original preflight plan may return private `continuationItems` plus aggregate continuation counts; this is not authority to create another worker or run a second planning inspection. Follow `docs/course-support-worker-continuation.md` for fresh supported native completion, original private launch/profile proof, exact reviewed tooling readiness, durable `continue` reservation, one supported existing-chat message and `continued` acknowledgement. Use the complete simulator continuation prompt from the selected checkout. Never resume through the initial launcher, infer native liveness from RUNNING, repeat an ambiguous send, approve a permission request or reset a claim/request budget. At most one continuation per tick and two per original assignment/source are allowed. Missing or hard-failed evidence stays visible as attention.
 
 ## Assigned child

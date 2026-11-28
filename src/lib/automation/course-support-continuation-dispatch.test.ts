@@ -56,6 +56,7 @@ vi.mock("./simulator-support-incidents", () => ({
 vi.mock("./simulator-support-ownership", () => ({ readSimulatorSupportContinuationContext: state.context,
   // These fixtures retain implementation provenance; research-only expiry is covered in actual Postgres.
   reconcileExpiredSimulatorResearchExecutions: vi.fn(async () => {}),
+  reconcileExpiredSimulatorMetadataVerification: vi.fn(async () => 0),
 }));
 
 import { planCourseSupportCourseDispatch, recordCourseSupportContinuationSent, reserveCourseSupportContinuation } from "./course-support-course-dispatch";

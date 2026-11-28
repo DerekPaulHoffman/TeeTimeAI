@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fullRepairReadProgressMatchesClaim } from "./course-support-full-repair";
@@ -9024,8 +9024,9 @@ describe("course-support claim demand fencing", () => {
     ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
 
     expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ take: 15 }),
+      expect.objectContaining({ select: expect.objectContaining({ verificationRuntimeHold: true }) }),
     );
+    expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).not.toHaveProperty("take");
     expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -20868,6 +20869,7 @@ describe("course-support inspection ownership", () => {
       where: {
         status: { in: expect.any(Array) },
         leaseExpiresAt: { lte: now },
+        verificationRuntimeHold: { equals: Prisma.DbNull },
       },
     });
   });

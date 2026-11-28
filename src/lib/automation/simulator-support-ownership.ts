@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { runWithCourseSupportWriterTransitionLease, withCourseSupportWriteConflictRetry, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES, isRuntimeBearingCourseSupportPath } from "./course-support-batches";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
+import { isCourseSupportVerificationRuntimeHeld } from "./course-support-runtime-hold";
 import { SIMULATOR_IMPLEMENTATION_BUSY } from "./simulator-support-path-admission";
 import { currentSimulatorFullRepair, hasConsumedSimulatorFullRepair, loadSimulatorRecoveryClaim, readSimulatorFullRepair } from "./simulator-full-repair";
 import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
@@ -583,9 +584,16 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
       if (!handoff || handoff.receipt.incidentId !== source.incident.id) throw new Error("Simulator claim requires a current offering-scoped failure probe.");
     }
     const live = await dispatch.listLiveCourseSupportDispatchReservations(tx);
-    const batches = await tx.courseSupportBatch.findMany({ where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } }, select: { id: true, incidents: { select: { courseId: true } } }, take: 16 });
-    const occupied = new Set([...live.map(entry => entry.audit.target.courseId), ...batches.flatMap(batch => batch.incidents.length ? batch.incidents.map(entry => entry.courseId) : [batch.id])]);
-    if (batches.length + live.length > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES || occupied.size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES || live.some(entry => entry.runId !== row.runId && entry.audit.target.offeringId === source.offering.id)) throw new Error("Simulator support shared capacity or offering ownership changed.");
+    const batches = await tx.courseSupportBatch.findMany({ where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } },
+      select: { id: true, verificationRuntimeHold: true, incidents: { select: { courseId: true } } } });
+    const capacityBatches = batches.filter(batch => !isCourseSupportVerificationRuntimeHeld(batch.verificationRuntimeHold));
+    const occupied = new Set([...live.map(entry => entry.audit.target.courseId), ...capacityBatches.flatMap(batch => batch.incidents.length ? batch.incidents.map(entry => entry.courseId) : [batch.id])]);
+    const heldCourseCollision = batches.some(batch => batch.verificationRuntimeHold != null &&
+      batch.incidents.some(entry => entry.courseId === source.offering.courseId));
+    if (capacityBatches.length + live.length > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES || occupied.size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
+        heldCourseCollision || live.some(entry => entry.runId !== row.runId && entry.audit.target.offeringId === source.offering.id)) {
+      throw new Error("Simulator support shared capacity or offering ownership changed.");
+    }
     const claim: SimulatorSupportClaim = { token: randomUUID(), revision: 1, phase: "CLAIMED", claimedAt: now.toISOString(),
       leaseExpiresAt: new Date(now.getTime() + SIMULATOR_SUPPORT_LEASE_MS).toISOString(), sourceFingerprint: source.fingerprint, originalSourceFingerprint: source.fingerprint,
       offeringRevision: source.offering.monitoringRevision, plannedPaths: [], releaseSha: null, branch: input.branch, deployment: null, recheckQueuedAt: null, verificationCycle: 0 };

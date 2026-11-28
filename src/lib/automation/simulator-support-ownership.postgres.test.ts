@@ -97,6 +97,30 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
   }
   beforeEach(() => { Object.values(coreMocks).forEach(mock => mock.mockReset()); });
 
+  it.each([true, false])("claims the fifteenth worker slot only when the outdoor runtime hold is valid (valid=%s)", async valid => {
+    const suffix = randomUUID();
+    const observedAt = new Date();
+    const batches = Array.from({ length: 15 }, (_, index) => ({
+      id: `runtime-hold-fixture-${suffix}-${index}`, reference: `runtime-hold-fixture-${suffix}-${index}`,
+      providerFamilyKey: `RUNTIME_HOLD_FIXTURE_${suffix}_${index}`, failureFingerprint: "a".repeat(64), baseSha,
+      heartbeatAt: observedAt, leaseToken: randomUUID(), leaseExpiresAt: new Date(observedAt.getTime() + 60_000),
+      status: index === 14 ? "VERIFYING" as const : "CLAIMED" as const,
+      ...(index === 14 ? { verificationRuntimeHold: { version: 1, reasonCode: "MANAGED_RUNTIME_CHECKOUT_MISSING",
+        phase: "VALIDATE_MANAGED_CHECKOUT", runtimeVersion: baseSha, releaseSha: baseSha, ownerThreadId: "outdoor-fixture-owner",
+        sourceFingerprint: valid ? "a".repeat(64) : "invalid", incidentId: "outdoor-fixture-incident", originalJobId: "outdoor-fixture-job",
+        cycle: 1, observedAt: observedAt.toISOString(), heldAt: observedAt.toISOString() } } : {}),
+    }));
+    await client.courseSupportBatch.createMany({ data: batches });
+    try {
+      if (valid) await expect(fixture()).resolves.toMatchObject({ owner: { revision: 1 } });
+      else await expect(fixture()).rejects.toThrow("Simulator support shared capacity or offering ownership changed");
+      expect(await client.courseSupportBatch.count({ where: { id: { in: batches.map(batch => batch.id) } } })).toBe(15);
+      expect(coreMocks.fetch).not.toHaveBeenCalled();
+    } finally {
+      await client.courseSupportBatch.deleteMany({ where: { id: { in: batches.map(batch => batch.id) } } });
+    }
+  });
+
   it("retains deferred implementation across retry and lease expiry without extra provider reads or a granted path", async () => {
     const f = await fixture(), path = "src/lib/simulators/providers/deferred-reader.ts";
     const originalResearch = readSimulatorResearchState(undefined, f.fingerprint);

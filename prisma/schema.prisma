@@ -1192,6 +1192,7 @@ model CourseSupportBatch {
   revision                 Int                          @default(0)
   maxCourses               Int                          @default(5)
   summary                  Json?
+  verificationRuntimeHold  Json?
   createdAt                DateTime                     @default(now())
   updatedAt                DateTime                     @updatedAt
   ownerAutomationRun       AutomationRun?               @relation("SupportBatchOwner", fields: [ownerAutomationRunId], references: [id], onDelete: SetNull)

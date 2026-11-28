@@ -44,7 +44,8 @@ const store = vi.hoisted(() => {
   const candidates: Candidate[] = [];
   const sources = new Map<string, SourceSearch>();
   const courseTimeZones = new Map<string, string>();
-  const batches: { id: string; summary: unknown; leaseExpiresAt: Date; incidents: { courseId: string }[] }[] = [];
+  const batches: { id: string; status?: string; summary: unknown; verificationRuntimeHold?: unknown;
+    leaseExpiresAt: Date; incidents: { courseId: string }[] }[] = [];
   let sequence = 0;
   let leaseTail = Promise.resolve();
   let transitionDenials = 0;
@@ -300,6 +301,29 @@ describe("durable course dispatch state and transaction boundaries", () => {
     expect(plan.activeCourseCount).toBe(5);
     expect(plan.launchItems).toHaveLength(10);
     expect(plan.occupiedCourseCount).toBe(15);
+  });
+
+  it.each([true, false])("releases only a valid runtime hold and preserves the original course (valid=%s)", async valid => {
+    populate(2);
+    store.batches.push(...Array.from({ length: 14 }, (_, index) => ({
+      id: `working-${index}`, status: "CLAIMED", summary: {}, leaseExpiresAt: new Date(now.getTime() + 60_000),
+      incidents: [{ courseId: `other-course-${index}` }],
+    })));
+    const held = { id: "original-batch", status: "VERIFYING",
+      summary: { remediation: { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" } },
+      verificationRuntimeHold: { version: 1, reasonCode: "MANAGED_RUNTIME_CHECKOUT_MISSING", phase: "VALIDATE_MANAGED_CHECKOUT",
+        runtimeVersion: baseSha, releaseSha: baseSha, observedAt: now.toISOString(), heldAt: now.toISOString(),
+        ownerThreadId: "original-owner", incidentId: "original-incident", originalJobId: "original-job",
+        sourceFingerprint: (valid ? "a".repeat(64) : "invalid"), cycle: 1 },
+      leaseExpiresAt: new Date(now.getTime() - 60_000), incidents: [{ courseId: "course-0" }] };
+    store.batches.push(held);
+
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha: "b".repeat(40), now, maxStarts: 15 });
+
+    expect(plan).toMatchObject({ activeCount: valid ? 14 : 15, activeCourseCount: valid ? 14 : 15, occupiedCourseCount: 15,
+      attention: { runtimeHoldCount: valid ? 1 : 0, expiredBatchCount: valid ? 0 : 1 }, fullRepairContinuationItems: [] });
+    expect(store.runs.map(run => run.audit.target.courseId)).toEqual(valid ? ["course-1"] : []);
+    expect(store.batches.find(batch => batch.id === held.id)).toEqual(held);
   });
 
   it("retains an expired implementation claim's slot and alert budget until its provenance is handed off", async () => {

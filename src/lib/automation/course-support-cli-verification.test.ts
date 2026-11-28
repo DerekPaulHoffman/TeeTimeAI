@@ -3,8 +3,41 @@ import { resolve } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { recoverLearning, retainOwnedReleaseDiagnosis, runConfiguredCommand } from "../../../scripts/automation/course-support";
+import { inspectHeldCourseSupportLearningRuntime, recoverLearning, retainOwnedReleaseDiagnosis, runConfiguredCommand } from "../../../scripts/automation/course-support";
 import { GitDeploymentReadOnlyFailure, waitForGitDeployment } from "../deployments/wait-for-git-deployment";
+
+describe("held repair runtime command boundary", () => {
+  const input = { ownerThreadId: "native-owner", runtimeVersion: "b".repeat(40) };
+
+  it("qualifies exact published runtime and inspects the original managed task without Apply", async () => {
+    const qualified = { outcome: "already_current", runtimeVersion: input.runtimeVersion, acceptanceRestartProof: false };
+    const task = { action: "Inspect", apply: false, taskName: "Tee Time Spot Course Discovery", taskPath: "\\TeeTimeSpot\\",
+      exists: true, state: "Running", ready: true, restartPrerequisites: "PRESENT", workerMode: "STAGEHAND_SOL", pollStatus: "completed",
+      heartbeatStatus: "fresh", activeOperations: 0, runtimeVersion: input.runtimeVersion, lastHeartbeatAt: new Date().toISOString() };
+    const execute = vi.fn().mockResolvedValueOnce({ stdout: JSON.stringify(qualified) }).mockResolvedValueOnce({ stdout: JSON.stringify(task) });
+    expect(await inspectHeldCourseSupportLearningRuntime(input, { platform: "win32", nativeOwnerThreadId: input.ownerThreadId, execute }))
+      .toMatchObject({ kind: "WINDOWS_RUNTIME_READY", runtimeVersion: input.runtimeVersion });
+    expect(execute.mock.calls[0][1][5]).toMatch(/update-course-discovery-runtime\.ps1$/u);
+    expect(execute.mock.calls[1][1][5]).toMatch(/manage-course-discovery-task\.ps1$/u);
+    expect(execute.mock.calls.map(([, args]) => args.slice(6))).toEqual([
+      ["-RuntimeVersion", input.runtimeVersion, "-OwnerThreadId", input.ownerThreadId],
+      ["-Action", "Inspect"],
+    ]);
+    expect(execute.mock.calls.flatMap(([, args]) => args)).not.toContain("-Apply");
+  });
+
+  it("never inspects or applies an upgrade after a non-ready read-only qualification", async () => {
+    const execute = vi.fn().mockResolvedValueOnce({ stdout: JSON.stringify({ outcome: "ready_to_update", runtimeVersion: input.runtimeVersion }) });
+    expect(await inspectHeldCourseSupportLearningRuntime(input, { platform: "win32", nativeOwnerThreadId: input.ownerThreadId, execute })).toBeNull();
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it.each([undefined, "different-owner"])("does not touch the host without the original native owner (%s)", async nativeOwnerThreadId => {
+    const execute = vi.fn();
+    expect(await inspectHeldCourseSupportLearningRuntime(input, { platform: "win32", nativeOwnerThreadId, execute })).toBeNull();
+    expect(execute).not.toHaveBeenCalled();
+  });
+});
 
 describe("saved-method recovery deployment prerequisite", () => {
   type Dependencies = NonNullable<Parameters<typeof recoverLearning>[1]>;
@@ -12,7 +45,8 @@ describe("saved-method recovery deployment prerequisite", () => {
   const releaseSha = "b".repeat(40);
   function fixture() {
     const provenance = { baseSha: "a".repeat(40), releaseSha, deployedAt: null as Date | null,
-      branch: "fix/public-calendar", plannedPaths: ["src/lib/course-discovery/reader.ts"], remediationDirective: null };
+      branch: "fix/public-calendar", plannedPaths: ["src/lib/course-discovery/reader.ts"], remediationDirective: null,
+      verificationRuntimeHeld: false };
     const packet = { outcome: "ready", remediation: { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" },
       courses: [{ result: "PENDING", terminalProofDurable: false,
         actionPlan: { allowedActions: ["INVESTIGATE_PUBLIC_SOURCE", "IMPLEMENT_REUSABLE_SUPPORT"] } }] };

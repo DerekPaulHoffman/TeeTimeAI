@@ -31,6 +31,10 @@ import { readCustomerRecovery } from "./course-support-customer-recovery";
 import { createCourseDispatchIncidentFingerprint, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { appendCourseSupportLineage, createCourseSupportLineage } from "./course-support-lineage";
+import {
+  isCourseSupportVerificationRuntimeHeld, isFreshRuntimeReadyReceipt, readCourseSupportVerificationRuntimeHold, readPreAdmissionRuntimeBlocker,
+  type CourseSupportLearningRuntimeBlocker, type CourseSupportLearningRuntimeReadyReceipt, type CourseSupportVerificationRuntimeHold,
+} from "./course-support-runtime-hold";
 
 import {
   buildCourseSupportProviderSnapshotFingerprint,
@@ -268,6 +272,9 @@ const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENT
 export const MAX_CONCURRENT_COURSE_SUPPORT_BATCHES = 15;
 function ownedCourseIds(batch: { id: string; incidents?: readonly { courseId: string }[] }) {
   return batch.incidents?.length ? batch.incidents.map((entry) => entry.courseId) : [batch.id];
+}
+function batchesUsingCapacity<T extends { verificationRuntimeHold?: unknown }>(batches: T[]) {
+  return batches.filter(batch => !isCourseSupportVerificationRuntimeHeld(batch.verificationRuntimeHold));
 }
 const TRANSIENT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",
@@ -1359,9 +1366,9 @@ export async function getOwnedCourseSupportLeaseToken(input: {
       ownerThreadId: input.ownerThreadId,
       status: { in: ACTIVE_BATCH_STATUSES }
     },
-    select: { leaseToken: true }
+    select: { leaseToken: true, verificationRuntimeHold: true }
   });
-  if (!batch) {
+  if (!batch || batch.verificationRuntimeHold != null) {
     throw new Error("The responder batch is not owned by this task.");
   }
   return batch.leaseToken;
@@ -2138,7 +2145,7 @@ function applyCourseSupportOrchestrationRetryBudget(input: {
 export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
   const batch = await prisma.courseSupportBatch.findUnique({
     where: { id: batchId },
-    select: { baseSha: true, releaseSha: true, deployedAt: true, summary: true }
+    select: { baseSha: true, releaseSha: true, deployedAt: true, summary: true, verificationRuntimeHold: true }
   });
   if (!batch) {
     throw new Error("Course-support batch was not found.");
@@ -2149,6 +2156,7 @@ export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
     baseSha: batch.baseSha,
     releaseSha: batch.releaseSha,
     deployedAt: batch.deployedAt,
+    verificationRuntimeHeld: batch.verificationRuntimeHold != null,
     branch: typeof summary.branch === "string" ? summary.branch : null,
     plannedPaths: Array.isArray(summary.plannedPaths)
       ? normalizePaths(
@@ -2157,6 +2165,123 @@ export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
       : [],
     remediationDirective
   };
+}
+
+type VerificationRuntimeOwner = { batchId: string; ownerThreadId: string; releaseSha: string };
+
+async function readOwnedVerificationRuntimeScope(
+  tx: Prisma.TransactionClient,
+  input: VerificationRuntimeOwner,
+  now: Date,
+) {
+  const { loadOwnedOutdoorRepairBatch } = await import("@/lib/course-discovery/learning-repair-recovery");
+  const { currentDiscoveryEngineeringHandoff } = await import("@/lib/course-discovery/engineering-repair");
+  const selected = await loadOwnedOutdoorRepairBatch(tx, { batchId: input.batchId, now, allowVerificationRuntimeHeld: true });
+  if (!selected || selected.batch.ownerThreadId !== input.ownerThreadId || selected.batch.releaseSha !== input.releaseSha) return null;
+
+  // Use the same course lock as normal learner claim and source acceptance.
+  // An active learner or a detached verification retains its original capacity.
+  await acquireCourseMonitoringWriteLockInTransaction(tx, selected.entry.courseId);
+  await tx.$queryRaw`SELECT id FROM "Course" WHERE id = ${selected.entry.courseId} FOR UPDATE`;
+  const current = await loadOwnedOutdoorRepairBatch(tx, { batchId: input.batchId, now, allowVerificationRuntimeHeld: true });
+  if (!current || current.batch.revision !== selected.batch.revision || current.entry.courseId !== selected.entry.courseId ||
+      current.entry.incidentId !== selected.entry.incidentId || current.entry.cycle !== selected.entry.cycle ||
+      current.batch.ownerThreadId !== input.ownerThreadId || current.batch.releaseSha !== input.releaseSha ||
+      current.batch.recheckDispatchKey || current.batch.recheckDispatchStartedAt || current.batch.recheckDispatchedAt) return null;
+  const [learner, verification, handoff] = await Promise.all([
+    tx.courseDiscoveryJob.findFirst({ where: { courseId: current.entry.courseId, offeringId: null,
+      status: { in: ["QUEUED", "RUNNING"] } }, select: { id: true } }),
+    tx.courseSupportVerificationRequest.findFirst({ where: { batchIncident: { batchId: input.batchId },
+      status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] } }, select: { id: true } }),
+    currentDiscoveryEngineeringHandoff(tx, { courseId: current.entry.courseId }, now),
+  ]);
+  if (learner || verification || !handoff || handoff.receipt.incidentId !== current.entry.incidentId) return null;
+  return { ...current, handoff };
+}
+
+export async function holdOwnedCourseSupportVerificationRuntime(input: VerificationRuntimeOwner & {
+  leaseToken: string;
+  evidence: CourseSupportLearningRuntimeBlocker;
+}) {
+  const transition = await retryCourseSupportWriterAdmission(timeout =>
+    runWithCourseSupportWriterTransitionLease(() => runCourseSupportSerializableTransactionWithRetry(async tx => {
+      const now = await getCourseSupportDatabaseNow(tx);
+      const blocker = readPreAdmissionRuntimeBlocker(input.evidence, now);
+      if (!blocker) return { outcome: "not_eligible" as const };
+      const scope = await readOwnedVerificationRuntimeScope(tx, input, now);
+      if (!scope) return { outcome: "not_eligible" as const };
+      if (scope.batch.verificationRuntimeHold != null) {
+        const held = readCourseSupportVerificationRuntimeHold(scope.batch.verificationRuntimeHold);
+        return held?.reasonCode === blocker.reasonCode && held.ownerThreadId === input.ownerThreadId &&
+          held.releaseSha === input.releaseSha && held.originalJobId === scope.handoff.job.id
+          ? { outcome: "already_held" as const, reasonCode: held.reasonCode }
+          : { outcome: "not_eligible" as const };
+      }
+      if (scope.batch.leaseToken !== input.leaseToken || scope.batch.leaseExpiresAt <= now ||
+          input.evidence.observedAt < scope.batch.deployedAt!) return { outcome: "not_eligible" as const };
+
+      const hold = {
+        version: 1, ...blocker, runtimeVersion: input.evidence.runtimeVersion, observedAt: input.evidence.observedAt.toISOString(),
+        heldAt: now.toISOString(), ownerThreadId: input.ownerThreadId, releaseSha: input.releaseSha,
+        incidentId: scope.entry.incidentId, cycle: scope.entry.cycle, originalJobId: scope.handoff.job.id,
+        sourceFingerprint: scope.handoff.job.sourceFingerprint,
+      } satisfies CourseSupportVerificationRuntimeHold;
+      const write = await tx.courseSupportBatch.updateMany({
+        where: { id: scope.batch.id, status: "VERIFYING", completedAt: null, ownerThreadId: input.ownerThreadId,
+          releaseSha: input.releaseSha, leaseToken: input.leaseToken, revision: scope.batch.revision,
+          leaseExpiresAt: { gt: now }, verificationRuntimeHold: { equals: Prisma.DbNull } },
+        data: {
+          verificationRuntimeHold: hold, leaseExpiresAt: now, leaseToken: randomUUID(), revision: { increment: 1 },
+        },
+      });
+      return write.count === 1 ? { outcome: "held" as const, reasonCode: hold.reasonCode } : { outcome: "not_eligible" as const };
+    }), { timeout }));
+  return transition.acquired ? transition.value : { outcome: "busy" as const };
+}
+
+export async function resumeOwnedCourseSupportVerificationRuntime(input: VerificationRuntimeOwner & {
+  evidence: CourseSupportLearningRuntimeReadyReceipt;
+}) {
+  const transition = await retryCourseSupportWriterAdmission(timeout =>
+    runWithCourseSupportWriterTransitionLease(() => runCourseSupportSerializableTransactionWithRetry(async tx => {
+      const now = await getCourseSupportDatabaseNow(tx);
+      const scope = await readOwnedVerificationRuntimeScope(tx, input, now);
+      const hold = readCourseSupportVerificationRuntimeHold(scope?.batch.verificationRuntimeHold);
+      if (!scope || !hold || hold.ownerThreadId !== input.ownerThreadId || hold.releaseSha !== input.releaseSha ||
+          hold.incidentId !== scope.entry.incidentId || hold.cycle !== scope.entry.cycle ||
+          hold.originalJobId !== scope.handoff.job.id || hold.sourceFingerprint !== scope.handoff.job.sourceFingerprint ||
+          !isFreshRuntimeReadyReceipt(input.evidence, hold, now)) return { outcome: "not_eligible" as const };
+
+      const { listLiveCourseSupportDispatchReservations } = await import("./course-support-course-dispatch");
+      const [activeBatches, reservations] = await Promise.all([
+        tx.courseSupportBatch.findMany({ where: { status: { in: ACTIVE_BATCH_STATUSES } },
+          select: { id: true, verificationRuntimeHold: true, incidents: { select: { courseId: true } } } }),
+        listLiveCourseSupportDispatchReservations(tx),
+      ]);
+      const occupied = batchesUsingCapacity(activeBatches);
+      const reservedCourses = reservations.map(entry => entry.audit.target.courseId);
+      if (occupied.length + reservations.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
+          new Set([...occupied.flatMap(ownedCourseIds), ...reservedCourses, scope.entry.courseId]).size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES)
+        return { outcome: "capacity_full" as const };
+      if (reservedCourses.includes(scope.entry.courseId) ||
+          occupied.some(batch => ownedCourseIds(batch).includes(scope.entry.courseId))) return { outcome: "not_eligible" as const };
+
+      const summary = asJsonObject(scope.batch.summary);
+      const history = Array.isArray(summary.verificationRuntimeRecoveryV1) ? summary.verificationRuntimeRecoveryV1 : [];
+      const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
+      const write = await tx.courseSupportBatch.updateMany({
+        where: { id: scope.batch.id, status: "VERIFYING", completedAt: null, ownerThreadId: input.ownerThreadId,
+          releaseSha: input.releaseSha, revision: scope.batch.revision, verificationRuntimeHold: { equals: hold } },
+        data: {
+          verificationRuntimeHold: Prisma.DbNull, leaseToken: randomUUID(), leaseExpiresAt, heartbeatAt: now, revision: { increment: 1 },
+          summary: { ...summary, verificationRuntimeRecoveryV1: [...history.slice(-15), { hold, resumedAt: now.toISOString(),
+            runtimeVersion: input.evidence.runtimeVersion, heartbeatAt: input.evidence.heartbeatAt.toISOString() }] } as Prisma.InputJsonValue,
+        },
+      });
+      return write.count === 1 ? { outcome: "resumed" as const, leaseExpiresAt: leaseExpiresAt.toISOString() }
+        : { outcome: "not_eligible" as const };
+    }), { timeout }));
+  return transition.acquired ? transition.value : { outcome: "busy" as const };
 }
 
 export function selectCourseSupportRetryBatch(input: {
@@ -3854,6 +3979,7 @@ export async function inspectCourseSupportQueue(input?: {
         where: {
           status: { in: ACTIVE_BATCH_STATUSES },
           leaseExpiresAt: { lte: now },
+          verificationRuntimeHold: { equals: Prisma.DbNull },
         },
         orderBy: { leaseExpiresAt: "asc" },
         select: {
@@ -3870,6 +3996,7 @@ export async function inspectCourseSupportQueue(input?: {
         where: {
           status: { in: ACTIVE_BATCH_STATUSES },
           leaseExpiresAt: { lte: now },
+          verificationRuntimeHold: { equals: Prisma.DbNull },
         },
       }),
       inspectActiveParkedCourseCampaign({
@@ -4389,7 +4516,6 @@ export async function claimCourseSupportBatch(input: {
         status: { in: ACTIVE_BATCH_STATUSES },
       },
       orderBy: { heartbeatAt: "desc" },
-      take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
       select: {
         id: true,
         leaseExpiresAt: true,
@@ -4397,6 +4523,7 @@ export async function claimCourseSupportBatch(input: {
         providerFamilyKey: true,
         failureFingerprint: true,
         summary: true,
+        verificationRuntimeHold: true,
         incidents: { select: { courseId: true } },
       },
     });
@@ -4404,20 +4531,23 @@ export async function claimCourseSupportBatch(input: {
     const reservedCourses = new Set(liveReservations
       .filter((entry) => entry.audit.assignmentRef !== input.dispatchAssignmentRef)
       .map((entry) => entry.audit.target.courseId));
+    const capacityBatches = batchesUsingCapacity(activeBatches);
+    const heldCourses = new Set(activeBatches.filter(batch =>
+      isCourseSupportVerificationRuntimeHeld(batch.verificationRuntimeHold)).flatMap(ownedCourseIds));
     const occupiedCourses = new Set([
-      ...activeBatches.flatMap(ownedCourseIds),
+      ...capacityBatches.flatMap(ownedCourseIds),
       ...reservedCourses,
     ]);
     const assignedOwnershipConflict = assignment && activeBatches.some(batch =>
       courseSupportAssignedCandidateConflicts(assignment.target, batch));
-    if ((assignment || activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) &&
-        (activeBatches.length + liveReservations.length - (assignment ? 1 : 0) >=
+    if ((assignment || capacityBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) &&
+        (capacityBatches.length + liveReservations.length - (assignment ? 1 : 0) >=
           MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
           occupiedCourses.size >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES || assignedOwnershipConflict)) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
         now: selectionDatabaseNow,
-        summary: { activeBatchCount: activeBatches.length, reservedDispatchCount: liveReservations.length },
+        summary: { activeBatchCount: capacityBatches.length, reservedDispatchCount: liveReservations.length },
       });
       return {
         outcome: "deferred_busy" as const,
@@ -4425,12 +4555,12 @@ export async function claimCourseSupportBatch(input: {
         ...getResponderThreadPolicy({ outcome: "deferred_busy", durableCloseoutRecorded: recorded }),
       };
     }
-    if (activeBatches.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
+    if (capacityBatches.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
         now: selectionDatabaseNow,
         summary: {
-          activeBatchCount: activeBatches.length,
+          activeBatchCount: capacityBatches.length,
         },
       });
       return {
@@ -4718,7 +4848,7 @@ export async function claimCourseSupportBatch(input: {
         : selected.incidents[0]?.updatedAt.toISOString() !== assignment.target.updatedAt))) {
       throw new Error("Course dispatch target changed before claim.");
     }
-    if (new Set([
+    if (selected.incidents.some(incident => heldCourses.has(incident.courseId)) || new Set([
       ...occupiedCourses,
       ...selected.incidents.map((incident) => incident.courseId),
     ]).size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
@@ -5068,13 +5198,13 @@ export async function claimCourseSupportBatch(input: {
               status: { in: ACTIVE_BATCH_STATUSES },
             },
             orderBy: { heartbeatAt: "desc" },
-            take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
             select: {
               id: true,
               status: true,
               providerFamilyKey: true,
               failureFingerprint: true,
               summary: true,
+              verificationRuntimeHold: true,
               incidents: { select: { courseId: true } },
             },
           }),
@@ -5091,8 +5221,11 @@ export async function claimCourseSupportBatch(input: {
         const lockedReservedCourses = new Set(lockedReservations
           .filter((entry) => entry.audit.assignmentRef !== input.dispatchAssignmentRef)
           .map((entry) => entry.audit.target.courseId));
+        const lockedCapacityBatches = batchesUsingCapacity(currentActiveBatches);
+        const lockedHeldCourses = new Set(currentActiveBatches.filter(batch =>
+          isCourseSupportVerificationRuntimeHeld(batch.verificationRuntimeHold)).flatMap(ownedCourseIds));
         const lockedOccupiedCourses = new Set([
-          ...currentActiveBatches.flatMap(ownedCourseIds),
+          ...lockedCapacityBatches.flatMap(ownedCourseIds),
           ...lockedReservedCourses,
         ]);
         const currentIncidentById = new Map(
@@ -5664,7 +5797,7 @@ export async function claimCourseSupportBatch(input: {
           ),
         );
         if (
-          currentActiveBatches.length + lockedReservations.length - (assignment ? 1 : 0) >=
+          lockedCapacityBatches.length + lockedReservations.length - (assignment ? 1 : 0) >=
             MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
           lockedOccupiedCourses.size >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
           currentConflictingPaths.length > 0 ||
@@ -5798,7 +5931,7 @@ export async function claimCourseSupportBatch(input: {
           );
         }
         const lockedSelection = currentSelection;
-        if (new Set([
+        if (lockedSelection.incidents.some(incident => lockedHeldCourses.has(incident.courseId)) || new Set([
           ...lockedOccupiedCourses,
           ...lockedSelection.incidents.map((incident) => incident.courseId),
         ]).size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
@@ -15396,6 +15529,7 @@ export async function recoverCourseSupportBatch(input: {
         createdAt: true,
         releaseSha: true,
         deployedAt: true,
+        verificationRuntimeHold: true,
         recheckDispatchKey: true,
         recheckDispatchStartedAt: true,
         recheckDispatchedAt: true,
@@ -15468,6 +15602,14 @@ export async function recoverCourseSupportBatch(input: {
         reasons: ["The requested responder batch is not recoverable."],
         threadDisposition: "KEEP_VISIBLE" as const,
         archiveReason: "Responder recovery needs owner attention.",
+      };
+    }
+    if (batch.verificationRuntimeHold != null && ACTIVE_BATCH_STATUSES.includes(batch.status)) {
+      return {
+        outcome: "command_failed" as const, recovered: false,
+        reasons: ["VERIFICATION_RUNTIME_HOLD_REQUIRES_EXACT_OWNER_RESUME"],
+        threadDisposition: "KEEP_VISIBLE" as const,
+        archiveReason: "The original owner must resume this repair with current runtime evidence.",
       };
     }
     if (!ACTIVE_BATCH_STATUSES.includes(batch.status)) {

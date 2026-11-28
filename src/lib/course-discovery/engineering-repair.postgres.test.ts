@@ -12,6 +12,7 @@ import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { appendAutomationPlaybookEvent } from "@/lib/automation/course-monitoring-playbook";
 import { COURSE_DISPATCH_SOURCE_SELECT, createCourseDispatchIntentDigest } from "@/lib/automation/course-support-dispatch-intent";
+import type { CourseSupportLearningRuntimeBlocker, CourseSupportLearningRuntimeReadyReceipt } from "@/lib/automation/course-support-runtime-hold";
 let client: PrismaClient;
 vi.mock("@/lib/prisma", () => ({ get prisma() { return client; } }));
 const ids = new Set<string>();
@@ -141,6 +142,122 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       status: "VERIFYING", releaseSha, deployedAt: batch.createdAt } });
     return { ...f, batch, input: { batchId: batch.id, leaseToken: batch.leaseToken, ownerThreadId, releaseSha, runtimeVersion: releaseSha } };
   }
+
+  async function runtimeHoldFixture() {
+    const repair = await deployedReaderRepair();
+    vi.stubEnv("CODEX_THREAD_ID", repair.input.ownerThreadId);
+    const evidence: CourseSupportLearningRuntimeBlocker = {
+      kind: "WINDOWS_RUNTIME_BLOCKED", runtimeVersion: repair.input.runtimeVersion, observedAt: new Date(),
+      diagnostic: {
+        attributed: true, reasonCode: "DEPENDENCY_SCHEMA_OR_INSTALLED_READER_ROLLOUT_REQUIRED", phase: "VALIDATE_SOURCE",
+        acceptanceRestartProof: false, apply: true, stateChanged: false, mutationAttempted: false, drainAttempted: false,
+        taskStartAttempted: false, taskStopAttempted: false, runtimeUpdateAttempted: false, activationWriteAttempted: false,
+        taskStartRequests: 0, firstStoppedTaskResult: null,
+      },
+    };
+    const readyEvidence = (): CourseSupportLearningRuntimeReadyReceipt => {
+      const heartbeatAt = new Date(Math.max(Date.now(), evidence.observedAt.getTime() + 1));
+      return { kind: "WINDOWS_RUNTIME_READY", runtimeVersion: "9".repeat(40), heartbeatAt, observedAt: heartbeatAt };
+    };
+    const snapshot = async () => {
+      const [batch, membership, incident, learner, jobs, searches, verifications, probes, deliveries] = await Promise.all([
+        client.courseSupportBatch.findUniqueOrThrow({ where: { id: repair.batch.id } }),
+        client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: repair.batch.id } }),
+        client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: repair.course.id } }),
+        client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: repair.job.id } }),
+        client.courseDiscoveryJob.count({ where: { courseId: repair.course.id } }),
+        client.courseSupportBatchSearch.count({ where: { batchId: repair.batch.id } }),
+        client.courseSupportVerificationRequest.count({ where: { batchIncident: { batchId: repair.batch.id } } }),
+        client.courseProbe.count({ where: { courseId: repair.course.id } }),
+        client.searchEmailDelivery.count({ where: { teeSearchId: repair.search.id } }),
+      ]);
+      return { batch, membership, incident, learner, jobs, searches, verifications, probes, deliveries };
+    };
+    return { ...repair, evidence, readyEvidence, snapshot };
+  }
+
+  async function fillRuntimeHoldCapacity(maxBatches: number) {
+    const now = new Date();
+    const competitors = Array.from({ length: maxBatches }, () => {
+      const key = randomUUID();
+      const ownerThreadId = `runtime-capacity-${key}`;
+      batchOwners.push(ownerThreadId);
+      return { reference: ownerThreadId, ownerThreadId, providerFamilyKey: `fixture-${key}`,
+        failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER", baseSha: "a".repeat(40),
+        leaseToken: key, leaseExpiresAt: new Date(now.getTime() + 600_000), heartbeatAt: now };
+    });
+    await client.courseSupportBatch.createMany({ data: competitors });
+    return () => client.courseSupportBatch.delete({ where: { reference: competitors[0].reference } });
+  }
+
+  it("holds one published repair without spending capacity or changing evidence, then resumes once after fresh exact runtime and capacity", async () => {
+    const f = await runtimeHoldFixture();
+    const lane = await import("@/lib/automation/course-support-batches");
+    const dispatcher = await import("@/lib/automation/course-support-course-dispatch");
+    const { batch: beforeBatch, ...before } = await f.snapshot();
+    const hold = () => lane.holdOwnedCourseSupportVerificationRuntime({ ...f.input, evidence: f.evidence });
+    expect(await hold()).toMatchObject({ outcome: "held" });
+    const { batch: held, ...whileHeld } = await f.snapshot();
+    expect(held).toMatchObject({ status: "VERIFYING", ownerThreadId: beforeBatch.ownerThreadId,
+      releaseSha: beforeBatch.releaseSha, deployedAt: beforeBatch.deployedAt, completedAt: null,
+      verificationRuntimeHold: { version: 1, reasonCode: f.evidence.diagnostic.reasonCode,
+        runtimeVersion: f.evidence.runtimeVersion, incidentId: before.incident.id, originalJobId: before.learner.id },
+    });
+    expect(held.summary).toEqual(beforeBatch.summary);
+    expect(held.leaseToken).not.toBe(beforeBatch.leaseToken);
+    expect(whileHeld).toEqual(before);
+    expect(await hold()).toMatchObject({ outcome: "already_held" });
+    await expect(service.requestOwnedOutdoorLearningRecovery(f.input)).rejects.toBeInstanceOf(service.DiscoveryConflictError);
+
+    const nextParent = `runtime-parent-${randomUUID()}`;
+    batchOwners.push(nextParent);
+    expect(await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha: f.input.releaseSha, maxStarts: 1 }))
+      .toMatchObject({ acquired: true, value: { activeCount: 0, occupiedCourseCount: 0, launchItems: [],
+        fullRepairContinuationItems: [], attention: { runtimeHoldCount: 1 } } });
+
+    const resume = (evidence: CourseSupportLearningRuntimeReadyReceipt = f.readyEvidence(), releaseSha = f.input.releaseSha) =>
+      lane.resumeOwnedCourseSupportVerificationRuntime({ ...f.input, releaseSha, evidence });
+    expect(await resume({ ...f.readyEvidence(), heartbeatAt: f.evidence.observedAt })).toMatchObject({ outcome: "not_eligible" });
+    expect(await resume({ ...f.readyEvidence(), runtimeVersion: "invalid" })).toMatchObject({ outcome: "not_eligible" });
+    expect(await resume(f.readyEvidence(), "8".repeat(40))).toMatchObject({ outcome: "not_eligible" });
+
+    const freeOneSlot = await fillRuntimeHoldCapacity(lane.MAX_CONCURRENT_COURSE_SUPPORT_BATCHES);
+    expect(await resume()).toMatchObject({ outcome: "capacity_full" });
+    expect(await f.snapshot()).toEqual({ batch: held, ...before });
+    await freeOneSlot();
+    const concurrentResumes = await Promise.all([resume(), resume()]);
+    expect(concurrentResumes.filter(result => result.outcome === "resumed")).toHaveLength(1);
+    expect(concurrentResumes.every(result => ["resumed", "busy", "not_eligible"].includes(result.outcome))).toBe(true);
+    expect(await resume()).toMatchObject({ outcome: "not_eligible" });
+    const { batch: resumed, ...after } = await f.snapshot();
+    expect(resumed).toMatchObject({ status: "VERIFYING", ownerThreadId: held.ownerThreadId,
+      baseSha: held.baseSha, releaseSha: held.releaseSha, deployedAt: held.deployedAt,
+      completedAt: null, verificationRuntimeHold: null });
+    expect(resumed.summary).toEqual({ ...(beforeBatch.summary as Prisma.JsonObject), verificationRuntimeRecoveryV1: [
+      { hold: held.verificationRuntimeHold, runtimeVersion: f.readyEvidence().runtimeVersion, resumedAt: expect.any(String), heartbeatAt: expect.any(String) },
+    ] });
+    expect(resumed.leaseToken).not.toBe(held.leaseToken);
+    expect(resumed.leaseExpiresAt).toBeInstanceOf(Date);
+    expect(resumed.leaseExpiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(after).toEqual(before);
+  }, 20_000);
+
+  it.each(["foreign-owner", "wrong-lease", "unattributed", "mutation-attempt", "expired-diagnostic", "source-changed", "learner-already-admitted"] as const)(
+    "leaves the original repair untouched when the runtime hold has %s", async scenario => {
+      const f = await runtimeHoldFixture();
+      if (scenario === "source-changed") await client.course.update({ where: { id: f.course.id }, data: { website: "https://changed.example.test/" } });
+      if (scenario === "learner-already-admitted") expect(await service.requestOwnedOutdoorLearningRecovery(f.input)).toMatchObject({ outcome: "created" });
+      const before = await f.snapshot();
+      const lane = await import("@/lib/automation/course-support-batches");
+      expect(await lane.holdOwnedCourseSupportVerificationRuntime({
+        ...f.input,
+        ...(scenario === "foreign-owner" ? { ownerThreadId: `foreign-${randomUUID()}` } : {}),
+        ...(scenario === "wrong-lease" ? { leaseToken: randomUUID() } : {}),
+        evidence: { ...f.evidence, ...(scenario === "expired-diagnostic" ? { observedAt: new Date(Date.now() - 61_000) } : {}),
+          diagnostic: { ...f.evidence.diagnostic, attributed: scenario !== "unattributed", mutationAttempted: scenario === "mutation-attempt" } },
+      })).toMatchObject({ outcome: "not_eligible" });
+      expect(await f.snapshot()).toEqual(before);
+    }, 20_000);
 
   // This end-to-end database fixture includes cold tooling imports on hosted
   // runners. Its harness budget is separate from the asserted worker deadlines.

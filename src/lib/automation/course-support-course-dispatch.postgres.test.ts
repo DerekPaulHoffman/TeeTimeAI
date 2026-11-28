@@ -199,8 +199,9 @@ describe.skipIf(!databaseUrl)("course dispatcher context budgets in isolated Pos
     const search = await demand(venues, now, { mode: "OUTDOOR" });
     const prior = await starting(venues[0], search, now, true);
     const refs = (dispatcher.parseCourseDispatchAudit(prior.audit))!.target.searchRefs;
-    const batch = await client.courseSupportBatch.create({ data: { reference: randomUUID(), providerFamilyKey: "TEST_ROUTING",
-      failureFingerprint: "TEST", status: "CLAIMED", leaseToken: randomUUID(), leaseExpiresAt: new Date(now.getTime() + 600_000),
+    // The shared course and search context is independent of the legacy group's provider lock.
+    const batch = await client.courseSupportBatch.create({ data: { reference: randomUUID(), providerFamilyKey: "EXISTING_GROUP",
+      failureFingerprint: "EXISTING_GROUP_FAILURE", status: "CLAIMED", leaseToken: randomUUID(), leaseExpiresAt: new Date(now.getTime() + 600_000),
       heartbeatAt: now, baseSha, summary: { dispatchSourceSearchRefs: refs } } }); ids.batches.push(batch.id);
     for (const v of venues.slice(0, 4)) {
       const incident = await client.courseSupportIncident.upsert({ where: { courseId: v.course.id }, update: {},
