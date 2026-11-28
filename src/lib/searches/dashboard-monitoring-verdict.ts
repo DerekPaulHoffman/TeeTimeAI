@@ -41,6 +41,7 @@ export type DashboardMonitoringVerdictInput = {
   automationStalledAtEndpoint?: boolean | null;
   now?: Date;
   setupDeadlineAt?: Date;
+  setupDeadlineReached?: boolean;
   currentMatchCount?: number;
   firstTimeLookup: boolean;
   alertStatus?: string;
@@ -53,7 +54,7 @@ export function getDashboardMonitoringVerdict(
   const active = !input.alertStatus || input.alertStatus === "ACTIVE";
   const now = input.now ?? new Date();
   const terminalDiscovery = active && input.discoveryStatus?.state === "TERMINAL_FAILURE";
-  const setupDeadlineReached = active && hasReachedCourseSetupDeadline(input.setupDeadlineAt, now);
+  const setupDeadlineReached = active && (input.setupDeadlineReached || hasReachedCourseSetupDeadline(input.setupDeadlineAt, now));
   const lifecycleDetail = active
     ? "Your alert remains active."
     : input.alertStatus === "PAUSED"

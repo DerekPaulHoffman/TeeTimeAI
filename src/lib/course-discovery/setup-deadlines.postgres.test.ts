@@ -117,6 +117,96 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
     }
   }, 15_000);
 
+  it("projects a due saved course with the application clock behind before and after durable closeout", async () => {
+    const key = randomUUID();
+    const user = await database.user.create({ data: { email: `${key}@example.test`, clerkUserId: key } });
+    const course = await database.course.create({ data: { name: `Owner clock fixture ${key}`, latitude: 41, longitude: -73,
+      timeZone: "UTC", website: "https://course.example.test/", isPublic: true,
+    } });
+    const network = vi.fn(async () => { throw new Error("NO_EXTERNAL_REQUESTS"); });
+    const readDatabaseClock = async () => {
+      const [clock] = await database.$queryRaw<Array<{ observedAt: Date }>>`SELECT statement_timestamp() AS "observedAt"`;
+      return clock!.observedAt;
+    };
+    emailSend.mockClear();
+    vi.stubGlobal("fetch", network);
+    try {
+      const { createTeeSearchForUser, listTeeSearchesForUser } = await import("@/lib/searches/service");
+      const { recoverDueCourseSetupReceipts } = await import("@/lib/searches/course-setup-receipts");
+      const { getDashboardCourseStatus } = await import("@/lib/searches/dashboard-alert-summary");
+      const databaseClock = await readDatabaseClock();
+      const day = new Date(databaseClock.getTime() + 2 * 86_400_000).toISOString().slice(0, 10);
+      const saved = await createTeeSearchForUser(user.id, { mode: "OUTDOOR", date: day, startTime: "10:00", endTime: "14:00",
+        players: 2, userTimeZone: "UTC", cadenceMinutes: 5, additionalEmails: [],
+        courses: [{ courseId: course.id, name: course.name, rank: 1, latitude: course.latitude, longitude: course.longitude }],
+      }, "TEST", true);
+      const startedAt = new Date(databaseClock.getTime() - 16 * 60_000);
+      const deadlineAt = new Date(startedAt.getTime() + 15 * 60_000);
+      const receiptWhere = { preference: { teeSearchId: saved.id } };
+      const setFixtureTimeline = (startedAt: Date, deadlineAt: Date, closedAt: Date | null) =>
+        database.$transaction(async transaction => {
+          await transaction.teeSearch.update({ where: { id: saved.id }, data: { createdAt: startedAt, setupStartedAt: startedAt } });
+          await transaction.courseSetupReceipt.updateMany({ where: receiptWhere,
+            data: { startedAt, deadlineAt, closedAt, registeredAt: startedAt },
+          });
+        });
+      // Simulate elapsed time without a cron tick, while preserving the normal setup receipt and request.
+      await setFixtureTimeline(startedAt, deadlineAt, null);
+      const readReceipt = () => database.courseSetupReceipt.findFirstOrThrow({ where: receiptWhere });
+      const pending = await readReceipt();
+      expect(pending).toMatchObject({ outcome: null, closedAt: null, deadlineAt });
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(databaseClock.getTime() - 20 * 60_000));
+      expect(Date.now()).toBeLessThan(deadlineAt.getTime());
+      const expectDueInOwnerList = async (expectedDeadline = deadlineAt) => {
+        const before = await readDatabaseClock();
+        const [projected] = await listTeeSearchesForUser(user.id);
+        const after = await readDatabaseClock();
+        expect(projected).toMatchObject({ id: saved.id, availabilityObservedAt: expect.any(Date),
+          preferences: [{ courseId: course.id, setupDeadlineAt: expectedDeadline, setupDeadlineReached: true }],
+        });
+        expect(projected.availabilityObservedAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
+        expect(projected.availabilityObservedAt.getTime()).toBeLessThanOrEqual(after.getTime());
+        expect(projected.probes).toHaveLength(0);
+        expect(projected.matches).toHaveLength(0);
+        const [preference] = projected.preferences;
+        expect(getDashboardCourseStatus({
+          availability: { alertStatus: projected.status, qualifyingMatchCount: 0, players: projected.players,
+            startTime: projected.startTime, endTime: projected.endTime },
+          monitoring: { alertStatus: projected.status, alertSupport: null, upcomingBookingWindow: null,
+            automationEligibility: "UNKNOWN", automationReason: "NONE", firstTimeLookup: true,
+            setupDeadlineAt: preference.setupDeadlineAt, setupDeadlineReached: preference.setupDeadlineReached, now: new Date() },
+        }).label).toBe("Automatic availability not confirmed");
+        return projected.availabilityObservedAt.getTime();
+      };
+      await expectDueInOwnerList();
+      expect(await readReceipt()).toEqual(pending);
+
+      expect(await recoverDueCourseSetupReceipts()).toMatchObject({ unconfirmed: 1 });
+      const closed = await readReceipt();
+      expect(closed).toMatchObject({ outcome: "UNCONFIRMED", closedAt: expect.any(Date), evidenceProbeId: null });
+      expect(closed.closedAt!.getTime()).toBeGreaterThanOrEqual(deadlineAt.getTime());
+      await expectDueInOwnerList();
+      expect(await readReceipt()).toEqual(closed);
+
+      // Shift only the fixture timeline to simulate a database clock that fell behind the durable closeout.
+      const moveTimelineForward = (value: Date) => new Date(value.getTime() + 5 * 60_000);
+      const shiftedDeadline = moveTimelineForward(deadlineAt);
+      await setFixtureTimeline(moveTimelineForward(startedAt), shiftedDeadline, moveTimelineForward(closed.closedAt!));
+      expect(await expectDueInOwnerList(shiftedDeadline)).toBeLessThan(shiftedDeadline.getTime());
+      expect((await readReceipt()).outcome).toBe("UNCONFIRMED");
+      expect(await database.searchEmailDelivery.count({ where: { teeSearchId: saved.id } })).toBe(0);
+      expect(network).not.toHaveBeenCalled();
+      expect(emailSend).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      await database.user.delete({ where: { id: user.id } });
+      await database.course.delete({ where: { id: course.id } });
+    }
+  }, 15_000);
+
   it("persists a known course's normal saved-check receipt while a sibling's official lookup remains open", async () => {
     const key = randomUUID();
     const day = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);

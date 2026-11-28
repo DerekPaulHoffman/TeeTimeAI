@@ -44,6 +44,7 @@ export function getSimulatorDashboardStatus(input: {
   website: string | null;
   now?: Date;
   setupDeadlineAt?: Date;
+  setupDeadlineReached?: boolean;
   setupBookingOpensAt?: Date;
   discoveryStatus?: DashboardDiscoveryStatus | null;
 }) {
@@ -86,7 +87,7 @@ export function getSimulatorDashboardStatus(input: {
     : current && currentMatchCount > 0 ? "AVAILABLE"
     : current && probe?.outcome === "NO_MATCH" ? "NO_MATCH"
     : !probe && hasExactSource && checkedProvider ? "MONITORING"
-    : hasReachedCourseSetupDeadline(input.setupDeadlineAt, now) ? "UNCONFIRMED"
+    : input.setupDeadlineReached || hasReachedCourseSetupDeadline(input.setupDeadlineAt, now) ? "UNCONFIRMED"
     : currentProbe && probe?.outcome === "NEEDS_ADAPTER" ? "ADDING_SUPPORT"
     : (currentProbe && probe?.outcome === "FETCH_FAILED") || offering?.monitoringState === "DEGRADED_RETRYING" ? "RETRYING"
     : "PENDING";

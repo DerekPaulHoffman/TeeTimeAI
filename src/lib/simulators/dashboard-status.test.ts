@@ -92,6 +92,12 @@ describe("simulator dashboard status", () => {
     expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, monitoringState: "FINAL_TECHNICAL" } }).kind).toBe("UNAVAILABLE");
   });
 
+  it("honors a durable cutoff with a lagging clock and retains a newer verified observation", () => {
+    const input = { ...fixture(), setupDeadlineAt: new Date(now.getTime() + 60_000), setupDeadlineReached: true };
+    expect(getSimulatorDashboardStatus(input).kind).toBe("UNCONFIRMED");
+    expect(getSimulatorDashboardStatus({ ...input, probe: fixture("NO_MATCH").probe }).kind).toBe("NO_MATCH");
+  });
+
   it("uses the venue's official site while rental details are unknown", () => {
     const input = fixture("NEEDS_ADAPTER");
     const pending = { ...input, offering: { ...input.offering, publicAccessStatus: "UNVERIFIED", bookingUrl: null,

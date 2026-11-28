@@ -143,7 +143,7 @@ function DashboardView({
   showRecipientEmail: boolean;
   notice?: string;
 }) {
-  const now = new Date();
+  const now = searches[0]?.availabilityObservedAt ?? new Date();
   const { active: activeSearches, history: historySearches, slotsUsed, monitoredCourseCount } = groupDashboardNotifications(searches, now);
   const activeCount = activeSearches.length;
   const availableMatches = activeSearches.flatMap((search) =>
@@ -255,7 +255,7 @@ function DashboardSearchCard({
   ownerEmailState: OwnerEmailState;
   showRecipientEmail: boolean;
 }) {
-  const now = new Date();
+  const now = search.availabilityObservedAt ?? new Date();
   if (search.mode === "SIMULATOR") return <SimulatorDashboardCard search={search} canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailState} showRecipientEmail={showRecipientEmail} />;
   const date = search.date.toISOString().slice(0, 10);
   const windowEnded = notificationWindowEnded(date, search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
@@ -301,6 +301,7 @@ function DashboardSearchCard({
       monitoring: {
         alertStatus: search.status,
         setupDeadlineAt: preference.setupDeadlineAt,
+        setupDeadlineReached: preference.setupDeadlineReached,
         now,
         alertSupport: isPublicCourse ? getCourseAlertSupport(course) ?? null : null,
         bookingPhone: usesPhoneBooking ? course.bookingPhone ?? course.phone : null,
@@ -435,6 +436,7 @@ function DashboardSearchCard({
               initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null}
               initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
               availabilityRefreshAt={pendingSetupDeadline}
+              availabilityRefreshDelayMs={pendingSetupDeadline ? Date.parse(pendingSetupDeadline) - now.getTime() : undefined}
               initialCoursePreferences={search.preferences.map((preference) => ({
                 id: preference.id,
                 courseName: preference.course.name,
@@ -804,7 +806,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
   search: DashboardSearches[number]; canManage: boolean; coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
   ownerEmailState: OwnerEmailState; showRecipientEmail: boolean;
 }) {
-  const now = new Date();
+  const now = search.availabilityObservedAt ?? new Date();
   const date = search.date.toISOString().slice(0, 10);
   const ended = notificationWindowEnded(date, search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
   const pendingSetupDeadline = nextPendingSetupDeadline(search, now);
@@ -818,7 +820,8 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
     const status = getSimulatorDashboardStatus({ offering, probe, setupProbe: preference.setupProbe, currentMatchCount: venueMatches.length,
       alertStatus: search.status, windowEnded: notificationWindowEnded(date, search.endTime, [preference.course.timeZone], now),
       website: preference.course.website, now, discoveryStatus: preference.discoveryStatus,
-      setupDeadlineAt: preference.setupDeadlineAt, setupBookingOpensAt: preference.setupBookingOpensAt });
+      setupDeadlineAt: preference.setupDeadlineAt, setupDeadlineReached: preference.setupDeadlineReached,
+      setupBookingOpensAt: preference.setupBookingOpensAt });
     return { preference, venueMatches, status };
   });
   const availabilityRefreshAt = [
@@ -860,6 +863,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
             initialAdditionalEmails={search.additionalEmails} initialCheckStatus={search.checkStatus} initialScheduleVersion={search.scheduleVersion}
             initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null} initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
             availabilityRefreshAt={availabilityRefreshAt}
+            availabilityRefreshDelayMs={availabilityRefreshAt ? Date.parse(availabilityRefreshAt) - now.getTime() : undefined}
             initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : <span className="meta">Sign in to pause, edit, or cancel this alert.</span>}
         </div>
         <div className="watch-course-list">
@@ -894,7 +898,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
 
 function nextPendingSetupDeadline(search: DashboardSearches[number], now: Date) {
   if (search.status !== "ACTIVE") return null;
-  const next = search.preferences.map(preference => preference.setupDeadlineAt)
+  const next = search.preferences.filter(preference => !preference.setupDeadlineReached).map(preference => preference.setupDeadlineAt)
     .filter(deadline => deadline > now)
     .sort((left, right) => left.getTime() - right.getTime())[0];
   return next?.toISOString() ?? null;

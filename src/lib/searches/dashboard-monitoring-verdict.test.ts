@@ -53,10 +53,10 @@ describe("dashboard monitoring verdict", () => {
     expect(verdict.detail).not.toContain("completed successfully");
   });
 
-  it("ends the setup wait at the saved deadline and accepts independently verified recovery", () => {
+  it.each([false, true])("ends the setup wait and accepts verified recovery with a durable cutoff of %s", (settled) => {
     const setupDeadlineAt = new Date("2026-10-22T00:45:00Z");
-    const now = new Date("2026-10-22T00:46:00Z");
-    const input = { ...base, now, setupDeadlineAt, supportIncidentStatus: "AUTO_INVESTIGATING" as const };
+    const now = new Date(settled ? "2026-10-22T00:40:00Z" : "2026-10-22T00:46:00Z");
+    const input = { ...base, now, setupDeadlineAt, setupDeadlineReached: settled, supportIncidentStatus: "AUTO_INVESTIGATING" as const };
     expect(getDashboardMonitoringVerdict(input).label).toBe("Automatic availability not confirmed");
     expect(getDashboardMonitoringVerdict({ ...input, latestProbe: { outcome: "FETCH_FAILED", observedAt: now } }).label)
       .toBe("Automatic availability not confirmed");

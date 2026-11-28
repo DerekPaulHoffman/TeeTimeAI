@@ -198,8 +198,9 @@ describe("dashboard course and simulator presentation", () => {
   });
 
   it("renders a clear deadline result in outdoor and simulator alerts even if no worker started", async () => {
+    vi.setSystemTime(new Date(now.getTime() - 20 * 60_000));
     const searches = [fixture("GOLF", "Unverified Course"), fixture("SIMULATOR", "Unverified Venue")].map(search => ({
-      ...search, lastCheckedAt: null, matches: [], probes: [], preferences: search.preferences.map(preference => ({
+      ...search, availabilityObservedAt: now, lastCheckedAt: null, matches: [], probes: [], preferences: search.preferences.map(preference => ({
         ...preference, setupDeadlineAt: now,
       })),
     }));

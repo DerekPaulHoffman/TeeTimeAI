@@ -28,7 +28,7 @@ function isSuccessfulProbe<T extends SearchProbe>(probe: T): probe is T & { outc
   return probe.outcome === "MATCH_FOUND" || probe.outcome === "NO_MATCH";
 }
 
-function hasCurrentProviderProof(probe: SearchProbe, mode: string | undefined, startedAt: Date | null) {
+function hasCurrentProviderProof(probe: SearchProbe, mode: string | undefined, startedAt: Date | null, now: Date) {
   if (mode !== "SIMULATOR") {
     // A newly persisted cached result can still describe an older request.
     return isSince(getProviderExecutionEvidenceObservedAt({
@@ -39,7 +39,7 @@ function hasCurrentProviderProof(probe: SearchProbe, mode: string | undefined, s
   const summary = probe.rawSummary && typeof probe.rawSummary === "object" && !Array.isArray(probe.rawSummary)
     ? probe.rawSummary as Record<string, unknown> : null;
   if (summary?.mode !== "SIMULATOR") return false;
-  if (summary.bookingNotOpen === true) return typeof summary.opensAt === "string" && Date.parse(summary.opensAt) > Date.now();
+  if (summary.bookingNotOpen === true) return typeof summary.opensAt === "string" && Date.parse(summary.opensAt) > now.getTime();
   return typeof summary.providerObservedAt === "string" && isSince(new Date(summary.providerObservedAt), startedAt);
 }
 
@@ -49,10 +49,11 @@ function hasCurrentProviderProof(probe: SearchProbe, mode: string | undefined, s
 export function getCourseSetupProbe<T extends SearchProbe>(
   search: { mode?: string; alertGeneration: number; createdAt: Date; setupStartedAt?: Date | null },
   probe: T | undefined,
+  now = new Date(),
 ) {
   if (!probe || !isSuccessfulProbe(probe) || (!search.setupStartedAt && search.alertGeneration !== 0)) return undefined;
   const startedAt = readCourseSetupStartedAt(search);
-  if (!isSince(probe.observedAt, startedAt) || !hasCurrentProviderProof(probe, search.mode, startedAt)) return undefined;
+  if (!isSince(probe.observedAt, startedAt) || !hasCurrentProviderProof(probe, search.mode, startedAt, now)) return undefined;
   const summary = search.mode === "SIMULATOR" ? probe.rawSummary as Record<string, unknown> : null;
   return {
     observedAt: probe.observedAt,
@@ -71,7 +72,7 @@ export function getCourseSetupProbe<T extends SearchProbe>(
 // from the owner-facing projection. Missing legacy clocks are not current proof.
 export function projectCurrentCheckEvidence<
   T extends CurrentCheckSearch & { probes: SearchProbe[] },
->(search: T) {
+>(search: T, now = new Date()) {
   const startedAt =
     typeof search.alertGeneration === "number" && Number.isInteger(search.alertGeneration)
       && search.alertGeneration >= 0 && search.createdAt instanceof Date
@@ -97,7 +98,7 @@ export function projectCurrentCheckEvidence<
         return false;
       }
       if (search.mode === "SIMULATOR" && (!probe.offeringId || probe.offeringId !== selectedCourses.get(probe.courseId))) return false;
-      return !isSuccessfulProbe(probe) || hasCurrentProviderProof(probe, search.mode, startedAt);
+      return !isSuccessfulProbe(probe) || hasCurrentProviderProof(probe, search.mode, startedAt, now);
     }),
   };
 }

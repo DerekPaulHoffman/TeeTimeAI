@@ -757,19 +757,30 @@ export async function listTeeSearchesForUser(userId: string) {
         matchCourseIds,
       );
 
-    const latestProbeIds = await transaction.$queryRaw<Array<{ id: string }>>(
+    const probeSnapshot = await transaction.$queryRaw<Array<{ id: string | null; availabilityObservedAt: Date | null }>>(
       Prisma.sql`
-        SELECT DISTINCT ON ("teeSearchId", "courseId") id
-        FROM "CourseProbe"
-        WHERE "teeSearchId" IN (${Prisma.join(searches.map((search) => search.id))})
-        ORDER BY "teeSearchId", "courseId", "observedAt" DESC, id DESC
+        SELECT NULL::text AS id, statement_timestamp() AS "availabilityObservedAt"
+        UNION ALL
+        SELECT latest.id, NULL::timestamptz
+        FROM (
+          SELECT DISTINCT ON ("teeSearchId", "courseId") id
+          FROM "CourseProbe"
+          WHERE "teeSearchId" IN (${Prisma.join(searches.map((search) => search.id))})
+          ORDER BY "teeSearchId", "courseId", "observedAt" DESC, id DESC
+        ) AS latest
       `,
     );
+    // The clock row is present even when this snapshot contains no probes.
+    const availabilityObservedAt = probeSnapshot.find(row => row.id === null)?.availabilityObservedAt;
+    if (!(availabilityObservedAt instanceof Date) || !Number.isFinite(availabilityObservedAt.getTime())) {
+      throw new Error("The search availability database clock is unavailable.");
+    }
+    const latestProbeIds = probeSnapshot.map(row => row.id).filter(id => id !== null);
     const latestProbes =
       latestProbeIds.length === 0
         ? []
         : await transaction.courseProbe.findMany({
-            where: { id: { in: latestProbeIds.map((probe) => probe.id) } },
+            where: { id: { in: latestProbeIds } },
             orderBy: { observedAt: "desc" },
             include: { course: true },
           });
@@ -809,11 +820,12 @@ export async function listTeeSearchesForUser(userId: string) {
     return searches.map((search) => {
       const probes = probesBySearch.get(search.id) ?? [];
       const current = projectCurrentCustomerMatches(
-        projectCurrentCheckEvidence({ ...search, probes }),
+        projectCurrentCheckEvidence({ ...search, probes }, availabilityObservedAt),
         completedLocalReaderSources,
         providerObservationFences,
+        availabilityObservedAt,
       );
-      return { ...current, preferences: current.preferences.map(preference => {
+      return { ...current, availabilityObservedAt, preferences: current.preferences.map(preference => {
         const { setupReceipts, ...visiblePreference } = preference;
         const setupReceipt = setupReceipts?.find(receipt =>
           receipt.startedAt.getTime() === readCourseSetupStartedAt(search).getTime() &&
@@ -822,17 +834,21 @@ export async function listTeeSearchesForUser(userId: string) {
           (current.mode !== "SIMULATOR" || (probe.offeringId !== null && probe.offeringId === preference.offeringId));
         const currentProbe = current.probes.find(matchesTarget);
         const setupProbe = search.status === "ACTIVE" && !currentProbe
-          ? getCourseSetupProbe(search, probes.find(matchesTarget)) : undefined;
+          ? getCourseSetupProbe(search, probes.find(matchesTarget), availabilityObservedAt) : undefined;
+        const setupDeadlineAt = setupReceipt?.deadlineAt ?? getCourseSetupDeadline(search, preference.course.timeZone);
         return {
           ...visiblePreference,
-          setupDeadlineAt: setupReceipt?.deadlineAt ?? getCourseSetupDeadline(search, preference.course.timeZone),
+          setupDeadlineAt,
+          setupDeadlineReached: search.status === "ACTIVE" && (setupReceipt?.outcome === "UNCONFIRMED" ||
+            setupReceipt?.outcome === "LEGACY_UNVERIFIED" || setupDeadlineAt <= availabilityObservedAt),
           setupBookingOpensAt: current.mode === "SIMULATOR" && setupReceipt && preference.offering
             ? readSavedSimulatorBookingOpening({ receipt: setupReceipt, offering: preference.offering,
                 targetDate: search.date.toISOString().slice(0, 10), timeZone: preference.course.timeZone })
             : undefined,
           setupProbe,
           discoveryStatus: getDashboardDiscoveryStatus(current, preference,
-            discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null, currentProbe),
+            discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null,
+            currentProbe, availabilityObservedAt),
         };
       }) };
     });
@@ -1172,6 +1188,7 @@ function projectCurrentCustomerMatches<
     string,
     CourseProviderObservationFence
   >,
+  now = new Date(),
 ) {
   return {
     ...hideInternalGenerationMarker(search),
@@ -1184,7 +1201,7 @@ function projectCurrentCustomerMatches<
         if (!match.offeringId || !match.endsAt || !match.bookingUrl || !match.lastConfirmedAt ||
           !preference || !generationStartedAt || match.lastConfirmedAt < generationStartedAt ||
           !isCurrentSimulatorMatch({ ...match, offeringId: match.offeringId, endsAt: match.endsAt, bookingUrl: match.bookingUrl,
-            lastConfirmedAt: match.lastConfirmedAt, capacity: match.capacity ?? null }, new Date())) return [];
+            lastConfirmedAt: match.lastConfirmedAt, capacity: match.capacity ?? null }, now)) return [];
         const matching = filterSimulatorSessionsForSearch({ date: search.date.toISOString().slice(0, 10), startTime: search.startTime,
           endTime: search.endTime, players: search.players, durationMinutes: search.durationMinutes ?? null,
           preferredOfferings: [{ offeringId: match.offeringId, rank: 1 }] }, [{ offeringId: match.offeringId, sourceId: "projection",

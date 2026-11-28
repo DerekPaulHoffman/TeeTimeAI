@@ -74,6 +74,13 @@ vi.mock(
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 let databaseSaveTime: Date | undefined;
 
+function mockLatestProbeSnapshot(probeIds: string[] = [], availabilityObservedAt = new Date()) {
+  mockedPrisma.$queryRaw.mockResolvedValue([
+    { id: null, availabilityObservedAt },
+    ...probeIds.map(id => ({ id, availabilityObservedAt: null })),
+  ]);
+}
+
 const currentSlotSettings = {
   startsAt: new Date("2026-08-31T14:00:00.000Z"),
   availableSpots: 4,
@@ -152,6 +159,59 @@ afterEach(() => {
 });
 
 describe("listTeeSearchesForUser", () => {
+  it("projects the database cutoff and exact durable negative without leaking receipts", async () => {
+    vi.setSystemTime(new Date("2026-07-01T12:30:00Z"));
+    const availabilityObservedAt = new Date("2026-07-01T12:10:00Z");
+    const setupStartedAt = new Date("2026-07-01T12:00:00Z");
+    const futureDeadline = new Date("2026-07-01T12:15:00Z");
+    const preference = (courseId: string, outcome: string | null, deadlineAt = futureDeadline, startedAt = setupStartedAt) => ({
+      courseId, offeringId: null, offering: null, course: { id: courseId, ...currentCourseSettings },
+      setupReceipts: [{ courseId, offeringId: null, startedAt, deadlineAt, outcome }],
+    });
+    const stored = { ...currentSearchSettings(), id: "active", mode: "OUTDOOR", status: "ACTIVE", matches: [],
+      alertGeneration: 1, setupStartedAt, preferences: [
+        preference("due", null, availabilityObservedAt),
+        preference("unconfirmed", "UNCONFIRMED"),
+        preference("unverified", "LEGACY_UNVERIFIED"),
+        preference("pending", null),
+        preference("old-receipt", "UNCONFIRMED", availabilityObservedAt, new Date("2026-07-01T11:00:00Z")),
+      ] };
+    const paused = { ...stored, id: "paused", status: "PAUSED", preferences: [stored.preferences[1]] };
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([stored, paused] as never);
+    mockLatestProbeSnapshot([], availabilityObservedAt);
+
+    const [activeSearch, pausedSearch] = await listTeeSearchesForUser("owner-1");
+
+    expect(activeSearch.availabilityObservedAt).toEqual(availabilityObservedAt);
+    expect(activeSearch.preferences.map(preference => preference.setupDeadlineReached)).toEqual([true, true, true, false, false]);
+    expect(activeSearch.preferences[4].setupDeadlineAt).toEqual(futureDeadline);
+    expect(activeSearch.preferences.every(preference => !("setupReceipts" in preference))).toBe(true);
+    expect(pausedSearch.preferences[0].setupDeadlineReached).toBe(false);
+  });
+
+  it("uses database time for current simulator booking-opening proof across a skewed host clock", async () => {
+    vi.setSystemTime(new Date("2026-07-01T12:30:00Z"));
+    const opensAt = new Date("2026-07-01T12:15:00Z");
+    const stored = { ...currentSearchSettings(), id: "simulator-search", mode: "SIMULATOR", status: "ACTIVE", matches: [],
+      alertGeneration: 0, setupStartedAt: new Date("2026-07-01T12:00:00Z"), preferences: [
+        { courseId: "course-1", offeringId: "simulator-1", offering: { id: "simulator-1", kind: "SIMULATOR" },
+          course: { id: "course-1", ...currentCourseSettings } },
+      ] };
+    const probe = { id: "opening-probe", teeSearchId: stored.id, courseId: "course-1", offeringId: "simulator-1",
+      outcome: "NO_MATCH", observedAt: new Date("2026-07-01T12:05:00Z"),
+      rawSummary: { mode: "SIMULATOR", bookingNotOpen: true, opensAt: opensAt.toISOString() } };
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([stored] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([probe] as never);
+    mockLatestProbeSnapshot([probe.id], new Date("2026-07-01T12:10:00Z"));
+    expect((await listTeeSearchesForUser("owner-1"))[0].probes).toEqual([probe]);
+
+    vi.setSystemTime(new Date("2026-07-01T12:01:00Z"));
+    mockLatestProbeSnapshot([probe.id], opensAt);
+    const [opened] = await listTeeSearchesForUser("owner-1");
+    expect(opened.probes).toEqual([]);
+    expect(opened.preferences[0]).toMatchObject({ setupProbe: undefined, setupDeadlineReached: true });
+  });
+
   it.each([false, true])("projects the exact owned-request terminal investigation with migrated outdoor offering %s", async (migrated) => {
     vi.setSystemTime(new Date("2026-10-22T00:40:00Z"));
     mockedPrisma.courseDiscoveryJob.findFirst.mockClear();
@@ -175,7 +235,7 @@ describe("listTeeSearchesForUser", () => {
         identity: { name: course.name, address: course.address, officialUrl: course.website,
           bookingUrl: null, timeZone: course.timeZone, providerFamily: null } } };
     mockedPrisma.teeSearch.findMany.mockResolvedValue([stored] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([]);
+    mockLatestProbeSnapshot();
     mockedPrisma.courseDiscoveryJob.findFirst.mockResolvedValue(job as never);
     const [projected] = await listTeeSearchesForUser("owner-1");
     expect(projected.preferences[0].discoveryStatus).toEqual({ state: "TERMINAL_FAILURE", completedAt });
@@ -204,7 +264,7 @@ describe("listTeeSearchesForUser", () => {
     })).map(search => ({ ...search, preferences: search.preferences.map(preference => ({ ...preference,
       id: `pref-${preference.course.id}`, courseId: preference.course.id, offeringId: null, offering: null })) }));
     mockedPrisma.teeSearch.findMany.mockResolvedValue(searches as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([]);
+    mockLatestProbeSnapshot();
     mockedPrisma.courseDiscoveryJob.findFirst.mockClear();
     const projected = await listTeeSearchesForUser("owner-1");
     expect(mockedPrisma.courseDiscoveryJob.findFirst).toHaveBeenCalledTimes(25);
@@ -229,7 +289,7 @@ describe("listTeeSearchesForUser", () => {
       lastCheckedAt: new Date("2026-09-30T03:31:59.691Z"), lastCheckOutcome: "MATCH_FOUND",
     };
     mockedPrisma.teeSearch.findMany.mockResolvedValue([storedSearch] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([{ id: "old-probe" }] as never);
+    mockLatestProbeSnapshot(["old-probe"]);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([oldProbe] as never);
 
     const [projected] = await listTeeSearchesForUser("user-1");
@@ -255,7 +315,7 @@ describe("listTeeSearchesForUser", () => {
       outcome: "MATCH_FOUND", observedAt, rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK",
         providerObservedAt: observedAt.toISOString(), visibleSlotCount: 17 } };
     mockedPrisma.teeSearch.findMany.mockResolvedValue([stored] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([{ id: probe.id }] as never);
+    mockLatestProbeSnapshot([probe.id]);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([probe] as never);
     const [projected] = await listTeeSearchesForUser("user-1");
     expect(projected.preferences[0]).toMatchObject({ setupDeadlineAt: new Date("2026-07-01T12:04:00Z"),
@@ -273,7 +333,7 @@ describe("listTeeSearchesForUser", () => {
       matches: [storedMatch],
     };
     mockedPrisma.teeSearch.findMany.mockResolvedValue([storedSearch] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockLatestProbeSnapshot();
 
     const [projected] = await listTeeSearchesForUser("user-1");
 
@@ -291,7 +351,7 @@ describe("listTeeSearchesForUser", () => {
       date: new Date("2026-09-30T00:00:00.000Z"), startTime: "10:00", endTime: "14:00",
       matches: [confirmedDateEditMatch("2026-09-30T14:00:00.000Z")],
     }] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockLatestProbeSnapshot();
 
     const [projected] = await listTeeSearchesForUser("user-1");
 
@@ -314,7 +374,7 @@ describe("listTeeSearchesForUser", () => {
         matches: [],
       },
     ] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockLatestProbeSnapshot();
 
     const searches = await listTeeSearchesForUser("user-1");
 
@@ -339,7 +399,7 @@ describe("listTeeSearchesForUser", () => {
         matches: [],
       },
     ] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockLatestProbeSnapshot();
 
     const searches = await listTeeSearchesForUser("user-1");
 
@@ -386,7 +446,7 @@ describe("listTeeSearchesForUser", () => {
     mockedPrisma.teeSearch.findMany.mockResolvedValue([
       persistedSearch,
     ] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockLatestProbeSnapshot();
 
     const searches = await listTeeSearchesForUser("user-1");
 
@@ -429,7 +489,7 @@ describe("listTeeSearchesForUser", () => {
           matches: [persistedMatch],
         },
       ] as never);
-      mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+      mockLatestProbeSnapshot();
 
       const searches = await listTeeSearchesForUser("user-1");
 
@@ -465,7 +525,7 @@ describe("listTeeSearchesForUser", () => {
       mockedPrisma.teeSearch.findMany.mockResolvedValue([
         persistedSearch,
       ] as never);
-      mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+      mockLatestProbeSnapshot();
       localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
         new Map([
           [
@@ -522,7 +582,7 @@ describe("listTeeSearchesForUser", () => {
           ],
         },
       ] as never);
-      mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+      mockLatestProbeSnapshot();
       localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
         new Map([
           [
@@ -567,7 +627,7 @@ describe("listTeeSearchesForUser", () => {
         ],
       },
     ] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockLatestProbeSnapshot();
     localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
       new Map([
         [
@@ -613,7 +673,7 @@ describe("listTeeSearchesForUser", () => {
         ],
       },
     ] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockLatestProbeSnapshot();
     providerObservationMocks.getCourseProviderObservationFencesInTransaction.mockResolvedValue(
       new Map([
         [
@@ -659,13 +719,10 @@ describe("listTeeSearchesForUser", () => {
         matches: [],
       },
     ] as never);
-    mockedPrisma.$queryRaw.mockResolvedValue([
-      { id: "probe-course-1-latest" },
-      { id: "probe-course-2-latest" },
-      { id: "probe-course-3-latest" },
-      { id: "probe-course-4-unchanged" },
-      { id: "probe-course-5-unchanged" },
-    ] as never);
+    mockLatestProbeSnapshot([
+      "probe-course-1-latest", "probe-course-2-latest", "probe-course-3-latest",
+      "probe-course-4-unchanged", "probe-course-5-unchanged",
+    ]);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
       {
         id: "probe-course-3-latest",

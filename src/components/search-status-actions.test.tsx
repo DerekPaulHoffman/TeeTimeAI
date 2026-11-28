@@ -369,6 +369,19 @@ describe("SearchStatusActions", () => {
     expect(refreshMock).toHaveBeenCalledOnce();
   });
 
+  it.each([-20, 20])("refreshes from the server's remaining time with a %i-minute browser clock skew", (skewMinutes) => {
+    vi.useFakeTimers();
+    const serverTime = new Date("2026-08-14T12:00:00Z");
+    vi.setSystemTime(new Date(serverTime.getTime() + skewMinutes * 60_000));
+    render(<SearchStatusActions {...savedSearch} availabilityRefreshDelayMs={1000}
+      availabilityRefreshAt={new Date(serverTime.getTime() + 1000).toISOString()} />);
+
+    act(() => vi.advanceTimersByTime(999));
+    expect(refreshMock).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(refreshMock).toHaveBeenCalledOnce();
+  });
+
   it.each(["COMPLETED", "CANCELLED"] as const)(
     "replaces paused controls when the saved alert becomes %s",
     (status) => {
