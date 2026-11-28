@@ -5,7 +5,17 @@ import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 let database: PrismaClient;
+let fixtureOfficialFetch: typeof fetch | undefined;
+const emailSend = vi.hoisted(() => vi.fn(async () => { throw new Error("EXTERNAL_EMAIL_FORBIDDEN"); }));
 vi.mock("@/lib/prisma", () => ({ get prisma() { return database; } }));
+vi.mock("resend", () => ({ Resend: class { emails = { send: emailSend }; } }));
+vi.mock("@/lib/automation/address-pinned-public-fetch", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/automation/address-pinned-public-fetch")>();
+  return { ...original, createAddressPinnedPublicFetchTransport: (...args: Parameters<typeof original.createAddressPinnedPublicFetchTransport>) => {
+    const transport = original.createAddressPinnedPublicFetchTransport(...args);
+    return (...request: Parameters<typeof fetch>) => (fixtureOfficialFetch ?? transport)(...request);
+  } };
+});
 vi.mock("@/lib/automation/course-support-verification-scheduler", () => ({
   recoverDueCourseSupportVerificationRequests: async () => ({ considered: 0, started: 0, failed: 0 }),
 }));
@@ -23,6 +33,114 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
   });
 
   afterAll(async () => { if (database) await database.$disconnect(); });
+
+  it("persists a known course's normal saved-check receipt while a sibling's official lookup remains open", async () => {
+    const key = randomUUID();
+    const day = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
+    const alias = "staged-fixture";
+    const bookingUrl = `https://${alias}.book.teeitup.com/`;
+    const officialUrl = "https://example.com/unfamiliar-links";
+    const providerOrigin = "https://phx-api-be-east-1b.kenna.io";
+    const user = await database.user.create({ data: { email: `${key}@example.test`, clerkUserId: key } });
+    const [slow, known] = await Promise.all([
+      database.course.create({ data: { name: "Unfamiliar Links", latitude: 41, longitude: -73,
+        timeZone: "UTC", website: officialUrl, isPublic: true } }),
+      database.course.create({ data: { name: "Fixture Links", latitude: 42, longitude: -72,
+        timeZone: "UTC", website: "https://example.com/fixture-links", isPublic: true,
+        detectedBookingUrl: bookingUrl, detectedPlatform: "TEEITUP", providerFamilyKey: "TEEITUP",
+        bookingMethod: "PUBLIC_ONLINE", automationEligibility: "ALLOWED",
+        bookingMetadata: { aliases: [alias], bookingBaseUrl: bookingUrl },
+      } }),
+    ]);
+
+    let unpause: () => void = () => {};
+    const waitingForOfficialPage = new Promise<void>((resolve) => { unpause = resolve; });
+    let officialReadStarted = false;
+    const fetchOfficial = vi.fn<typeof fetch>(async (input, init) => {
+      const target = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (target !== officialUrl || (init?.method ?? "GET") !== "GET") throw new Error("UNEXPECTED_OFFICIAL_FIXTURE_REQUEST");
+      officialReadStarted = true;
+      await waitingForOfficialPage;
+      return new Response("<html><head><title>Unfamiliar Links</title></head><body><h1>Unfamiliar Links</h1></body></html>",
+        { headers: { "content-type": "text/html" } });
+    });
+    const fetchProvider = vi.fn<typeof fetch>(async (input, init) => {
+      const target = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (target.origin !== providerOrigin || (init?.method ?? "GET") !== "GET") throw new Error("UNEXPECTED_PROVIDER_FIXTURE_REQUEST");
+      if (target.pathname === `/alias/${alias}/facilities`) {
+        return Response.json([{ id: 71, courseId: "fixture-facility", name: known.name, timeZone: "UTC" }]);
+      }
+      if (target.pathname === "/v2/tee-times" && target.searchParams.get("facilityIds") === "71" && target.searchParams.get("date") === day) {
+        return Response.json([{ courseId: "fixture-facility", teetimes: [{ courseId: "fixture-facility", teetime: `${day}T11:00:00.000Z`,
+          rates: [{ _id: 1, allowedPlayers: [2, 4], holes: 18, greenFeeCart: 3000 }],
+        }] }]);
+      }
+      throw new Error("UNEXPECTED_TEE_SHEET_FIXTURE_REQUEST");
+    });
+    fixtureOfficialFetch = fetchOfficial;
+    emailSend.mockClear();
+    vi.stubGlobal("fetch", fetchProvider);
+    vi.stubEnv("COURSE_DISCOVERY_ENABLED", "false");
+    vi.stubEnv("RESEND_API_KEY", "");
+    vi.stubEnv("ALERT_EMAIL_FROM", "");
+    vi.stubEnv("VERCEL_ENV", "development");
+    let pending: ReturnType<typeof import("@/lib/automation/search-schedule-execution").executeScheduledSearchCheck> | undefined;
+    try {
+      const { createTeeSearchForUser } = await import("@/lib/searches/service");
+      const { executeScheduledSearchCheck } = await import("@/lib/automation/search-schedule-execution");
+      const search = await createTeeSearchForUser(user.id, { mode: "OUTDOOR", date: day, startTime: "10:00", endTime: "12:00",
+        players: 2, userTimeZone: "UTC", cadenceMinutes: 5, additionalEmails: [], courses: [slow, known].map((course, index) => ({
+          courseId: course.id, name: course.name, rank: index + 1, latitude: course.latitude, longitude: course.longitude,
+        })),
+      }, "PUBLIC");
+      const readReceipts = () => database.courseSetupReceipt.findMany({ where: { preference: { teeSearchId: search.id } } });
+      const courseReceipt = (rows: Awaited<ReturnType<typeof readReceipts>>, courseId: string) => rows.find(row => row.courseId === courseId);
+      const initial = await readReceipts();
+      expect(initial).toHaveLength(2);
+      expect(initial.every(receipt => receipt.outcome === null && !receipt.legacy)).toBe(true);
+
+      pending = executeScheduledSearchCheck(search.id, search.scheduleVersion);
+      await vi.waitFor(async () => {
+        expect(officialReadStarted).toBe(true);
+        expect(courseReceipt(await readReceipts(), known.id)).toMatchObject({ outcome: "MATCHES_AVAILABLE" });
+      }, { timeout: 5000, interval: 25 });
+      const beforeUnpause = await readReceipts();
+      const knownReceipt = courseReceipt(beforeUnpause, known.id)!;
+      const probe = await database.courseProbe.findUniqueOrThrow({ where: { id: knownReceipt.evidenceProbeId! } });
+      expect(probe).toMatchObject({ courseId: known.id, teeSearchId: search.id, outcome: "MATCH_FOUND",
+        rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK", publicAvailability: { date: day } },
+      });
+      expect(knownReceipt.closedAt!.getTime()).toBeLessThan(knownReceipt.deadlineAt.getTime());
+      const savedToKnownResultMs = knownReceipt.closedAt!.getTime() - knownReceipt.startedAt.getTime();
+      expect(savedToKnownResultMs).toBeLessThan(15_000);
+      expect(courseReceipt(beforeUnpause, slow.id)).toMatchObject({ outcome: null, closedAt: null });
+      expect(await database.searchEmailDelivery.count({ where: { teeSearchId: search.id } })).toBe(0);
+      expect(emailSend).not.toHaveBeenCalled();
+      console.info("[course-setup-acceptance]", { savedToKnownResultMs, knownResult: knownReceipt.outcome, pendingSibling: true, emailSends: 0 });
+
+      unpause();
+      const result = await pending;
+      expect(result.courseResults).toMatchObject([
+        { courseId: slow.id, outcome: "NEEDS_ADAPTER" },
+        { courseId: known.id, outcome: "MATCH_FOUND", availableMatches: 1 },
+      ]);
+      expect(courseReceipt(await readReceipts(), known.id)).toEqual(knownReceipt);
+      expect(await database.courseProbe.count({ where: { teeSearchId: search.id, courseId: slow.id } })).toBeGreaterThan(0);
+      expect(fetchOfficial).toHaveBeenCalledTimes(1);
+      expect(fetchProvider).toHaveBeenCalledTimes(2);
+      expect(emailSend).not.toHaveBeenCalled();
+    } finally {
+      unpause();
+      await pending?.catch(() => undefined);
+      fixtureOfficialFetch = undefined;
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      const probes = await database.courseProbe.findMany({ where: { teeSearch: { userId: user.id } }, select: { automationRunId: true } });
+      await database.user.delete({ where: { id: user.id } });
+      await database.course.deleteMany({ where: { id: { in: [slow.id, known.id] } } });
+      await database.automationRun.deleteMany({ where: { id: { in: probes.flatMap(probe => probe.automationRunId ? [probe.automationRunId] : []) } } });
+    }
+  }, 20_000);
 
   it("settles saved course receipts once through checked writes and the hosted watchdog without any discovery job", async () => {
     const key = randomUUID();

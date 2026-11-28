@@ -480,6 +480,7 @@ type SearchMonitoringDiscoveryOptions = {
     string,
     BrowserDiscoveryUnownedIncidentExpectation
   >;
+  onSharedFacilityDetected?: (courseId: string, detection: DetectedFacility) => void;
 };
 
 type MissingOfficialWebsiteCourse = {
@@ -1494,7 +1495,10 @@ export async function prepareSearchMonitoring(
             applied = persisted?.applied ?? null;
           }
           if (applied) {
-            if (detectedFacility) await detectAndSaveFacilityCourses(course.id, detectedFacility);
+            if (detectedFacility) {
+              if (options.onSharedFacilityDetected) options.onSharedFacilityDetected(course.id, detectedFacility);
+              else await detectAndSaveFacilityCourses(course.id, detectedFacility);
+            }
             appliedCourseIds.push(course.id);
             if (replacesLegacyPolicy) {
               resolvedLegacyPolicyCourseIds.add(course.id);

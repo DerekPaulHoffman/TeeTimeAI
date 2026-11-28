@@ -36,6 +36,7 @@ const googlePlacesMocks = vi.hoisted(() => ({
   getGooglePlacesApiKey: vi.fn(),
   searchNearbyGolfCourses: vi.fn()
 }));
+const facilityMocks = vi.hoisted(() => ({ save: vi.fn() }));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock(
@@ -45,6 +46,7 @@ vi.mock(
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 vi.mock("@/lib/places/google", () => googlePlacesMocks);
+vi.mock("@/lib/courses/detect-and-save-facility", () => ({ detectAndSaveFacilityCourses: facilityMocks.save }));
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import { buildBrowserDiscovery } from "./browser-discovery";
@@ -326,6 +328,27 @@ describe("search monitoring discovery", () => {
         value: await worker()
       })
     );
+  });
+
+  it.each([true, false])("defers shared-facility enrichment only after official discovery applies (applied=%s)", async applied => {
+    const sourceUrl = "https://cedar.example/";
+    const containsPlace = ["North", "South"].map((name, index) => ({ "@type": "GolfCourse", name: `Cedar ${name} Golf Course`,
+      url: `${sourceUrl}${name.toLowerCase()}`, geo: { latitude: 41.24 + index * 0.001, longitude: -73.2 } }));
+    const html = `<h1>Cedar North Golf Course</h1><script type="application/ld+json">${JSON.stringify({ "@type": "Place", containsPlace })}</script>`;
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => new Response(html, { headers: { "content-type": "text/html" } }));
+    dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockResolvedValueOnce({ applied: applied ? { id: "cedar-north" } : null });
+    const onSharedFacilityDetected = vi.fn();
+    const preference = remediationPreference("cedar-north", 1);
+    const search = { preferences: [{ ...preference, course: { ...preference.course, name: containsPlace[0].name, website: sourceUrl } }] } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl, now, { onSharedFacilityDetected });
+
+    expect(result.appliedCourseIds).toEqual(applied ? ["cedar-north"] : []);
+    expect(facilityMocks.save).not.toHaveBeenCalled();
+    if (applied) expect(onSharedFacilityDetected).toHaveBeenCalledExactlyOnceWith("cedar-north", expect.objectContaining({
+      courses: containsPlace.map(row => expect.objectContaining({ name: row.name })),
+    }));
+    else expect(onSharedFacilityDetected).not.toHaveBeenCalled();
   });
 
   it("keeps a stale status fenced after a timestamp-only landing apply until a canonical availability check", async () => {

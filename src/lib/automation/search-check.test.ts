@@ -77,10 +77,14 @@ const adapterMocks = vi.hoisted(() => ({
 const foreupPublicMocks = vi.hoisted(() => ({
   readForeupStandardPublicSchedule: vi.fn(),
 }));
+const sharedFacilityMocks = vi.hoisted(() => ({
+  detectAndSaveFacilityCourses: vi.fn(),
+}));
 vi.mock("@/lib/automation/foreup-public-configuration", async importOriginal => ({
   ...await importOriginal<typeof import("./foreup-public-configuration")>(),
   readForeupStandardPublicSchedule: foreupPublicMocks.readForeupStandardPublicSchedule,
 }));
+vi.mock("@/lib/courses/detect-and-save-facility", () => sharedFacilityMocks);
 
 const supportIncidentMocks = vi.hoisted(() => ({
   reportCourseSupportIssue: vi.fn(),
@@ -947,6 +951,29 @@ describe("runSearchCheck email cadence", () => {
     );
     expect(Number.isInteger(audit.scheduleVersion)).toBe(true);
     expect(audit.scheduleVersion).toBeGreaterThanOrEqual(0);
+  });
+
+  it.each([{ scheduleVersion: 2 }, { alertGeneration: 1 }])("stops staged discovery before provider work when its refreshed search changes %j", async changed => {
+    const course = { ...search.preferences[0].course, isPublic: true, policyNotes: null,
+      automationEligibility: "ALLOWED", automationReason: "NONE", bookingAccessMode: "PUBLIC_SIGNED_OUT",
+      detectedPlatform: "FOREUP", providerFamilyKey: "FOREUP",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/1/1#/teetimes",
+      bookingMetadata: { scheduleId: 1, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/1/1#/teetimes" } };
+    const active = { ...search, mode: "OUTDOOR", checkLeaseToken: "check-lease", preferences: [
+      { rank: 1, course }, { rank: 2, course: { ...course, id: "course-2", name: "Same-family sibling" } },
+    ] };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValueOnce(active).mockResolvedValueOnce({ ...active, ...changed });
+    monitoringDiscoveryMocks.prepareSearchMonitoring.mockResolvedValueOnce({ attemptedCourseIds: [course.id],
+      appliedCourseIds: [course.id], failedCourseIds: [], deferredCourseIds: [], retryCourseIds: [] });
+
+    await expect(runSearchCheck("search-1", "test")).rejects.toThrow("Search check lease is no longer current");
+
+    expect(monitoringDiscoveryMocks.prepareSearchMonitoring).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ preferences: [{ rank: 1, course }] }), undefined, expect.any(Date),
+      expect.objectContaining({ onSharedFacilityDetected: expect.any(Function) }));
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
+    expect(dbMocks.recordCourseProbeIfChanged).not.toHaveBeenCalled();
   });
 
   it("logs a typed status delivery deferral as pending rather than failed", async () => {
@@ -6888,6 +6915,90 @@ describe("runSearchCheck email cadence", () => {
       supportIncidentMocks.reportCourseSupportIssue.mock.invocationCallOrder[0],
     );
     expect(result.supportRetryNeeded).toBe(true);
+  });
+
+  it.each(["discovery", "failed reconciliation"] as const)(
+    "persists a known course result while an unrelated course awaits %s", async (slowStage) => {
+    const originalDiscoveryEnabled = process.env.COURSE_DISCOVERY_ENABLED;
+    vi.stubEnv("COURSE_DISCOVERY_ENABLED", "false");
+    const originalCourse = search.preferences[0].course;
+    const slowCourse = { ...originalCourse, id: "slow-course", name: "Unfamiliar Links",
+      website: "https://unfamiliar.example/", providerFamilyKey: "UNKNOWN", automationEligibility: "UNKNOWN", automationReason: "NONE", policyNotes: null };
+    const bookingBaseUrl = "https://foreupsoftware.com/index.php/booking/19021/792";
+    const knownCourse = { ...originalCourse, name: "Known Links", isPublic: true, automationEligibility: "ALLOWED", automationReason: "NONE",
+      detectedPlatform: "FOREUP", providerFamilyKey: "FOREUP", detectedBookingUrl: bookingBaseUrl, policyNotes: null,
+      bookingMetadata: { scheduleId: 792, bookingClassId: 4931, bookingBaseUrl } };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({ ...search, mode: "OUTDOOR", preferences: [
+      { rank: 1, courseId: slowCourse.id, course: slowCourse }, { rank: 2, courseId: knownCourse.id, course: knownCourse },
+    ] });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({ targetDateStatus: "OPEN", bookingWindowEvidence: null, slots: [
+      { sourceId: "known-slot", courseId: knownCourse.id, startsAt: "2026-07-12T08:10:00-04:00", availableSpots: 4, bookingUrl: bookingBaseUrl },
+    ] });
+    const secondBookingUrl = "https://foreupsoftware.com/index.php/booking/19021/793";
+    const detection = {
+      method: "FOREUP_PUBLIC_CATALOG" as const, sourceUrl: bookingBaseUrl, observedAt: new Date().toISOString(), primaryKey: "792",
+      courses: [
+        { key: "792", name: knownCourse.name, url: bookingBaseUrl, publicAccess: "PUBLIC" as const,
+          foreup: { scheduleId: 792, bookingClassId: 4931, bookingBaseUrl } },
+        { key: "793", name: "Second Physical Course", url: secondBookingUrl, publicAccess: "PUBLIC" as const,
+          foreup: { scheduleId: 793, bookingClassId: 4932, bookingBaseUrl: secondBookingUrl } },
+      ],
+    };
+    foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValue({ bookingClassId: 4931, bookingBaseUrl, detectedFacility: detection });
+    const emptyPreparation = { attemptedCourseIds: [], appliedCourseIds: [], failedCourseIds: [], deferredCourseIds: [], retryCourseIds: [] };
+    const slowPreparation = { ...emptyPreparation, deferredCourseIds: [slowCourse.id], retryCourseIds: [slowCourse.id] };
+    let releaseSlow: () => void = () => {};
+    const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    let slowStarted = false;
+    monitoringDiscoveryMocks.prepareSearchMonitoring.mockImplementation(async (requested) => {
+      if (!requested.preferences.some(({ course }: { course: { id: string } }) => course.id === slowCourse.id)) return emptyPreparation;
+      slowStarted = true;
+      await slowGate;
+      return slowPreparation;
+    });
+    if (slowStage === "failed reconciliation") {
+      courseMonitoringMocks.reconcileCourseMonitoringDeadlines.mockImplementation(async ({ courseIds }) => {
+        if (courseIds.length === 1 && courseIds[0] === slowCourse.id) {
+          slowStarted = true;
+          await slowGate;
+          throw new Error("Isolated course reconciliation failure");
+        }
+        return { checked: 0, escalated: 0, retrying: 0, humanReviewIncidentIds: [] };
+      });
+    }
+
+    const pendingCheck = runSearchCheck(search.id, "test");
+    try {
+      await vi.waitFor(() => {
+        expect(slowStarted).toBe(true);
+        expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(expect.objectContaining({ courseId: knownCourse.id, outcome: "MATCH_FOUND" }));
+      }, { timeout: 500, interval: 5 });
+      expect(dbMocks.recordCourseProbeIfChanged).not.toHaveBeenCalledWith(expect.objectContaining({ courseId: slowCourse.id }));
+      expect(sharedFacilityMocks.detectAndSaveFacilityCourses).not.toHaveBeenCalled();
+      releaseSlow();
+      const result = await pendingCheck;
+      expect(result.courseResults).toMatchObject([
+        { courseId: slowCourse.id, outcome: slowStage === "discovery" ? "NEEDS_ADAPTER" : "CHECK_PENDING" },
+        { courseId: knownCourse.id, outcome: "MATCH_FOUND", availableMatches: 1 },
+      ]);
+      expect(sharedFacilityMocks.detectAndSaveFacilityCourses).toHaveBeenCalledExactlyOnceWith(knownCourse.id, detection);
+      const slowProbeIndex = dbMocks.recordCourseProbeIfChanged.mock.calls.findIndex(([input]) => input.courseId === slowCourse.id);
+      if (slowStage === "discovery") {
+        expect(slowProbeIndex).toBeGreaterThanOrEqual(0);
+        expect(dbMocks.recordCourseProbeIfChanged.mock.invocationCallOrder[slowProbeIndex]).toBeLessThan(
+          sharedFacilityMocks.detectAndSaveFacilityCourses.mock.invocationCallOrder[0],
+        );
+      } else {
+        expect(slowProbeIndex).toBe(-1);
+        expect(result.supportRetryNeeded).toBe(true);
+      }
+    } finally {
+      releaseSlow();
+      await pendingCheck.catch(() => undefined);
+      vi.stubEnv("COURSE_DISCOVERY_ENABLED", originalDiscoveryEnabled);
+    }
   });
 
   it("defers an unsupported incident until official-site discovery acquires capacity", async () => {

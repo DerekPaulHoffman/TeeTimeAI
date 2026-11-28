@@ -139,6 +139,20 @@ describe("fetchCourseTeeSheet", () => {
     expect(result).toMatchObject({ ...providerResult, facilityCourses: [{ courseId: "course-1" }, { courseId: "other-course" }] });
     expect(adapterMocks.fetchForeupTeeSheet.mock.invocationCallOrder[0]).toBeLessThan(facilityMocks.save.mock.invocationCallOrder[0]);
   });
+
+  it.each([1, 2])("defers only eligible shared-facility detections from a successful provider read (members=%s)", async memberCount => {
+    const detection = { method: "FOREUP_PUBLIC_CATALOG", courses: Array.from({ length: memberCount }, (_, index) => ({ key: String(792 + index) })) };
+    foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValueOnce({ bookingClassId: 4931,
+      bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes", detectedFacility: detection });
+    const onSharedFacilityDetected = vi.fn();
+
+    await expect(fetchCourseTeeSheet(buildCourse("FOREUP"), date, 2, false, { onSharedFacilityDetected })).resolves.toBe(providerResult);
+
+    expect(facilityMocks.save).not.toHaveBeenCalled();
+    if (memberCount === 2) expect(onSharedFacilityDetected).toHaveBeenCalledExactlyOnceWith("course-1", detection);
+    else expect(onSharedFacilityDetected).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     capabilityMocks.resolveProviderCapability.mockImplementation((course) => ({

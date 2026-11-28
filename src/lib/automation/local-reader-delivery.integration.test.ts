@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = Record<string, unknown>;
 type Query = { where?: Row; data?: Row; create?: Row; update?: Row; orderBy?: Row | Row[]; take?: number; select?: Row };
-type Sql = { strings: readonly string[]; values: unknown[] };
+type Sql = { strings: readonly string[]; values: unknown[] } | TemplateStringsArray;
 
 const boundary = vi.hoisted(() => ({
   prisma: {} as Record<string, unknown>,
@@ -84,6 +84,7 @@ let sequence: number;
  */
 
 const clone = <T,>(value: T): T => structuredClone(value);
+const preferenceId = (courseId: unknown) => `offline-preference:${String(courseId)}`;
 function object(value: unknown): Row {
   return value && typeof value === "object" && !(value instanceof Date) ? value as Row : {};
 }
@@ -138,7 +139,8 @@ function project(model: string, row: Row): Row {
   };
   if (model === "teeSearch") return {
     ...row, user: rows.user[0],
-    preferences: rows.course.map((course, index) => ({ rank: index + 1, courseId: course.id, course: project("course", course) })),
+    preferences: rows.course.map((course, index) => ({ id: preferenceId(course.id), rank: index + 1, courseId: course.id,
+      offeringId: null, course: project("course", course) })),
     matches: rows.teeTimeMatch.map((match) => ({ ...match, course: project("course", rows.course.find(course => course.id === match.courseId)!) }))
   };
   if (model === "teeTimeMatch") return {
@@ -186,7 +188,8 @@ function installModel(model: string) {
       sentAt: null, unavailableAt: null, firstSeenAt: new Date(), lastSeenAt: new Date(),
       // These are the real database defaults, not invented provider timestamps.
       lastConfirmedAt: new Date()
-    } : model === "localReaderJob" ? {status: "PENDING", purpose: "ALERT_CHECK"} : {};
+    } : model === "localReaderJob" ? {status: "PENDING", purpose: "ALERT_CHECK"}
+      : model === "courseProbe" ? { observedAt: new Date(), offeringId: null } : {};
     const row = { id: `${model}-${++sequence}`, createdAt: new Date(), updatedAt: new Date(), ...defaults, ...clone(data) };
     rows[model].push(row);
     events.push(`${model}:create`);
@@ -221,7 +224,11 @@ function installModel(model: string) {
   };
 }
 
-function sqlText(sql: Sql) { return sql.strings.join(" ").replace(/\s+/g, " "); }
+function unpackSql(sql: Sql, params: unknown[]) {
+  const [strings, values] = "strings" in sql ? [sql.strings, sql.values] : [sql, params];
+  return { text: strings.join(" ").replace(/\s+/g, " ").trim(), values };
+}
+
 function installSql() {
   boundary.prisma.$transaction = vi.fn(async (callback: (transaction: unknown) => Promise<unknown>) => {
     const before = clone(rows);
@@ -233,9 +240,21 @@ function installSql() {
       !rows.course.some(course => key === `course-monitoring:${course.id}`)) throw new Error("Unhandled isolated raw SQL query");
     return [{ locked: true }];
   });
-  boundary.prisma.$queryRaw = vi.fn(async (sql: Sql) => {
-    const text = sqlText(sql), values = sql.values, search = rows.teeSearch[0];
+  boundary.prisma.$queryRaw = vi.fn(async (sql: Sql, ...params: unknown[]) => {
+    const { text, values } = unpackSql(sql, params), search = rows.teeSearch[0];
     if (text.trim() === 'SELECT statement_timestamp() AS "currentTime"' && values.length === 0) return [{ currentTime: new Date() }];
+    if (text.includes('JOIN "CourseSetupReceipt" AS receipt') && text.includes('AS "recordedAt"')) {
+      if (values.length !== 5 || values[2] !== values[3]) throw new Error("Unexpected course setup receipt query parameters");
+      const [searchId, courseId, offeringId] = values;
+      if (search.id !== searchId || search.status !== "ACTIVE" || search.mode !== "OUTDOOR" || offeringId !== null ||
+          !rows.course.some(course => course.id === courseId)) return [];
+      const recordedAt = new Date();
+      const receipt = rows.courseSetupReceipt.find(row => row.preferenceId === preferenceId(courseId) && row.courseId === courseId &&
+        row.offeringId === null && equal(row.startedAt, search.setupStartedAt ?? search.createdAt) && row.outcome === null &&
+        (row.deadlineAt as Date) >= recordedAt);
+      return receipt ? [clone({ id: receipt.id, startedAt: receipt.startedAt, targetDate: object(receipt.request).targetDate,
+        mode: search.mode, recordedAt })] : [];
+    }
     if (text.includes('WITH scoped AS') && text.includes('FROM "CourseProbe"') && text.includes('failure_episode')) {
       const scoped = rows.courseProbe.filter((row) => row.teeSearchId === values[0] &&
         values.slice(1, -1).includes(row.courseId) && (row.observedAt as Date) >= (values.at(-1) as Date));
@@ -268,8 +287,18 @@ function installSql() {
     }
     throw new Error(`Unhandled isolated SQL read: ${text.slice(0, 90)}`);
   });
-  boundary.prisma.$executeRaw = vi.fn(async (sql: Sql) => {
-    const text = sqlText(sql), values = sql.values, search = rows.teeSearch[0];
+  boundary.prisma.$executeRaw = vi.fn(async (sql: Sql, ...params: unknown[]) => {
+    const { text, values } = unpackSql(sql, params), search = rows.teeSearch[0];
+    if (text.includes('UPDATE "CourseSetupReceipt"') && text.includes('"evidenceProbeId"')) {
+      if (values.length !== 5) throw new Error("Unexpected course setup receipt update parameters");
+      const [outcome, evidenceProbeId, evidenceObservedAt, closes, id] = values;
+      const recordedAt = new Date();
+      const receipt = rows.courseSetupReceipt.find(row => row.id === id && row.outcome === null && (row.deadlineAt as Date) >= recordedAt);
+      if (!receipt) return 0;
+      apply(receipt, { outcome, evidenceProbeId, evidenceObservedAt, closedAt: closes ? recordedAt : null });
+      events.push("courseSetupReceipt:update");
+      return 1;
+    }
     if (text.includes('UPDATE "SearchEmailDelivery"') && text.includes('SET "claimExpiresAt" = statement_timestamp()') &&
       text.includes('AND "status" = \'SENDING\'') && text.includes('AND "claimExpiresAt" > statement_timestamp()')) {
       const byId = text.includes('WHERE "id"');
@@ -307,11 +336,11 @@ beforeEach(() => {
   rows = Object.fromEntries([
     "user", "teeSearch", "course", "courseMonitoringStatus", "courseMonitoringEvent",
     "courseSupportIncident", "courseBookingFact", "courseProbe", "teeTimeMatch",
-    "localReaderJob", "searchEmailDelivery", "automationRun", "providerRequestLease"
+    "localReaderJob", "searchEmailDelivery", "automationRun", "providerRequestLease", "courseSetupReceipt"
   ].map((model) => [model, []]));
   rows.user.push({ id: "offline-user", email: owner, pendingEmail: null });
   rows.teeSearch.push({
-    id: lease.searchId, userId: "offline-user", status: "ACTIVE", syntheticMultiCycle: false,
+    id: lease.searchId, userId: "offline-user", mode: "OUTDOOR", status: "ACTIVE", syntheticMultiCycle: false,
     trafficClass: "TEST", alertGeneration: 0, scheduleVersion: 2, checkStatus: "CHECKING",
     checkLeaseToken: lease.token, checkLeaseExpiresAt: lease.expiresAt,
     createdAt: new Date("2026-07-28T12:00:00Z"), date: new Date("2026-07-30T00:00:00Z"),
@@ -586,6 +615,11 @@ describe("completed reader source through ordinary match delivery", () => {
   it("delivers a newly created match using the consumed provider observation time", async () => {
     expect(rows.teeTimeMatch).toHaveLength(0);
     expect(rows.searchEmailDelivery).toHaveLength(0);
+    const startedAt = new Date("2026-07-29T12:00:00Z");
+    rows.teeSearch[0].setupStartedAt = startedAt;
+    rows.courseSetupReceipt.push({ id: "offline-setup-receipt", preferenceId: preferenceId("offline-course"),
+      courseId: "offline-course", offeringId: null, startedAt, deadlineAt: new Date("2026-07-29T12:15:00Z"),
+      request: { targetDate: "2026-07-30" }, outcome: null });
     boundary.send.mockImplementation(async () => {
       expect(rows.localReaderJob[0].resultExpiresAt).toEqual(completedAt);
       events.push("transport:accepted");
@@ -598,6 +632,9 @@ describe("completed reader source through ordinary match delivery", () => {
     expect(rows.teeTimeMatch[0].firstSeenAt).toEqual(now);
     expect.soft(rows.teeTimeMatch[0].lastConfirmedAt).toEqual(sourceAt);
     expect(rows.courseMonitoringStatus[0].lastSuccessfulAt).toEqual(sourceAt);
+    expect(rows.courseSetupReceipt[0]).toMatchObject({ outcome: "MATCHES_AVAILABLE", closedAt: now,
+      evidenceObservedAt: sourceAt, evidenceProbeId: rows.courseProbe.find(row => row.outcome === "MATCH_FOUND")?.id });
+    expect(events.indexOf("courseSetupReceipt:update")).toBeLessThan(events.indexOf("transport:accepted"));
     expect.soft(boundary.send).toHaveBeenCalledTimes(2);
     expect.soft(events.indexOf("reader:consumed")).toBeLessThan(events.indexOf("transport:accepted"));
     expect.soft(rows.searchEmailDelivery.map((row) => row.status)).toEqual(["SENT", "SENT"]);

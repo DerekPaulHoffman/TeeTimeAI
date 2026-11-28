@@ -38,6 +38,7 @@ import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 import type { CourseCandidate } from "@/lib/places/google";
 import { detectAndSaveFacilityCourses } from "@/lib/courses/detect-and-save-facility";
+import type { DetectedFacility } from "@/lib/courses/shared-facility-detection";
 import { readSharedFacilityScope } from "@/lib/courses/shared-facility-scope";
 
 export type AutomationCourseProviderRead = {
@@ -63,7 +64,8 @@ export async function fetchCourseTeeSheet(
   course: AutomationCourseProviderRead,
   date: Date,
   players: number,
-  discoverBookingWindow: boolean
+  discoverBookingWindow: boolean,
+  options: { onSharedFacilityDetected?: (courseId: string, detection: DetectedFacility) => void } = {}
 ): Promise<CourseTeeSheetResult> {
   const providerFamily = resolveProviderCapability(course).providerFamilyKey;
   if (providerFamily === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
@@ -93,6 +95,10 @@ export async function fetchCourseTeeSheet(
     });
     const detection = publicSchedule.detectedFacility;
     if (!detection || detection.courses.length < 2 && !readSharedFacilityScope(course.bookingMetadata, course.id)?.detectionMethod) return result;
+    if (options.onSharedFacilityDetected) {
+      options.onSharedFacilityDetected(course.id, detection);
+      return result;
+    }
     const members = await detectAndSaveFacilityCourses(course.id, detection);
     return members === undefined ? result : { ...result, facilityCourses: members };
   }

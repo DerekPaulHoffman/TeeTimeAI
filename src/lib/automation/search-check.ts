@@ -26,6 +26,7 @@ import {
   recordCourseProbeIfChanged,
   runWithSearchCheckLease,
   startAutomationRun,
+  type ActiveAutomationSearch,
   type SearchCheckLease,
 } from "@/lib/automation/db-service";
 import { withSearchCheckWriteContext } from "@/lib/automation/search-check-write-context";
@@ -86,7 +87,7 @@ import {
   queueLocalReaderJob,
 } from "@/lib/local-reader/service";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
-import { prepareSearchMonitoring } from "@/lib/automation/search-monitoring-discovery";
+import { prepareSearchMonitoring, type SearchMonitoringDiscoveryResult } from "@/lib/automation/search-monitoring-discovery";
 import {
   SEARCH_PLAYBOOK_FINGERPRINTS,
   ensureSearchPlaybookOfficialIdentity,
@@ -111,6 +112,8 @@ import {
   type TargetBookingWindow,
 } from "@/lib/courses/booking-window";
 import { buildInventoryHorizonSnapshot } from "@/lib/courses/inventory-horizon";
+import { detectAndSaveFacilityCourses } from "@/lib/courses/detect-and-save-facility";
+import type { DetectedFacility } from "@/lib/courses/shared-facility-detection";
 import type {
   AutomationReason,
   BookingAccessMode,
@@ -556,85 +559,91 @@ async function checkSearch(
   const currentGenerationVerdictByCourse = new Map(
     currentGenerationVerdicts.map((verdict) => [verdict.courseId, verdict]),
   );
-  const initialDeadlineReconciliation =
-    await reconcileCourseMonitoringDeadlines({
-      courseIds: searchCourseIds,
-      demandSearchId: search.id,
+  const reloadCurrentSearch = async (expected: ActiveAutomationSearch) => {
+    const current = await getActiveSearchForAutomation(searchId);
+    if (!current || current.scheduleVersion !== expected.scheduleVersion ||
+        current.alertGeneration !== expected.alertGeneration || current.checkLeaseToken !== expected.checkLeaseToken) {
+      throw new SearchCheckLeaseLostError();
+    }
+    return current;
+  };
+  const reconcileBeforeCheck = async (current: ActiveAutomationSearch, scope?: string) => {
+    const reconciliation = await reconcileCourseMonitoringDeadlines({
+      courseIds: scope ? [scope] : current.preferences.map(({ course }) => course.id),
+      demandSearchId: current.id,
       now: customerStatusObservedAt,
       source: "SEARCH_WORKFLOW",
     });
-  if (
-    initialDeadlineReconciliation.escalated > 0 ||
-    initialDeadlineReconciliation.retrying > 0
-  ) {
-    search = (await getActiveSearchForAutomation(searchId)) ?? search;
-  }
-
-  let monitoringRetryCourseIds = new Set<string>();
-  const discoveryPendingCourseIds = new Set<string>();
-  let monitoringDeferredCourseIds = new Set<string>();
-  let monitoringPreparationFailed = false;
-  let monitoringPreparation = {
-    attemptedCourseIds: [] as string[],
-    appliedCourseIds: [] as string[],
-    failedCourseIds: [] as string[],
-    deferredCourseIds: [] as string[],
-    retryCourseIds: [] as string[],
+    return reconciliation.escalated > 0 || reconciliation.retrying > 0
+      ? reloadCurrentSearch(current) : current;
   };
-  try {
-    const officialDiscoveryCourseIds = search.preferences.flatMap(
-      (preference) => {
-        const incident = preference.course.supportIncident;
-        if (!incident || incident.status === "RESOLVED") {
-          return [];
-        }
-        return assessAutomationPlaybook(incident.attemptLedger, incident.cycle)
-          .nextStage === "OFFICIAL_HTTP_DISCOVERY"
-          ? [preference.course.id]
-          : [];
-      },
-    );
-    const preparation = await isDiscoveryPilotSearch(search.id) ? monitoringPreparation : await prepareSearchMonitoring(
-      search,
-      undefined,
-      new Date(),
-      officialDiscoveryCourseIds.length > 0
-        ? {
+  const discoveryEnrollment = await isDiscoveryPilotSearch(search.id).then(
+    (enrolled) => ({ enrolled, error: null }),
+    (error: unknown) => ({ enrolled: null, error }),
+  );
+  // Enrolled searches already skip this discovery. Owned remediation binds
+  // preparation to the original search and lease.
+  const independentPreparation = discoveryEnrollment.enrolled === false &&
+    search.preferences.length > 1 && !search.remediationDispatchKey;
+  const sharedFacilityDetections = new Map<string, DetectedFacility>();
+  const facilityOptions = independentPreparation ? {
+    onSharedFacilityDetected(courseId: string, detection: DetectedFacility) {
+      const previous = sharedFacilityDetections.get(courseId);
+      if (!previous || Date.parse(detection.observedAt) >= Date.parse(previous.observedAt)) {
+        sharedFacilityDetections.set(courseId, detection);
+      }
+    },
+  } : undefined;
+  const monitoringRetryCourseIds = new Set<string>();
+  const discoveryPendingCourseIds = new Set<string>();
+  const emptyPreparation: SearchMonitoringDiscoveryResult = {
+    attemptedCourseIds: [],
+    appliedCourseIds: [],
+    failedCourseIds: [],
+    deferredCourseIds: [],
+    retryCourseIds: [],
+  };
+  const prepare = async (current: ActiveAutomationSearch, scope?: string) => {
+    const selected = scope ? current.preferences.filter(({ course }) => course.id === scope) : current.preferences;
+    if (scope && selected.length !== 1) throw new SearchCheckLeaseLostError();
+    const scopedSearch = scope ? { ...current, preferences: selected } : current;
+    try {
+      const officialDiscoveryCourseIds = selected.flatMap(({ course }) => {
+        const incident = course.supportIncident;
+        return incident && incident.status !== "RESOLVED" &&
+          assessAutomationPlaybook(incident.attemptLedger, incident.cycle).nextStage === "OFFICIAL_HTTP_DISCOVERY"
+          ? [course.id] : [];
+      });
+      const options = officialDiscoveryCourseIds.length > 0
+        ? { ...facilityOptions,
             includeCourseIds: officialDiscoveryCourseIds,
             forceFreshCourseIds: officialDiscoveryCourseIds,
           }
-        : undefined,
-    );
-    monitoringPreparation = preparation;
-    await maintainSearchCheckLease(lease);
-    monitoringRetryCourseIds = new Set(preparation.retryCourseIds);
-    monitoringDeferredCourseIds = new Set(preparation.deferredCourseIds);
-    if (preparation.appliedCourseIds.length > 0) {
-      search = (await getActiveSearchForAutomation(searchId)) ?? search;
+        : facilityOptions;
+      if (discoveryEnrollment.enrolled === null) throw discoveryEnrollment.error;
+      const result = discoveryEnrollment.enrolled ? emptyPreparation
+        : await prepareSearchMonitoring(scopedSearch, undefined, new Date(), options);
+      await maintainSearchCheckLease(lease);
+      for (const courseId of result.retryCourseIds) monitoringRetryCourseIds.add(courseId);
+      const preparedSearch = result.appliedCourseIds.length > 0
+        ? await reloadCurrentSearch(current) : current;
+      return { search: preparedSearch, result, failed: false };
+    } catch (error) {
+      if (error instanceof SearchCheckLeaseLostError) throw error;
+      console.error("[monitoring:discovery-failed]", {
+        searchRef: createSearchLogReference(searchId),
+        message: error instanceof Error ? error.message : "Unknown discovery preparation failure",
+      });
+      return { search: current, result: emptyPreparation, failed: true };
     }
-  } catch (error) {
-    monitoringPreparationFailed = true;
-    console.error("[monitoring:discovery-failed]", {
-      searchRef: createSearchLogReference(searchId),
-      message:
-        error instanceof Error
-          ? error.message
-          : "Unknown discovery preparation failure",
-    });
-  }
+  };
+  const sharedPreparation = independentPreparation ? null : await prepare(await reconcileBeforeCheck(search));
+  if (sharedPreparation) search = sharedPreparation.search;
 
   const monitoringBeforeCheck = new Map(
     search.preferences.map((preference) => [
       preference.course.id,
-      preference.course.monitoringStatus
-        ? {
-            state: preference.course.monitoringStatus.state,
-            firstDegradedAt: preference.course.monitoringStatus.firstDegradedAt,
-            failureFingerprint:
-              preference.course.monitoringStatus.failureFingerprint,
-            stateChangedAt: preference.course.monitoringStatus.stateChangedAt,
-          }
-        : null,
+      preference.course.monitoringStatus,
     ]),
   );
   const getCourseFailureEpisodeStartedAt = (course: {
@@ -693,14 +702,69 @@ async function checkSearch(
       ? search.requestedLayoutHoles
       : null;
 
+  const initialSearch = search;
+  type Preference = ActiveAutomationSearch["preferences"][number];
+  const hasKnownReader = ({ course }: Preference) => course.isPublic === true &&
+    (resolveProviderCapability(course).isRunnable || Boolean(course.activeAccessRecipeId) || course.monitoringStatus?.state === "HEALTHY");
+  const checkPreferences = independentPreparation
+    ? [...search.preferences].sort((left, right) => Number(hasKnownReader(right)) - Number(hasKnownReader(left)))
+    : search.preferences;
+  const localProviderReads = new Map<string, Promise<void>>();
+  const readWithProviderLease = async (family: string, read: () => Promise<CourseTeeSheetResult>) => {
+    if (!independentPreparation) return runWithProviderRequestLease(family, read);
+    // Preparation can identify a different provider from the one that picked
+    // this course's lane. Serialize reads by their confirmed family as well.
+    const pending = localProviderReads.get(family);
+    const result = (async () => {
+      await pending;
+      await maintainSearchCheckLease(lease);
+      return runWithProviderRequestLease(family, read);
+    })();
+    const settled = result.then(() => undefined, () => undefined);
+    localProviderReads.set(family, settled);
+    try {
+      return await result;
+    } finally {
+      if (localProviderReads.get(family) === settled) localProviderReads.delete(family);
+    }
+  };
+  const isolateCourseFailure = (check: (preference: Preference) => Promise<void>) => async (preference: Preference) => {
+    try {
+      await check(preference);
+    } catch (error) {
+      if (!independentPreparation || error instanceof SearchCheckLeaseLostError) throw error;
+      await maintainSearchCheckLease(lease);
+      const course = preference.course as AutomationCourse;
+      monitoringRetryCourseIds.add(course.id);
+      if (!courseResults.some((result) => result.courseId === course.id)) {
+        courseResults.push(buildPlaybookPendingCourseReport(course, "We couldn’t complete this check. We’ll try again shortly."));
+      }
+      console.error("[monitoring:course-check-failed]", {
+        searchRef: createSearchLogReference(searchId),
+        courseId: course.id,
+        message: sanitizeResponderText(error instanceof Error ? error.message : "Unknown course check failure"),
+      });
+    }
+  };
+  let refreshAfterChecks = false;
   await runProviderFamilyTasks(
-    search.preferences,
+    checkPreferences,
     (preference) =>
       resolveProviderCapability(preference.course as AutomationCourse)
         .providerFamilyKey,
-    async (preference) => {
+    isolateCourseFailure(async (initialPreference) => {
       await maintainSearchCheckLease(lease);
+      const courseId = initialPreference.course.id;
+      const prepared = sharedPreparation ?? await prepare(await reconcileBeforeCheck(initialSearch, courseId), courseId);
+      const search = prepared.search;
+      const preference = search.preferences.find(({ course }) => course.id === courseId);
+      if (!preference) throw new SearchCheckLeaseLostError();
+      if (independentPreparation && search !== initialSearch) refreshAfterChecks = true;
+      const monitoringPreparation = prepared.result;
+      const monitoringPreparationFailed = prepared.failed;
+      const monitoringPreparationDeferred = monitoringPreparation.deferredCourseIds.includes(courseId);
       const course = preference.course as AutomationCourse;
+      monitoringBeforeCheck.set(courseId, preference.course.monitoringStatus);
       let learned: Awaited<ReturnType<typeof checkLearnedOutdoor>>;
       try { learned = await checkLearnedOutdoor(search, preference, automationRunId, lease); }
       catch {
@@ -905,7 +969,7 @@ async function checkSearch(
         (!supportedAdapterAvailable || localReaderOnly) &&
         !playbookRuntime &&
         !monitoringPreparationFailed &&
-        !monitoringDeferredCourseIds.has(course.id) &&
+        !monitoringPreparationDeferred &&
         canReuseRestoredLocalReader(course, customerStatusObservedAt);
       if (playbookRuntime?.assessment.nextStage === "OFFICIAL_IDENTITY") {
         if (
@@ -1380,7 +1444,7 @@ async function checkSearch(
       ) {
         if (
           monitoringPreparationFailed ||
-          monitoringDeferredCourseIds.has(course.id)
+          monitoringPreparationDeferred
         ) {
           monitoringRetryCourseIds.add(course.id);
           const message =
@@ -1631,7 +1695,7 @@ async function checkSearch(
           !localReaderObservation &&
           !playbookRuntime &&
           !monitoringPreparationFailed &&
-          !monitoringDeferredCourseIds.has(course.id) &&
+          !monitoringPreparationDeferred &&
           course.monitoringStatus?.state === "HEALTHY" &&
           !course.monitoringStatus.revalidationRequestedAt
         ) {
@@ -1874,7 +1938,7 @@ async function checkSearch(
           // source anchor. A skewed application host must not decide ordering.
           providerExecutionObservedAt =
             providerObservationLease.observationStartedAt;
-          const providerExecution = await runWithProviderRequestLease(
+          const providerExecution = await readWithProviderLease(
             providerFamilyKey,
             async () => {
               providerRequestStarted = true;
@@ -1883,6 +1947,7 @@ async function checkSearch(
                 search.date,
                 search.players,
                 refreshBookingWindow,
+                facilityOptions,
               );
             },
           );
@@ -2720,8 +2785,16 @@ async function checkSearch(
           }
         }
       }
-    },
+    }),
   );
+
+  // Discovery can refresh a sibling's provider configuration. Wait until
+  // all selected courses have written their results before applying it.
+  for (const [courseId, detection] of sharedFacilityDetections) {
+    await maintainSearchCheckLease(lease);
+    if (await detectAndSaveFacilityCourses(courseId, detection)) refreshAfterChecks = true;
+  }
+  if (refreshAfterChecks) search = await reloadCurrentSearch(search);
 
   // A method advertised as runnable can still fail on today's public source.
   // Enrolled pilots hand that concrete failure to bounded discovery, retaining

@@ -23,7 +23,9 @@ describe.runIf(existsSync(chrome))("actual official booking source controller li
     const play = "https://example-course.play.teeitup.com/", book = "https://example-course.book.teeitup.com/";
     const venueName = "Example Ridge Golf Club", venueAddress = "565 Competition Road, Example, NC 27603, USA";
     const home = `<html><body><h2>Welcome to ${venueName}</h2><a id="tee-link" href="${bookingPage}">Tee Times</a><footer><p>${venueAddress}</p></footer></body></html>`;
-    const embed = `<html><body><main${mode === "hidden-iframe" ? ' style="display:none"' : ""}><iframe src="${play}" width="800" height="600"></iframe></main></body></html>`;
+    const hiddenFrame = mode === "hidden-iframe";
+    const heading = hiddenFrame ? `<h1>Public tee time booking at ${venueName}</h1>` : "";
+    const embed = `<html><body>${heading}<main${hiddenFrame ? ' style="display:none"' : ""}><iframe src="${play}" width="800" height="600"></iframe></main></body></html>`;
     const paths: string[] = [];
     const server = createServer({ cert: tlsLiteral("fixtureCertificate"), key: tlsLiteral("fixtureKey") }, (request, response) => {
       const url = `https://${request.headers.host}${request.url}`; paths.push(`${request.method} ${url}`);

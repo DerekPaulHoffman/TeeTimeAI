@@ -57,6 +57,8 @@ Normal discovery admission saves the same deadline with the course or offering j
 
 Each saved course or offering also gets a setup receipt in the save transaction. It records the original request, the deadline and the first verified outcome. A checked result can settle it before the cutoff. The hosted recovery route settles overdue receipts even when no discovery job exists. An inconclusive probe can explain a timeout. It cannot establish availability. Late verified evidence can update current availability while the receipt remains unchanged. Older demand with incomplete historical proof is recorded as unverified history. The recovery route does not restart ended demand.
 
+On an ordinary outdoor check, a ready public course can write its result while source discovery continues for another course. Provider-family request limits still apply. Shared-facility updates that can change a sibling's booking configuration wait until the selected courses have written their results. Owner-bound remediation keeps its exact search and lease checks. Search-level email timing is measured separately.
+
 Incomplete extraction, challenge pages and unavailable browser capabilities
 remain explicit failures. They cannot create a `NO_MATCH` result. Cancellation,
 edits, source changes and stale schedule versions are checked again before
