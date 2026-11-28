@@ -141,7 +141,9 @@ export async function fetchTeeItUpTeeSheet(input: {
 
   const slots: TeeTimeSlot[] = [];
   let observedPublicTargetDate = false;
+  let incompleteAvailability = false;
   let bookingWindowEvidence: BookingWindowEvidence | null = null;
+  const targetDate = formatDate(input.date);
 
   for (const alias of input.metadata.aliases) {
     const aliasBookingBaseUrl = getAliasBookingBaseUrl(alias, input.metadata);
@@ -192,6 +194,12 @@ export async function fetchTeeItUpTeeSheet(input: {
     );
 
     for (const day of daySlots) {
+      if (!day || typeof day !== "object" || Array.isArray(day) ||
+        (day.courseId !== undefined && typeof day.courseId !== "string")) {
+        incompleteAvailability = true;
+        continue;
+      }
+      if (day.courseId) resolveResponseFacility(day.courseId, facilities, facilityByCourseId);
       if (day.message) {
         const facility = resolveResponseFacility(
           day.courseId,
@@ -216,24 +224,41 @@ export async function fetchTeeItUpTeeSheet(input: {
           bookingWindowEvidence,
           evidence
         );
+        if (!evidence) incompleteAvailability = true;
       }
 
-      for (const slot of day.teetimes ?? []) {
-        if (!slot.teetime) {
+      if (!Array.isArray(day.teetimes)) {
+        incompleteAvailability = true;
+        continue;
+      }
+      if (!day.message && day.teetimes.length === 0 && day.courseId && facilityByCourseId.has(day.courseId)) {
+        observedPublicTargetDate = true;
+      }
+      for (const slot of day.teetimes) {
+        if (typeof slot?.teetime !== "string" || !/(?:Z|[+-]\d{2}:?\d{2})$/iu.test(slot.teetime) ||
+          !Number.isFinite(Date.parse(slot.teetime))) {
+          incompleteAvailability = true;
           continue;
         }
 
         // Allowed counts can be discrete (for example [3, 4]); the maximum
         // does not authorize a smaller party. Choose rates only after this test.
-        const validRates = (Array.isArray(slot.rates) ? slot.rates : []).filter(rate => Array.isArray(rate?.allowedPlayers) &&
+        const rawRates = Array.isArray(slot.rates) ? slot.rates : [];
+        const validRates = rawRates.filter(rate => Array.isArray(rate?.allowedPlayers) &&
           rate.allowedPlayers.length > 0 && rate.allowedPlayers.every(players => Number.isInteger(players) && players > 0 && players <= 100));
-        // A loaded public calendar may have no slots for this party size.
-        // Bind that evidence to the selected facility and course-local date;
-        // an empty or malformed response alone remains inconclusive.
-        const observedFacility = resolveResponseFacility(slot.courseId, facilities, facilityByCourseId);
-        if (validRates.length > 0 && observedFacility?.id &&
-          toLocalDateTime(slot.teetime, observedFacility.timeZone ?? input.timeZone ?? "America/New_York")
-            .startsWith(`${input.date.toISOString().slice(0, 10)}T`)) {
+        const facility = resolveResponseFacility(slot.courseId, facilities, facilityByCourseId);
+        if (!facility?.id) {
+          throw new Error("TeeItUp returned a tee time without an unambiguous selected facility");
+        }
+        const startsAt = toLocalDateTime(slot.teetime, facility.timeZone ?? input.timeZone ?? "America/New_York");
+        if (!startsAt.startsWith(`${targetDate}T`)) {
+          incompleteAvailability = true;
+          continue;
+        }
+        if (!Array.isArray(slot.rates) || validRates.length !== rawRates.length) {
+          incompleteAvailability = true;
+        }
+        if (validRates.length > 0) {
           observedPublicTargetDate = true;
         }
         const rates = input.players === undefined ? validRates : validRates.filter(rate => rate.allowedPlayers!.includes(input.players!));
@@ -243,24 +268,10 @@ export async function fetchTeeItUpTeeSheet(input: {
           continue;
         }
 
-        const facility = resolveResponseFacility(
-          slot.courseId,
-          facilities,
-          facilityByCourseId
-        );
-        if (!facility?.id) {
-          throw new Error(
-            "TeeItUp returned a tee time without an unambiguous selected facility"
-          );
-        }
-
         slots.push({
           courseId: input.courseId,
           sourceId: `teeitup-${facility.id}-${slot.courseId ?? "course"}-${slot.teetime}`,
-          startsAt: toLocalDateTime(
-            slot.teetime,
-            facility.timeZone ?? input.timeZone ?? "America/New_York"
-          ),
+          startsAt,
           availableSpots,
           bookingUrl: withDateParam(aliasBookingBaseUrl, input.date),
           priceCents: rate?.greenFeeCart,
@@ -275,7 +286,7 @@ export async function fetchTeeItUpTeeSheet(input: {
   return {
     slots,
     targetDateStatus:
-      bookingWindowEvidence ? "NOT_OPEN" : slots.length > 0 || observedPublicTargetDate ? "OPEN" : "UNKNOWN",
+      bookingWindowEvidence ? "NOT_OPEN" : !incompleteAvailability && observedPublicTargetDate ? "OPEN" : "UNKNOWN",
     bookingWindowEvidence
   };
 }
@@ -388,7 +399,9 @@ async function fetchFacilitySlots(
     throw providerHttpError("TeeItUp tee times", response);
   }
 
-  return (await response.json()) as TeeItUpApiDay[];
+  const payload = await response.json();
+  if (!Array.isArray(payload)) throw new Error("TeeItUp returned an invalid response schema");
+  return payload as TeeItUpApiDay[];
 }
 
 function buildTeeTimesUrl(date: Date, facilityIds: number[]) {

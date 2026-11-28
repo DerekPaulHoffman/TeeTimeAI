@@ -38,13 +38,6 @@ type CpsTokenResponse = {
   access_token?: string;
 };
 
-type CpsSearchResponse =
-  | {
-      transactionId?: string;
-      content?: CpsApiSlot[] | unknown;
-    }
-  | CpsApiSlot[];
-
 type CpsBookingRule = {
   courseId?: number;
   daysInAdvance?: number;
@@ -62,8 +55,8 @@ type CpsBookingRuleResponse = {
 };
 
 type CpsApiSlot = {
-  teeSheetId?: number;
-  startTime?: string;
+  teeSheetId: number;
+  startTime: string;
   courseId?: number;
   availableParticipantNo?: number[];
   participants?: number;
@@ -305,7 +298,7 @@ export async function fetchCpsTeeSheet(
 
   return {
     slots,
-    targetDateStatus: slots.length > 0 ? "OPEN" : "UNKNOWN",
+    targetDateStatus: "OPEN",
     bookingWindowEvidence
   };
 }
@@ -364,15 +357,16 @@ async function fetchCpsAvailability(
         throw providerHttpError("CPS tee times", response);
       }
 
-      return (await response.json()) as CpsSearchResponse;
+      try {
+        return await response.json() as unknown;
+      } catch (error) {
+        if (error instanceof SyntaxError) throw invalidCpsSearchResponseError(null);
+        throw error;
+      }
     });
-    const content = getCpsSearchContent(payload);
+    const content = getCpsSearchContent(payload, input.date.toISOString().slice(0, 10), courseIds);
 
     for (const slot of content) {
-      if (!slot.startTime || !slot.teeSheetId) {
-        continue;
-      }
-
       const availableSpots = getAvailableSpots(slot);
       if (availableSpots < 1) {
         continue;
@@ -1291,22 +1285,39 @@ function isCpsTimeoutError(error: unknown) {
   return false;
 }
 
-function getCpsSearchContent(payload: unknown): CpsApiSlot[] {
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-  if (!payload || typeof payload !== "object") {
-    throw invalidCpsSearchResponseError(payload);
-  }
-
-  const content = (payload as { content?: unknown }).content;
-  if (Array.isArray(content)) {
-    return content;
-  }
+function getCpsSearchContent(payload: unknown, targetDate: string, courseIds: number[]): CpsApiSlot[] {
   if (isCpsNoTeeTimesSentinel(payload)) {
     return [];
   }
-  throw invalidCpsSearchResponseError(payload);
+  const envelope = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown> : null;
+  const content: unknown = Array.isArray(payload) ? payload : envelope?.content;
+  if (!Array.isArray(content) || envelope && (
+    Object.keys(envelope).some(key => !["content", "isSuccess", "transactionId"].includes(key)) ||
+    envelope.isSuccess !== undefined && envelope.isSuccess !== true ||
+    envelope.transactionId !== undefined && (typeof envelope.transactionId !== "string" ||
+      !envelope.transactionId.trim() || envelope.transactionId.length > CPS_NO_TEE_TIMES_TRANSACTION_ID_MAX_LENGTH)
+  )) throw invalidCpsSearchResponseError(payload);
+
+  const ids = new Set<number>();
+  const validCount = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 4;
+  for (const row of content) {
+    if (!row || typeof row !== "object" || Array.isArray(row) || !Number.isSafeInteger(row.teeSheetId) ||
+        row.teeSheetId <= 0 || ids.has(row.teeSheetId) || typeof row.startTime !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}[T ](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,7})?)?$/u.test(row.startTime) ||
+        row.startTime.slice(0, 10) !== targetDate ||
+        row.courseId != null && !courseIds.includes(row.courseId)) throw invalidCpsSearchResponseError(payload);
+
+    const counts = row.availableParticipantNo;
+    if (counts != null) {
+      if (!Array.isArray(counts) || counts.length > 4 || new Set(counts).size !== counts.length ||
+          counts.some(value => !validCount(value) || value === 0)) throw invalidCpsSearchResponseError(payload);
+    } else if (!validCount(row.maxPlayer ?? row.participants)) {
+      throw invalidCpsSearchResponseError(payload);
+    }
+    ids.add(row.teeSheetId);
+  }
+  return content as CpsApiSlot[];
 }
 
 function invalidCpsSearchResponseError(payload: unknown) {
@@ -1525,8 +1536,8 @@ function cpsHeaders(
 }
 
 function getAvailableSpots(slot: CpsApiSlot) {
-  if (Array.isArray(slot.availableParticipantNo) && slot.availableParticipantNo.length > 0) {
-    return Math.max(...slot.availableParticipantNo);
+  if (Array.isArray(slot.availableParticipantNo)) {
+    return Math.max(0, ...slot.availableParticipantNo);
   }
 
   if (typeof slot.maxPlayer === "number") {

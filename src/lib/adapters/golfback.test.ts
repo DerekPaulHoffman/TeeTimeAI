@@ -7,6 +7,8 @@ const metadata = {
   courseId: "5a90fb0c-b928-43f0-9486-d5d43c03d25d",
   bookingBaseUrl: "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d"
 };
+const input = { courseId: "windsor-parke", date: new Date("2026-07-18T00:00:00Z"), players: 2, metadata };
+const scopedSlot = { id: "slot", localDateTime: "2026-07-18T08:02:00", isAvailable: true, playersMax: 4 };
 
 describe("GolfBack adapter", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -153,5 +155,26 @@ describe("GolfBack adapter", () => {
       )
     ).rejects.toThrow("GolfBack tee times returned 503");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([[], [
+    { ...scopedSlot, isAvailable: false, playersMax: undefined },
+    { ...scopedSlot, playersMax: 1 },
+  ]].map(data => ({ data })))("recognizes an empty or explicitly filtered public tee sheet %#", async payload => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(payload));
+    await expect(fetchGolfBackTeeSheet(input, fetchImpl)).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    null, {}, { data: [null] },
+    { data: [{ ...scopedSlot, localDateTime: "2026-07-19T08:02:00" }] },
+    { data: [{ ...scopedSlot, localDateTime: "2026-07-18T25:02:00" }] },
+    { data: [{ ...scopedSlot, courseId: "foreign" }] },
+    { data: [{ ...scopedSlot, isAvailable: false }, { ...scopedSlot, playersMax: "2" }] },
+  ])("rejects an incomplete or unscoped public tee sheet %#", async payload => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(payload));
+    await expect(fetchGolfBackTeeSheet(input, fetchImpl)).rejects.toThrow("unexpected tee-time schema");
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 });

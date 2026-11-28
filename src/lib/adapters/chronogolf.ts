@@ -17,38 +17,8 @@ export type ChronogolfMetadata = {
   bookingBaseUrl: string;
 };
 
-type ChronogolfPrice = {
-  green_fee?: number;
-  bookable_holes?: number;
-};
-
-type ChronogolfApiSlot = {
-  uuid?: string;
-  date?: string;
-  start_time?: string;
-  max_player_size?: number;
-  frozen?: boolean;
-  course?: {
-    uuid?: string;
-    holes?: number;
-  };
-  default_price?: ChronogolfPrice;
-};
-
-type ChronogolfResponse = {
-  teetimes?: ChronogolfApiSlot[];
-  data?: {
-    teetimes?: ChronogolfApiSlot[];
-  };
-  pagination?: {
-    total?: number;
-    per_page?: number;
-    perPage?: number;
-  };
-};
-
 type ChronogolfPage = {
-  payload: ChronogolfResponse;
+  payload: unknown;
   total: number;
   perPage: number;
 };
@@ -100,56 +70,72 @@ export async function fetchChronogolfSlots(input: {
   metadata: ChronogolfMetadata;
 }, request?: ChronogolfRequester, fetchImpl: typeof fetch = fetch): Promise<TeeTimeSlot[]> {
   const slots: TeeTimeSlot[] = [];
+  const seen = new Set<string>();
+  const targetDate = input.date.toISOString().slice(0, 10);
+  let pagination: { total: number; perPage: number } | undefined;
   const activeRequest = request ?? await createChronogolfPublicRequester(
     input.metadata.bookingBaseUrl,
     fetchImpl
   );
 
   for (let page = 1; page <= CHRONOGOLF_MAX_PAGES; page += 1) {
-    const url = buildTeeTimesUrl(input.date, input.players, input.metadata.courseIds, page);
-    const response = await activeRequest(url, input.metadata.bookingBaseUrl);
-    const teeTimes = Array.isArray(response.payload.teetimes)
-      ? response.payload.teetimes
-      : [];
-
-    slots.push(...teeTimes.flatMap((slot) => normalizeSlot(slot, input, url)));
-
-    if (
-      teeTimes.length === 0 ||
-      response.perPage < 1 ||
-      page * response.perPage >= response.total
-    ) {
-      break;
+    const url = buildTeeTimesUrl(targetDate, input.players, input.metadata.courseIds, page);
+    const { payload, total, perPage } = await activeRequest(url, input.metadata.bookingBaseUrl);
+    if (!isRecord(payload) || !Array.isArray(payload.teetimes) ||
+      (payload.status !== undefined && payload.status !== "open" && payload.status !== "sold_out")) {
+      throw chronogolfSchemaError("Chronogolf tee times response did not contain a verified tee sheet");
     }
+    if (
+      !Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(perPage) || perPage < 1 ||
+      Math.ceil(total / perPage) > CHRONOGOLF_MAX_PAGES ||
+      (pagination && (total !== pagination.total || perPage !== pagination.perPage)) ||
+      payload.teetimes.length !== Math.min(perPage, total - (page - 1) * perPage) ||
+      (payload.status === "sold_out" && total !== 0)
+    ) {
+      throw chronogolfSchemaError("Chronogolf tee times pagination could not be verified");
+    }
+    pagination = { total, perPage };
+    for (const row of payload.teetimes) {
+      const slot = normalizeSlot(row, input, targetDate, url, seen);
+      if (slot) slots.push(slot);
+    }
+    if (page * perPage >= total) return slots;
   }
 
-  return slots;
+  throw chronogolfSchemaError("Chronogolf tee times pagination could not be verified");
 }
 
 function normalizeSlot(
-  slot: ChronogolfApiSlot,
+  row: unknown,
   input: { courseId: string; date: Date; metadata: ChronogolfMetadata },
-  evidenceUrl: string
-): TeeTimeSlot[] {
+  targetDate: string,
+  evidenceUrl: string,
+  seen: Set<string>
+): TeeTimeSlot | null {
+  if (!isRecord(row)) throw chronogolfSchemaError("Chronogolf tee time row could not be verified");
+  const { uuid, date, start_time: startTime, max_player_size: spots, frozen } = row;
+  const course = isRecord(row.course) ? row.course : undefined;
     if (
-      slot.frozen ||
-      !slot.uuid ||
-      !slot.date ||
-      !slot.start_time ||
-      typeof slot.max_player_size !== "number" ||
-      slot.max_player_size < 1
-    ) {
-      return [];
-    }
+    typeof uuid !== "string" || !uuid.trim() || seen.has(uuid) || date !== targetDate ||
+    typeof startTime !== "string" || !/^(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(startTime) ||
+    typeof spots !== "number" || !Number.isSafeInteger(spots) || spots < 0 ||
+    (frozen !== undefined && typeof frozen !== "boolean") ||
+    (row.course != null && !course) ||
+    (course?.uuid !== undefined && (typeof course.uuid !== "string" || !input.metadata.courseIds.includes(course.uuid)))
+  ) throw chronogolfSchemaError("Chronogolf tee time row could not be verified for the requested course and date");
+  seen.add(uuid);
+  if (frozen || spots === 0) return null;
 
-    const holes = slot.default_price?.bookable_holes ?? slot.course?.holes;
-    const priceCents = toPriceCents(slot.default_price?.green_fee);
+  const price = isRecord(row.default_price) ? row.default_price : undefined;
+  const rawHoles = price?.bookable_holes ?? course?.holes;
+  const holes = typeof rawHoles === "number" ? rawHoles : undefined;
+  const priceCents = toPriceCents(price?.green_fee);
 
-    return [{
+  return {
       courseId: input.courseId,
-      sourceId: `chronogolf-${slot.uuid}`,
-      startsAt: `${slot.date}T${normalizeTime(slot.start_time)}`,
-      availableSpots: slot.max_player_size,
+    sourceId: `chronogolf-${uuid}`,
+    startsAt: `${targetDate}T${normalizeTime(startTime)}`,
+    availableSpots: spots,
       bookingUrl: withSearchDate(input.metadata.bookingBaseUrl, input.date),
       priceCents,
       holes,
@@ -158,7 +144,7 @@ function normalizeSlot(
           ? [{ holes, priceCents }]
           : undefined,
       evidenceUrl
-    }];
+  };
 }
 
 async function createChronogolfPublicRequester(
@@ -263,27 +249,21 @@ async function requestChronogolfJson(
   }
 
   const body = await readChronogolfResponse(response);
-  let decoded: ChronogolfResponse;
+  let decoded: unknown;
   try {
-    decoded = JSON.parse(body) as ChronogolfResponse;
+    decoded = JSON.parse(body);
   } catch {
-    throw new Error("Chronogolf tee times returned invalid JSON");
+    throw chronogolfSchemaError("Chronogolf tee times returned invalid JSON");
   }
-
+  if (!isRecord(decoded)) throw chronogolfSchemaError("Chronogolf tee times response did not contain a verified tee sheet");
   const payload = decoded.data ?? decoded;
-  const teeTimeCount = Array.isArray(payload.teetimes)
-    ? payload.teetimes.length
-    : 0;
-  const total = firstValidNumber(
-    response.headers.get("total"),
-    decoded.pagination?.total,
-    teeTimeCount
-  );
-  const perPage = firstPositiveNumber(
-    response.headers.get("per-page"),
-    decoded.pagination?.per_page,
-    decoded.pagination?.perPage,
-    teeTimeCount
+  if (!isRecord(payload) || !Array.isArray(payload.teetimes)) {
+    throw chronogolfSchemaError("Chronogolf tee times response did not contain a verified tee sheet");
+  }
+  const pagination = isRecord(decoded.pagination) ? decoded.pagination : undefined;
+  const total = readPaginationNumber(0, response.headers.get("total"), pagination?.total, payload.total_count);
+  const perPage = readPaginationNumber(1,
+    response.headers.get("per-page"), pagination?.per_page, pagination?.perPage
   );
 
   return { payload, total, perPage };
@@ -314,32 +294,27 @@ async function readChronogolfResponse(response: Response) {
   return new TextDecoder().decode(buffer);
 }
 
-function firstValidNumber(...values: unknown[]) {
-  for (const value of values) {
-    if (value === null || value === undefined || value === "") {
-      continue;
-    }
-    const number = Number(value);
-    if (Number.isFinite(number) && number >= 0) {
-      return number;
-    }
+function readPaginationNumber(minimum: number, ...values: unknown[]) {
+  const [first, ...rest] = values.filter(value => value != null).map(value =>
+    typeof value === "number" || typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN
+  );
+  if (!Number.isSafeInteger(first) || first < minimum || rest.some(number => number !== first)) {
+    throw chronogolfSchemaError("Chronogolf tee times pagination could not be verified");
   }
-  return 0;
+  return first;
 }
 
-function firstPositiveNumber(...values: unknown[]) {
-  for (const value of values) {
-    const number = Number(value);
-    if (Number.isFinite(number) && number > 0) {
-      return number;
-    }
-  }
-  return 0;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function buildTeeTimesUrl(date: Date, players: number, courseIds: string[], page: number) {
+function chronogolfSchemaError(message: string) {
+  return Object.assign(new Error(message), { failureClass: "SCHEMA" as const });
+}
+
+function buildTeeTimesUrl(date: string, players: number, courseIds: string[], page: number) {
   const url = new URL("/marketplace/v2/teetimes", CHRONOGOLF_MARKETPLACE_BASE_URL);
-  url.searchParams.set("start_date", date.toISOString().slice(0, 10));
+  url.searchParams.set("start_date", date);
   url.searchParams.set("free_slots", String(players));
   url.searchParams.set("course_ids", courseIds.join(","));
   url.searchParams.set("page", String(page));
@@ -351,7 +326,7 @@ function normalizeTime(value: string) {
   return `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
 }
 
-function toPriceCents(value?: number) {
+function toPriceCents(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.round(value * 100)
     : undefined;

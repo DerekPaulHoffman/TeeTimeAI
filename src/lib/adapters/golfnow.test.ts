@@ -14,6 +14,12 @@ const metadata = {
   facilityId: 10296,
   bookingBaseUrl
 };
+const input = { courseId: "hunter", date: new Date("2026-07-24T00:00:00.000Z"), players: 2, metadata };
+const publicRow = {
+  facilityId: 10296,
+  time: { date: "2026-07-24T09:10:00", formatted: "9:10" },
+  teeTimeRates: [{ holeCount: 18, displayRate: { value: 42 } }]
+};
 
 function jsonResponse(value: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(value), {
@@ -102,7 +108,7 @@ describe("GolfNow public tee-time adapter", () => {
     });
   });
 
-  it("ignores restricted, mismatched, malformed, and rate-free records", async () => {
+  it("excludes scoped restricted and rate-free records without certifying availability empty", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({
       ttResults: {
         teeTimes: [
@@ -110,16 +116,6 @@ describe("GolfNow public tee-time adapter", () => {
             facilityId: 10296,
             isReservationRestricted: true,
             time: { date: "2026-07-24T09:10:00", formatted: "9:10" },
-            teeTimeRates: [{ holeCount: 18, displayRate: { value: 42 } }]
-          },
-          {
-            facilityId: 999,
-            time: { date: "2026-07-24T10:10:00", formatted: "10:10" },
-            teeTimeRates: [{ holeCount: 18, displayRate: { value: 42 } }]
-          },
-          {
-            facilityId: 10296,
-            time: { date: "2026-07-24T11:10:00", formatted: "bad" },
             teeTimeRates: [{ holeCount: 18, displayRate: { value: 42 } }]
           },
           {
@@ -144,13 +140,32 @@ describe("GolfNow public tee-time adapter", () => {
     });
   });
 
+  it("keeps an explicit empty array unconfirmed without a proven complete scope", async () => {
+    await expect(fetchGolfNowTeeSheet(input, async () => jsonResponse({ ttResults: { teeTimes: [] } })))
+      .resolves.toMatchObject({ slots: [], targetDateStatus: "UNKNOWN" });
+  });
+
+  it.each([
+    {},
+    { ttResults: { teeTimes: null } },
+    { ttResults: { teeTimes: [publicRow] }, ttException: { errorType: "SearchUnavailable" } },
+  ])("rejects a missing, invalid, or errored public envelope (%j)", async (payload) => {
+    await expect(fetchGolfNowTeeSheet(input, async () => jsonResponse(payload)))
+      .rejects.toMatchObject({ failureClass: "SCHEMA" });
+  });
+
+  it.each([
+    { facilityId: 999 },
+    { time: { date: "2026-07-25T09:10:00", formatted: "9:10" } },
+    { time: { date: "2026-07-24T09:10:00", formatted: "bad" } },
+    { teeTimeRates: [null] },
+  ])("rejects foreign or malformed rows mixed with verified rows (%j)", async (overrides) => {
+    const payload = { ttResults: { teeTimes: [publicRow, { ...publicRow, ...overrides }] } };
+    await expect(fetchGolfNowTeeSheet(input, async () => jsonResponse(payload)))
+      .rejects.toMatchObject({ failureClass: "SCHEMA" });
+  });
+
   it("fails closed on non-JSON, invalid JSON, oversized, and provider error responses", async () => {
-    const input = {
-      courseId: "hunter",
-      date: new Date("2026-07-24T00:00:00.000Z"),
-      players: 2,
-      metadata
-    };
     const nonJson = vi.fn(async () =>
       new Response("html", { headers: { "content-type": "text/html" } })
     ) as unknown as typeof fetch;

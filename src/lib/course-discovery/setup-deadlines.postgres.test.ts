@@ -207,7 +207,12 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
     }
   }, 15_000);
 
-  it("persists a known course's normal saved-check receipt while a sibling's official lookup remains open", async () => {
+  it.each([
+    { inventory: "available", partySizes: [2, 4], result: "MATCH_FOUND", receipt: "MATCHES_AVAILABLE" },
+    { inventory: "exact empty", partySizes: [], result: "NO_MATCH", receipt: "NO_OPENINGS" },
+    { inventory: "party-filtered", partySizes: [3, 4], result: "NO_MATCH", receipt: "NO_OPENINGS" },
+    { inventory: "incomplete", partySizes: null, result: "FETCH_FAILED", receipt: null },
+  ] as const)("checks a known course with $inventory inventory while a sibling's official lookup remains open", async scenario => {
     const key = randomUUID();
     const day = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
     const alias = "staged-fixture";
@@ -244,8 +249,10 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
         return Response.json([{ id: 71, courseId: "fixture-facility", name: known.name, timeZone: "UTC" }]);
       }
       if (target.pathname === "/v2/tee-times" && target.searchParams.get("facilityIds") === "71" && target.searchParams.get("date") === day) {
+        if (!scenario.partySizes) return Response.json([{ courseId: "fixture-facility" }]);
+        if (!scenario.partySizes.length) return Response.json([{ courseId: "fixture-facility", teetimes: [] }]);
         return Response.json([{ courseId: "fixture-facility", teetimes: [{ courseId: "fixture-facility", teetime: `${day}T11:00:00.000Z`,
-          rates: [{ _id: 1, allowedPlayers: [2, 4], holes: 18, greenFeeCart: 3000 }],
+          rates: [{ _id: 1, allowedPlayers: scenario.partySizes, holes: 18, greenFeeCart: 3000 }],
         }] }]);
       }
       throw new Error("UNEXPECTED_TEE_SHEET_FIXTURE_REQUEST");
@@ -259,7 +266,7 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
     vi.stubEnv("VERCEL_ENV", "development");
     let pending: ReturnType<typeof import("@/lib/automation/search-schedule-execution").executeScheduledSearchCheck> | undefined;
     try {
-      const { createTeeSearchForUser } = await import("@/lib/searches/service");
+      const { createTeeSearchForUser, listTeeSearchesForUser } = await import("@/lib/searches/service");
       const { executeScheduledSearchCheck } = await import("@/lib/automation/search-schedule-execution");
       const search = await createTeeSearchForUser(user.id, { mode: "OUTDOOR", date: day, startTime: "10:00", endTime: "12:00",
         players: 2, userTimeZone: "UTC", cadenceMinutes: 5, additionalEmails: [], courses: [slow, known].map((course, index) => ({
@@ -275,33 +282,59 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
       pending = executeScheduledSearchCheck(search.id, search.scheduleVersion);
       await vi.waitFor(async () => {
         expect(officialReadStarted).toBe(true);
-        expect(courseReceipt(await readReceipts(), known.id)).toMatchObject({ outcome: "MATCHES_AVAILABLE" });
+        expect(await database.courseProbe.count({ where: { teeSearchId: search.id, courseId: known.id,
+          outcome: scenario.result,
+        } })).toBe(1);
+        expect(courseReceipt(await readReceipts(), known.id)).toMatchObject({ outcome: scenario.receipt });
       }, { timeout: 5000, interval: 25 });
       const beforeUnpause = await readReceipts();
       const knownReceipt = courseReceipt(beforeUnpause, known.id)!;
-      const probe = await database.courseProbe.findUniqueOrThrow({ where: { id: knownReceipt.evidenceProbeId! } });
-      expect(probe).toMatchObject({ courseId: known.id, teeSearchId: search.id, outcome: "MATCH_FOUND",
-        rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK", publicAvailability: { date: day } },
-      });
-      expect(knownReceipt.closedAt!.getTime()).toBeLessThan(knownReceipt.deadlineAt.getTime());
-      const savedToKnownResultMs = knownReceipt.closedAt!.getTime() - knownReceipt.startedAt.getTime();
-      expect(savedToKnownResultMs).toBeLessThan(15_000);
+      const probe = await database.courseProbe.findFirstOrThrow({ where: { teeSearchId: search.id, courseId: known.id,
+        outcome: scenario.result,
+      } });
+      expect(probe.rawSummary).toMatchObject({ providerExecution: "RUNNABLE_PROVIDER_CHECK" });
+      const savedToEvidenceMs = probe.observedAt.getTime() - knownReceipt.startedAt.getTime();
+      expect(savedToEvidenceMs).toBeLessThan(15_000);
+      if (scenario.receipt) {
+        expect(knownReceipt.evidenceProbeId).toBe(probe.id);
+        expect(knownReceipt.closedAt!.getTime()).toBeLessThan(knownReceipt.deadlineAt.getTime());
+        expect(probe.rawSummary).toMatchObject({ publicAvailability: { date: day } });
+      } else {
+        expect(knownReceipt).toMatchObject({ evidenceProbeId: probe.id, closedAt: null });
+        expect(probe.rawSummary).not.toHaveProperty("publicAvailability");
+      }
       expect(courseReceipt(beforeUnpause, slow.id)).toMatchObject({ outcome: null, closedAt: null });
       expect(await database.searchEmailDelivery.count({ where: { teeSearchId: search.id } })).toBe(0);
       expect(emailSend).not.toHaveBeenCalled();
-      console.info("[course-setup-acceptance]", { savedToKnownResultMs, knownResult: knownReceipt.outcome, pendingSibling: true, emailSends: 0 });
+      console.info("[course-setup-acceptance]", { savedToEvidenceMs, knownResult: knownReceipt.outcome, pendingSibling: true, emailSends: 0 });
 
       unpause();
       const result = await pending;
       expect(result.courseResults).toMatchObject([
         { courseId: slow.id, outcome: "NEEDS_ADAPTER" },
-        { courseId: known.id, outcome: "MATCH_FOUND", availableMatches: 1 },
+        { courseId: known.id, outcome: scenario.result, availableMatches: scenario.receipt === "MATCHES_AVAILABLE" ? 1 : 0 },
       ]);
       expect(courseReceipt(await readReceipts(), known.id)).toEqual(knownReceipt);
       expect(await database.courseProbe.count({ where: { teeSearchId: search.id, courseId: slow.id } })).toBeGreaterThan(0);
       expect(fetchOfficial).toHaveBeenCalledTimes(1);
       expect(fetchProvider).toHaveBeenCalledTimes(2);
       expect(emailSend).not.toHaveBeenCalled();
+      if (!scenario.receipt) {
+        const { GET } = await import("@/app/api/cron/recover-course-support-verifications/route");
+        const passedDeadline = new Date();
+        await database.courseSetupReceipt.update({ where: { id: knownReceipt.id }, data: { deadlineAt: passedDeadline } });
+        vi.stubEnv("CRON_SECRET", key);
+        const tick = await GET(new Request("http://localhost/api/cron/recover-course-support-verifications", {
+          headers: { authorization: `Bearer ${key}` },
+        }));
+        expect(tick.status).toBe(200);
+        expect(courseReceipt(await readReceipts(), known.id)).toMatchObject({
+          outcome: "UNCONFIRMED", deadlineAt: passedDeadline, evidenceProbeId: probe.id,
+        });
+        const [saved] = await listTeeSearchesForUser(user.id);
+        expect(saved.probes.find(row => row.courseId === known.id)?.outcome).toBe("FETCH_FAILED");
+        expect(emailSend).not.toHaveBeenCalled();
+      }
     } finally {
       unpause();
       await pending?.catch(() => undefined);

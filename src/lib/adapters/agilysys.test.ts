@@ -202,7 +202,43 @@ describe("fetchAgilysysTeeSheet", () => {
     await expect(fetchAgilysysTeeSheet(
       { courseId: "biltmore", date: new Date("2026-07-23T00:00:00Z"), players: 2, metadata },
       fetchImpl as typeof fetch
-    )).resolves.toMatchObject({ slots: [], targetDateStatus: "UNKNOWN" });
+    )).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+  });
+
+  it.each([
+    { availableTeeSlots: [] },
+    { availableTeeSlots: [{ slots: [] }] },
+  ])("reports an exact successful empty tee sheet as open ($availableTeeSlots)", async ({ availableTeeSlots }) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({ success: true, token: "t".repeat(64) }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, availableTeeSlots }));
+    await expect(fetchAgilysysTeeSheet({ courseId: "biltmore", date: new Date("2026-07-23T00:00:00Z"), players: 2, metadata }, fetchImpl))
+      .resolves.toEqual({ slots: [], targetDateStatus: "OPEN", bookingWindowEvidence: null });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports no public opening for a valid slot with an explicitly private-only rate", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({ success: true, token: "t".repeat(64) }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, availableTeeSlots: [{ slots: [{
+        scheduleDateTime: "2026-07-23T09:15:00", availability: 4, rateType: [{ name: "Member", isPrivate: true }],
+      }] }] }));
+    await expect(fetchAgilysysTeeSheet({ courseId: "biltmore", date: new Date("2026-07-23T00:00:00Z"), players: 2, metadata }, fetchImpl))
+      .resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+  });
+
+  it.each([
+    ["missing slot group", [null]],
+    ["non-array slots", [{ slots: {} }]],
+    ["missing slot", [{ slots: [null] }]],
+    ["unbound day", [{ slots: [{ scheduleDateTime: "2026-07-24T09:15:00", availability: 4, rateType: [] }] }]],
+    ["malformed capacity", [{ slots: [{ scheduleDateTime: "2026-07-23T09:15:00", availability: "4", rateType: [] }] }]],
+    ["unverified rate scope", [{ slots: [{ scheduleDateTime: "2026-07-23T09:15:00", availability: 4, rateType: [{ name: "Visitor" }] }] }]],
+    ["missing rates for a listed time", [{ slots: [{ scheduleDateTime: "2026-07-23T09:15:00", availability: 4 }] }]],
+  ])("rejects %s before using the result as empty availability", async (_name, availableTeeSlots) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({ success: true, token: "t".repeat(64) }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, availableTeeSlots }));
+    await expect(fetchAgilysysTeeSheet({ courseId: "biltmore", date: new Date("2026-07-23T00:00:00Z"), players: 2, metadata }, fetchImpl))
+      .rejects.toThrow("Agilysys tee times returned an invalid response");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed for invalid public-session and tee-sheet responses", async () => {

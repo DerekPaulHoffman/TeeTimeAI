@@ -1,3 +1,5 @@
+import { parse, type DefaultTreeAdapterMap } from "parse5";
+
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import { getBookingWindowFromEvidence } from "@/lib/courses/booking-window";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
@@ -117,11 +119,7 @@ export async function fetchChelseaTeeSheet(
   }
 
   if (!dayButton) {
-    return {
-      slots: [],
-      targetDateStatus: "UNKNOWN",
-      bookingWindowEvidence
-    };
+    throw chelseaSchemaError("Chelsea tee sheet did not show the requested date");
   }
 
   page = await postChelseaForm(
@@ -134,9 +132,10 @@ export async function fetchChelseaTeeSheet(
     fetchImpl
   );
   if (normalizeChelseaDate(readHiddenValue(page.html, "hdSelectedDate")) !== targetDate) {
-    throw new Error("Chelsea tee sheet did not select the requested date");
+    throw chelseaSchemaError("Chelsea tee sheet did not select the requested date");
   }
 
+  const selectedDatePage = page.html;
   page = await postChelseaForm(
     page,
     {
@@ -146,9 +145,14 @@ export async function fetchChelseaTeeSheet(
     cookies,
     fetchImpl
   );
+  const results = readChelseaResultEnvelope(page.html);
+  if (normalizeChelseaDate(readHiddenValue(page.html, "hdSelectedDate")) !== targetDate ||
+    results === null || (results === "" && readChelseaResultEnvelope(selectedDatePage) === "")) {
+    throw chelseaSchemaError("Chelsea tee sheet did not confirm results for the requested date");
+  }
 
   const slots = parseChelseaSlots({
-    html: page.html,
+    html: results,
     targetDate,
     courseId: input.courseId,
     bookingUrl: input.metadata.bookingBaseUrl,
@@ -159,9 +163,26 @@ export async function fetchChelseaTeeSheet(
 
   return {
     slots,
-    targetDateStatus: slots.length > 0 ? "OPEN" : "UNKNOWN",
+    targetDateStatus: "OPEN",
     bookingWindowEvidence
   };
+}
+
+function readChelseaResultEnvelope(html: string): string | null {
+  const pending: DefaultTreeAdapterMap["node"][] = [parse(html, { sourceCodeLocationInfo: true })];
+  let results: string | null = null;
+  while (pending.length) {
+    const node = pending.pop()!;
+    if ("tagName" in node && node.attrs.some(attribute => attribute.name === "id" && attribute.value === "lblTimes")) {
+      const location = node.sourceCodeLocation;
+      if (results !== null || node.tagName !== "span" || !location?.startTag || !location.endTag ||
+        node.attrs.some(attribute => attribute.name === "hidden" || attribute.name === "aria-hidden" && attribute.value === "true" ||
+          attribute.name === "style" && /display\s*:\s*none|visibility\s*:\s*hidden/i.test(attribute.value))) return null;
+      results = html.slice(location.startTag.endOffset, location.endTag.startOffset).trim();
+    }
+    if ("childNodes" in node) for (const child of node.childNodes) pending.push(child);
+  }
+  return results;
 }
 
 function getBookingWindowEvidence(metadata: ChelseaMetadata): BookingWindowEvidence | null {
@@ -282,6 +303,8 @@ function parseChelseaSlots(input: {
   courseLabel: string;
 }) {
   const slots: TeeTimeSlot[] = [];
+  const seen = new Set<string>();
+  const rowCount = [...input.html.matchAll(/<div[^>]+class=["']garesultMainDiv["'][^>]*>/gi)].length;
   const slotPattern =
     /<div[^>]+class=["']garesultTime["'][^>]*>([^<]+)<\/div>[\s\S]*?<div[^>]+class=["']garesultCourseName["'][^>]*>([^<]+)[\s\S]*?<select[^>]+class=["']garesultPlayerSelect["'][^>]*>([\s\S]*?)<\/select>[\s\S]*?<img[^>]+(?:alt|title)=["']([^"']*Hole Time)["'][^>]*>[\s\S]*?<button([^>]*)>\s*Reserve\s*<\/button>/gi;
   for (const match of input.html.matchAll(slotPattern)) {
@@ -299,10 +322,12 @@ function parseChelseaSlots(input: {
       !time ||
       availableSpots < 1 ||
       !reserveId ||
+      seen.has(reserveId) ||
       !courseName.toLowerCase().includes(input.courseLabel.toLowerCase())
     ) {
-      continue;
+      throw chelseaSchemaError("Chelsea tee sheet returned an unverifiable result row");
     }
+    seen.add(reserveId);
     slots.push({
       courseId: input.courseId,
       sourceId: `chelsea-${input.providerKey}-${reserveId}`,
@@ -313,12 +338,15 @@ function parseChelseaSlots(input: {
       evidenceUrl: input.evidenceUrl
     });
   }
+  if (slots.length !== rowCount || (!slots.length && input.html)) {
+    throw chelseaSchemaError("Chelsea tee sheet returned an incomplete result envelope");
+  }
   return slots;
 }
 
 function parseChelseaTime(value: string) {
   const match = decodeHtmlEntities(value).match(/\b(\d{1,2}):(\d{2})\s*(AM|PM)\b/i);
-  if (!match) {
+  if (!match || Number(match[1]) < 1 || Number(match[1]) > 12 || Number(match[2]) > 59) {
     return null;
   }
   let hour = Number(match[1]);
@@ -328,6 +356,10 @@ function parseChelseaTime(value: string) {
     hour = hour === 12 ? 12 : hour + 12;
   }
   return `${String(hour).padStart(2, "0")}:${match[2]}`;
+}
+
+function chelseaSchemaError(message: string) {
+  return Object.assign(new Error(message), { failureClass: "SCHEMA" as const });
 }
 
 function readHiddenValue(html: string, id: string) {

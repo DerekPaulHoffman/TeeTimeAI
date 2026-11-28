@@ -10,6 +10,8 @@ import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeou
 const GOLFBACK_API_BASE_URL = "https://api.golfback.com";
 const GOLFBACK_COURSE_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const GOLFBACK_LOCAL_DATE_TIME =
+  /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$/u;
 
 export type GolfBackMetadata = {
   provider: "GOLFBACK";
@@ -30,6 +32,7 @@ type GolfBackPrice = {
 
 type GolfBackTeeTime = {
   id?: string;
+  courseId?: string;
   localDateTime?: string;
   isAvailable?: boolean;
   playersMax?: number;
@@ -86,6 +89,7 @@ export async function fetchGolfBackTeeSheet(
   fetchImpl: typeof fetch = fetch,
   now = new Date()
 ): Promise<GolfBackTeeSheetResult> {
+  if (!isGolfBackMetadata(input.metadata)) throw new Error("Invalid GolfBack course metadata");
   const bookingWindowEvidence = input.discoverBookingWindow
     ? await fetchGolfBackBookingWindow(input.metadata, fetchImpl)
     : null;
@@ -111,27 +115,36 @@ export async function fetchGolfBackTeeSheet(
     throw providerHttpError("GolfBack tee times", response);
   }
 
-  const payload = (await response.json()) as GolfBackTeeTimeResponse;
-  if (!Array.isArray(payload.data)) {
-    return { slots: [], targetDateStatus: "UNKNOWN", bookingWindowEvidence };
+  const payload = (await response.json().catch(() => null)) as GolfBackTeeTimeResponse | null;
+  if (!Array.isArray(payload?.data)) {
+    throw new Error("GolfBack returned an unexpected tee-time schema");
   }
 
   const slots = payload.data.flatMap((teeTime): TeeTimeSlot[] => {
     if (
-      teeTime.isAvailable !== true ||
-      !teeTime.id ||
-      !teeTime.localDateTime ||
-      !Number.isInteger(teeTime.playersMax) ||
-      (teeTime.playersMax ?? 0) < input.players
+      !teeTime || typeof teeTime.id !== "string" || !teeTime.id.trim() ||
+      typeof teeTime.localDateTime !== "string" || !GOLFBACK_LOCAL_DATE_TIME.test(teeTime.localDateTime) ||
+      teeTime.localDateTime.slice(0, 10) !== targetDate ||
+      (teeTime.courseId !== undefined && (typeof teeTime.courseId !== "string" ||
+        teeTime.courseId.toLowerCase() !== input.metadata.courseId.toLowerCase())) ||
+      typeof teeTime.isAvailable !== "boolean"
     ) {
-      return [];
+      throw new Error("GolfBack returned an unexpected tee-time schema");
     }
+    if (!teeTime.isAvailable) return [];
+    const playersMax = teeTime.playersMax;
+    if (typeof playersMax !== "number" || !Number.isInteger(playersMax) || playersMax < 0) {
+      throw new Error("GolfBack returned an unexpected tee-time schema");
+    }
+    if (playersMax < input.players) return [];
 
-    const playersMax = teeTime.playersMax as number;
+    if (teeTime.holes != null && !Array.isArray(teeTime.holes)) {
+      throw new Error("GolfBack returned an unexpected tee-time schema");
+    }
     const bookableHoleCounts = (teeTime.holes ?? []).filter(
       (holes): holes is 9 | 18 => holes === 9 || holes === 18
     );
-    const priceOptions = (teeTime.primaryPrices ?? []).flatMap(
+    const priceOptions = (Array.isArray(teeTime.primaryPrices) ? teeTime.primaryPrices : []).flatMap(
       (
         price
       ): Array<{
@@ -139,7 +152,7 @@ export async function fetchGolfBackTeeSheet(
         priceCents: number;
       }> => {
         if (
-          (price.holes !== 9 && price.holes !== 18) ||
+          (price?.holes !== 9 && price?.holes !== 18) ||
           typeof price.price !== "number" ||
           !Number.isFinite(price.price)
         ) {

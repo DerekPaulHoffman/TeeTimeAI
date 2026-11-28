@@ -103,9 +103,10 @@ async function fetchForeupAvailability(input: {
     return { slots: [], targetDateStatus: "UNKNOWN" };
   }
   if (input.requireMatchingIds) {
+    const targetDate = input.date.toISOString().slice(0, 10);
     if (input.metadata.bookingClassId === undefined || slots.some(slot =>
       !slot || typeof slot !== "object" || Array.isArray(slot) ||
-      !validForeupTime(slot.time) ||
+      !validForeupTime(slot.time) || !slot.time.startsWith(targetDate) ||
       typeof slot.available_spots !== "number" || !Number.isSafeInteger(slot.available_spots) ||
       slot.available_spots < 0 ||
       (Object.hasOwn(slot, "schedule_id") && !matchesProviderId(slot.schedule_id, input.metadata.scheduleId)) ||
@@ -133,7 +134,7 @@ async function fetchForeupAvailability(input: {
 
   return {
     slots: normalizedSlots,
-    targetDateStatus: normalizedSlots.length > 0 ? "OPEN" : "UNKNOWN"
+    targetDateStatus: input.requireMatchingIds || normalizedSlots.length > 0 ? "OPEN" : "UNKNOWN"
   };
 }
 

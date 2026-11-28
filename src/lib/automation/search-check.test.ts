@@ -871,12 +871,12 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.isCpsMetadata.mockReturnValue(false);
     adapterMocks.fetchCpsTeeSheet.mockResolvedValue({
       slots: [],
-      targetDateStatus: "UNKNOWN",
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: null,
     });
     adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
       slots: [],
-      targetDateStatus: "UNKNOWN",
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: null,
     });
     foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValue({
@@ -885,13 +885,13 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.isGolfBackMetadata.mockReturnValue(false);
     adapterMocks.fetchGolfBackTeeSheet.mockResolvedValue({
       slots: [],
-      targetDateStatus: "UNKNOWN",
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: null,
     });
     adapterMocks.isWebTracMetadata.mockReturnValue(false);
     adapterMocks.fetchWebTracTeeSheet.mockResolvedValue({
       slots: [],
-      targetDateStatus: "UNKNOWN",
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: null,
     });
     adapterMocks.isChronogolfMetadata.mockReturnValue(true);
@@ -905,7 +905,7 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.isChelseaMetadata.mockReturnValue(true);
     adapterMocks.fetchChelseaTeeSheet.mockResolvedValue({
       slots: [],
-      targetDateStatus: "UNKNOWN",
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: null,
     });
     supportIncidentMocks.reportCourseSupportIssue.mockImplementation(

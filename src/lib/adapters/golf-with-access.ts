@@ -118,11 +118,7 @@ export async function fetchGolfWithAccessTeeSheet(
     input.players < 1 ||
     input.players > 4
   ) {
-    return {
-      slots: [],
-      targetDateStatus: "UNKNOWN",
-      bookingWindowEvidence: null
-    };
+    throw new Error("Invalid Golf with Access course metadata or player count");
   }
 
   const targetDate = input.date.toISOString().slice(0, 10);
@@ -149,41 +145,44 @@ export async function fetchGolfWithAccessTeeSheet(
     throw providerHttpError("Golf with Access tee times", response);
   }
 
-  const payload = (await response.json()) as GolfWithAccessResponse;
-  if (!Array.isArray(payload.teeTimes)) {
-    return {
-      slots: [],
-      targetDateStatus: "UNKNOWN",
-      bookingWindowEvidence: null
-    };
+  const payload = (await response.json().catch(() => null)) as GolfWithAccessResponse | null;
+  if (!Array.isArray(payload?.teeTimes)) {
+    throw new Error("Golf with Access returned an unexpected tee-time schema");
   }
 
-  let recognizedRecordCount = 0;
+  let hasForeignCourse = false;
   const allowedCourseIds = new Set(
     input.metadata.courseIds.map((courseId) => courseId.toLowerCase())
   );
   const slots = payload.teeTimes.flatMap((teeTime): TeeTimeSlot[] => {
-    const startsAt = parseGolfWithAccessDayTime(teeTime.dayTime, targetDate);
-    const providerCourseId = teeTime.course?.id?.toLowerCase();
-    const playersMax = teeTime.players?.max;
+    const startsAt = parseGolfWithAccessDayTime(teeTime?.dayTime, targetDate);
+    const providerCourseId = teeTime?.course?.id;
     if (
-      !teeTime.id ||
+      typeof teeTime?.id !== "string" ||
+      !teeTime.id.trim() ||
       teeTime.id.length > 4_096 ||
       !startsAt ||
-      !providerCourseId ||
-      !allowedCourseIds.has(providerCourseId) ||
-      !Number.isInteger(playersMax) ||
-      (playersMax ?? 0) < 1 ||
-      (playersMax ?? 0) > 8 ||
-      typeof teeTime.displayRate?.isAvailableToUser !== "boolean"
+      typeof providerCourseId !== "string" || !GOLF_WITH_ACCESS_COURSE_ID.test(providerCourseId)
     ) {
+      throw new Error("Golf with Access returned an unexpected tee-time schema");
+    }
+    if (!allowedCourseIds.has(providerCourseId.toLowerCase())) {
+      hasForeignCourse = true;
       return [];
     }
-    recognizedRecordCount += 1;
+    if (teeTime.displayRate?.isAvailableToUser === false) return [];
+    const playersMax = teeTime.players?.max;
+    const playersMin = teeTime.players?.min;
     if (
-      teeTime.displayRate.isAvailableToUser !== true ||
-      (playersMax as number) < input.players
+      typeof playersMax !== "number" ||
+      !Number.isInteger(playersMax) ||
+      playersMax < 1 || playersMax > 8 ||
+      (playersMin !== undefined && (!Number.isInteger(playersMin) || playersMin < 1 || playersMin > playersMax)) ||
+      teeTime.displayRate?.isAvailableToUser !== true
     ) {
+      throw new Error("Golf with Access returned an unexpected tee-time schema");
+    }
+    if (playersMax < input.players || (playersMin !== undefined && playersMin > input.players)) {
       return [];
     }
 
@@ -200,7 +199,7 @@ export async function fetchGolfWithAccessTeeSheet(
           .digest("hex")}`,
         courseId: input.courseId,
         startsAt,
-        availableSpots: playersMax as number,
+        availableSpots: playersMax,
         bookingUrl: input.metadata.bookingBaseUrl,
         ...(priceCents === undefined ? {} : { priceCents }),
         ...(holes ? { holes, bookableHoleCounts: [holes] } : {}),
@@ -209,7 +208,7 @@ export async function fetchGolfWithAccessTeeSheet(
     ];
   });
 
-  if (payload.teeTimes.length > 0 && recognizedRecordCount === 0) {
+  if (!slots.length && hasForeignCourse) {
     throw new Error("Golf with Access returned an unexpected tee-time schema");
   }
   return {
