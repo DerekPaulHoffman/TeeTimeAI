@@ -559,6 +559,7 @@ async function checkSearch(
   const initialDeadlineReconciliation =
     await reconcileCourseMonitoringDeadlines({
       courseIds: searchCourseIds,
+      demandSearchId: search.id,
       now: customerStatusObservedAt,
       source: "SEARCH_WORKFLOW",
     });

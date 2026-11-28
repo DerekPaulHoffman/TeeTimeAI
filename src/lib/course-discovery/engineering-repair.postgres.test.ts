@@ -16,7 +16,7 @@ import type { CourseSupportLearningRuntimeBlocker, CourseSupportLearningRuntimeR
 let client: PrismaClient;
 vi.mock("@/lib/prisma", () => ({ get prisma() { return client; } }));
 const ids = new Set<string>();
-vi.mock("./config", () => ({ isCourseDiscoveryEnabled: () => true, isGeneralDiscoveryEnabled: () => true,
+vi.mock("./config", () => ({ isCourseDiscoveryEnabled: () => true, isGeneralDiscoveryEnabled: () => true, automaticDiscoveryPilot: () => null,
   isDiscoveryPilotSearch: async (id: string) => ids.has(id), activeDiscoveryPilotSearchIds: async () => [...ids] }));
 const url = process.env.COURSE_DISCOVERY_TEST_DATABASE_URL;
 let service: typeof import("./service"), engineering: typeof import("./engineering-repair");
@@ -143,11 +143,9 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     return { ...f, batch, input: { batchId: batch.id, leaseToken: batch.leaseToken, ownerThreadId, releaseSha, runtimeVersion: releaseSha } };
   }
 
-  async function runtimeHoldFixture() {
-    const repair = await deployedReaderRepair();
-    vi.stubEnv("CODEX_THREAD_ID", repair.input.ownerThreadId);
-    const evidence: CourseSupportLearningRuntimeBlocker = {
-      kind: "WINDOWS_RUNTIME_BLOCKED", runtimeVersion: repair.input.runtimeVersion, observedAt: new Date(),
+  function runtimeBlockedReceipt(runtimeVersion: string): CourseSupportLearningRuntimeBlocker {
+    return {
+      kind: "WINDOWS_RUNTIME_BLOCKED", runtimeVersion, observedAt: new Date(),
       diagnostic: {
         attributed: true, reasonCode: "DEPENDENCY_SCHEMA_OR_INSTALLED_READER_ROLLOUT_REQUIRED", phase: "VALIDATE_SOURCE",
         acceptanceRestartProof: false, apply: true, stateChanged: false, mutationAttempted: false, drainAttempted: false,
@@ -155,6 +153,12 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
         taskStartRequests: 0, firstStoppedTaskResult: null,
       },
     };
+  }
+
+  async function runtimeHoldFixture() {
+    const repair = await deployedReaderRepair();
+    vi.stubEnv("CODEX_THREAD_ID", repair.input.ownerThreadId);
+    const evidence = runtimeBlockedReceipt(repair.input.runtimeVersion);
     const readyEvidence = (): CourseSupportLearningRuntimeReadyReceipt => {
       const heartbeatAt = new Date(Math.max(Date.now(), evidence.observedAt.getTime() + 1));
       return { kind: "WINDOWS_RUNTIME_READY", runtimeVersion: "9".repeat(40), heartbeatAt, observedAt: heartbeatAt };
@@ -258,6 +262,165 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       })).toMatchObject({ outcome: "not_eligible" });
       expect(await f.snapshot()).toEqual(before);
     }, 20_000);
+
+  async function completedDemandRepair(input: { held?: boolean; activeLearner?: boolean; historicalQueue?: boolean } = {}) {
+    const fixture = await failed();
+    const { course, search } = fixture;
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    await client.courseSupportIncident.update({ where: { courseId: course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+
+    const dispatcher = await import("@/lib/automation/course-support-course-dispatch");
+    const lane = await import("@/lib/automation/course-support-batches");
+    const baseSha = "a".repeat(40), releaseSha = "b".repeat(40);
+    const parent = randomUUID(), owner = randomUUID();
+    batchOwners.push(parent, owner);
+    const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: parent, baseSha, maxStarts: 1 });
+    if (!plan.acquired || plan.value.launchItems.length !== 1) throw new Error("Expected one real fixture dispatch");
+    const assignmentRef = plan.value.launchItems[0].assignmentRef;
+    await dispatcher.beginCourseSupportCourseDispatch({ ownerThreadId: parent, assignmentRef });
+    await dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: parent, assignmentRef, childThreadId: owner,
+      launcherReceiptPath: join(tmpdir(), randomUUID(), "launcher.receipt.private.json") });
+    vi.stubEnv("CODEX_THREAD_ID", owner);
+    const branch = `automation/course-support-${randomUUID()}`;
+    expect(await lane.claimCourseSupportBatch({ ownerThreadId: owner, branch, baseSha, maxCourses: 1, dispatchAssignmentRef: assignmentRef }))
+      .toMatchObject({ outcome: "ready" });
+    const claimed = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
+    const path = "src/lib/course-discovery/example-public-reader.ts";
+    expect(await lane.appendCourseSupportBatchPath({ batchId: claimed.id, leaseToken: claimed.leaseToken, ownerThreadId: owner, path }))
+      .toMatchObject({ pathRecorded: true });
+    const withPath = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: claimed.id } });
+    await client.courseSupportBatch.update({ where: { id: claimed.id }, data: {
+      status: "VERIFYING", releaseSha, deployedAt: claimed.createdAt,
+      summary: { ...(withPath.summary as Prisma.JsonObject), releaseProvenance: { schemaVersion: 1, fromSha: baseSha,
+        toSha: releaseSha, branch, committedPaths: [path], descendantVerified: true } },
+    } });
+    const verification = { batchId: claimed.id, ownerThreadId: owner, leaseToken: claimed.leaseToken, releaseSha };
+    if (input.held) expect(await lane.holdOwnedCourseSupportVerificationRuntime({ ...verification, evidence: runtimeBlockedReceipt(releaseSha) }))
+      .toMatchObject({ outcome: "held" });
+    if (input.activeLearner) expect(await service.requestOwnedOutdoorLearningRecovery({ ...verification, runtimeVersion: releaseSha }))
+      .toMatchObject({ outcome: "created" });
+
+    // Materialize an already elapsed request from the live-state fixture so the
+    // real scheduler can complete it without a wall-clock wait. The closeout sees
+    // the same request, dispatch digest and original learner throughout.
+    const elapsedDate = new Date(search.date.getTime() - 4 * 86_400_000);
+    await client.teeSearch.update({ where: { id: search.id }, data: { date: elapsedDate } });
+    const learner = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: fixture.job.id } });
+    const request = learner.request as Prisma.JsonObject;
+    await client.courseDiscoveryJob.update({ where: { id: learner.id }, data: { request: { ...request,
+      input: { ...(request.input as Prisma.JsonObject), date: elapsedDate.toISOString().slice(0, 10) },
+    } } });
+    const dispatchRun = await client.automationRun.findFirstOrThrow({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+      audit: { path: ["assignmentRef"], equals: assignmentRef } } });
+    const audit = dispatcher.parseCourseDispatchAudit(dispatchRun.audit)!;
+    const originalSource = await client.teeSearch.findUniqueOrThrow({ where: { id: search.id }, select: COURSE_DISPATCH_SOURCE_SELECT });
+    audit.target.searchRefs[0].intentDigest = createCourseDispatchIntentDigest(originalSource);
+    const boundRun = await client.automationRun.update({ where: { id: dispatchRun.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const latestBatch = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: claimed.id }, select: { summary: true } });
+    await client.courseSupportBatch.update({ where: { id: claimed.id }, data: {
+      ...(!input.held ? { leaseExpiresAt: new Date(Date.now() - 1000) } : {}),
+      summary: { ...(latestBatch.summary as Prisma.JsonObject), dispatchSourceSearchRefs: audit.target.searchRefs },
+    } });
+    const { executeScheduledSearchCheck } = await import("@/lib/automation/search-schedule-execution");
+    expect(await executeScheduledSearchCheck(search.id, search.scheduleVersion)).toMatchObject({ outcome: "completed", courseResults: [] });
+    if (input.historicalQueue) await client.teeSearch.update({ where: { id: search.id }, data: { checkStatus: "QUEUED" } });
+    const originalAlert = await client.teeSearch.findUniqueOrThrow({ where: { id: search.id }, select: COURSE_DISPATCH_SOURCE_SELECT });
+    expect(createCourseDispatchIntentDigest(originalAlert)).toBe(audit.target.searchRefs[0].intentDigest);
+    expect(originalAlert).toMatchObject({ status: "COMPLETED", alertGeneration: search.alertGeneration });
+    const originalJob = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: fixture.job.id } });
+    const beforeBatch = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: claimed.id } });
+    const beforeIncident = await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: course.id } });
+    const { createTeeSearchForUser } = await import("@/lib/searches/service");
+    const createFreshAlert = () => createTeeSearchForUser(search.userId, { mode: "OUTDOOR",
+      date: search.date.toISOString().slice(0, 10), startTime: search.startTime, endTime: search.endTime, players: search.players,
+      userTimeZone: "UTC", cadenceMinutes: 5, additionalEmails: [],
+      courses: [{ courseId: course.id, name: course.name, latitude: course.latitude, longitude: course.longitude, rank: 1 }],
+    }, "PUBLIC");
+    const nextParent = randomUUID();
+    batchOwners.push(nextParent);
+    const dispatchAgain = () => dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha: releaseSha, maxStarts: 1 });
+    const close = () => dispatcher.closeExpiredCourseSupportDemand({ ownerThreadId: owner, batchRef: claimed.reference, registeredReleaseSha: releaseSha });
+    return { ...fixture, assignmentRef, owner, releaseSha, beforeBatch, beforeIncident, originalAlert, originalJob, boundRun, createFreshAlert, dispatchAgain, close };
+  }
+
+  it.each(["deployed", "runtime-held"] as const)("closes an expired %s repair for its completed alert and leaves fresh demand independent", async mode => {
+    const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("NO_EXTERNAL_REQUESTS"));
+    try {
+      const f = await completedDemandRepair({ held: mode === "runtime-held", historicalQueue: mode === "deployed" });
+      const projected = await f.dispatchAgain();
+      expect(projected).toMatchObject({ acquired: true, value: { launchItems: [], fullRepairContinuationItems: [{
+        kind: "OWNED_OUTDOOR_FULL_REPAIR", assignmentRef: f.assignmentRef, threadId: f.owner,
+        batchReference: f.beforeBatch.reference, releaseSha: f.releaseSha, continuationMode: "PUBLISHED_IMPLEMENTATION", expiredDemandRecoveryOnly: true,
+      }] } });
+      const closeResult = await f.close();
+      expect(closeResult).toMatchObject({ acquired: true, value: { outcome: "expired_demand_released", durableCloseoutRecorded: true,
+        monitoringVerified: false, deliveryVerified: false } });
+      const closed = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: f.beforeBatch.id } });
+      expect(closed).toMatchObject({ status: "PARTIAL", ownerThreadId: f.owner, baseSha: f.beforeBatch.baseSha,
+        releaseSha: f.releaseSha, deployedAt: f.beforeBatch.deployedAt, completedAt: expect.any(Date),
+        verificationRuntimeHold: null, summary: { plannedPaths: (f.beforeBatch.summary as Prisma.JsonObject).plannedPaths,
+          closeout: { reason: "expired_original_alert", retryCount: 0, monitoringVerified: false, deliveryVerified: false },
+          ...(mode === "runtime-held" ? { endedDemandVerificationRuntimeHoldV1: f.beforeBatch.verificationRuntimeHold } : {}),
+        },
+      });
+      expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: closed.id } }))
+        .toMatchObject({ result: "NEEDS_HUMAN" });
+      const parked = await client.courseSupportIncident.findUniqueOrThrow({ where: { id: f.beforeIncident.id } });
+      expect(parked).toMatchObject({ status: "NEEDS_HUMAN", activeBatchId: null, nextAttemptAt: null,
+        humanReviewReason: "AUTOMATION_STALLED", resolution: null, cycle: f.beforeIncident.cycle, attemptCount: f.beforeIncident.attemptCount });
+      expect(await client.courseMonitoringEvent.count({ where: { incidentId: parked.id, eventType: "HUMAN_REVIEW_REQUESTED",
+        audit: { path: ["reason"], equals: "ORIGINAL_DEMAND_ENDED" } } })).toBe(1);
+
+      const monitoring = await import("@/lib/automation/course-monitoring");
+      await monitoring.reconcileCourseMonitoringDeadlines({ courseIds: [f.course.id], source: "RECOVERY_CRON", now: new Date() });
+      await monitoring.reconcileCourseMonitoringDeadlines({ courseIds: [f.course.id], source: "SEARCH_WORKFLOW", demandSearchId: f.search.id, now: new Date() });
+      expect(await f.dispatchAgain()).toMatchObject({ acquired: true, value: { launchItems: [], fullRepairContinuationItems: [] } });
+      expect(await f.close()).toEqual(closeResult);
+      expect(await client.courseMonitoringEvent.count({ where: { incidentId: parked.id, eventType: "HUMAN_REVIEW_REQUESTED",
+        audit: { path: ["reason"], equals: "ORIGINAL_DEMAND_ENDED" } } })).toBe(1);
+      expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { id: parked.id } })).toEqual(parked);
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.originalJob.id } })).toEqual(f.originalJob);
+      expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id }, select: COURSE_DISPATCH_SOURCE_SELECT })).toEqual(f.originalAlert);
+      expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.boundRun.id } })).audit).toEqual(f.boundRun.audit);
+      expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(1);
+      expect(await client.courseProbe.count({ where: { courseId: f.course.id } })).toBe(0);
+      expect(await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+
+      const fresh = await f.createFreshAlert();
+      ids.add(fresh.id);
+      const freshReceipt = () => client.courseSetupReceipt.findFirstOrThrow({ where: { preference: { teeSearchId: fresh.id } } });
+      const beforeReceipt = await freshReceipt();
+      expect(beforeReceipt).toMatchObject({ legacy: false, startedAt: fresh.setupStartedAt, outcome: null });
+      const reconcileFresh = () => monitoring.reconcileCourseMonitoringDeadlines({ courseIds: [f.course.id], source: "SEARCH_WORKFLOW",
+        demandSearchId: fresh.id, now: new Date() });
+      await reconcileFresh();
+      await reconcileFresh();
+      const reopened = await client.courseSupportIncident.findUniqueOrThrow({ where: { id: parked.id } });
+      expect(reopened).toMatchObject({ status: "AUTO_INVESTIGATING", cycle: parked.cycle + 1, activeBatchId: null, attemptLedger: parked.attemptLedger });
+      expect(await freshReceipt()).toEqual(beforeReceipt);
+      expect(await service.ensureDiscoveryJob({ ...f.target, searchId: fresh.id })).toMatchObject({
+        status: "QUEUED", firstPickedUpAt: null, deadlineAt: null, attempts: 0,
+        request: { demand: { searchId: fresh.id, alertGeneration: fresh.alertGeneration } },
+      });
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.originalJob.id } })).toEqual(f.originalJob);
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: closed.id } })).toEqual(closed);
+      expect(network).not.toHaveBeenCalled();
+    } finally { network.mockRestore(); }
+  }, 20_000);
+
+  it.each(["fresh-demand", "active-learner"] as const)("preserves the deployed repair when completed demand still has %s", async scenario => {
+    const network = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("NO_EXTERNAL_REQUESTS"));
+    try {
+      const f = await completedDemandRepair({ activeLearner: scenario === "active-learner" });
+      if (scenario === "fresh-demand") await f.createFreshAlert();
+      expect(await f.dispatchAgain()).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [] } });
+      await expect(f.close()).rejects.toThrow("EXPIRED_COURSE_DEMAND_PROOF_REQUIRED");
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: f.beforeBatch.id } })).toEqual(f.beforeBatch);
+      expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { id: f.beforeIncident.id } })).toEqual(f.beforeIncident);
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.originalJob.id } })).toEqual(f.originalJob);
+      expect(network).not.toHaveBeenCalled();
+    } finally { network.mockRestore(); }
+  }, 20_000);
 
   // This end-to-end database fixture includes cold tooling imports on hosted
   // runners. Its harness budget is separate from the asserted worker deadlines.

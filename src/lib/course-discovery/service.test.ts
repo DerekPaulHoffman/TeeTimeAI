@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
     course: { findUnique: vi.fn(), updateMany: vi.fn() },
     courseOffering: { findUnique: vi.fn(), updateMany: vi.fn() },
     coursePreference: { findMany: vi.fn() },
+    courseSetupReceipt: { findFirst: vi.fn() },
     teeSearch: { findUnique: vi.fn() }, courseProbe: { findFirst: vi.fn() },
     courseDiscoveryJob: { findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
     courseAccessRecipe: { findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
@@ -70,6 +71,7 @@ beforeEach(() => {
   mocks.db.courseOffering.findUnique.mockResolvedValue(null);
   mocks.db.courseOffering.updateMany.mockResolvedValue({ count: 1 });
   mocks.db.coursePreference.findMany.mockImplementation(async () => preferences);
+  mocks.db.courseSetupReceipt.findFirst.mockResolvedValue(null);
   mocks.db.teeSearch.findUnique.mockImplementation(async () => (preferences[0] as { teeSearch?: unknown })?.teeSearch ?? null);
   mocks.db.courseProbe.findFirst.mockResolvedValue(null);
   mocks.db.courseDiscoveryJob.findUnique.mockImplementation(async ({ where }) => where.activeTargetKey && job?.activeTargetKey !== where.activeTargetKey ? null : job);
@@ -605,12 +607,18 @@ describe("bounded course discovery persistence", () => {
     expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
   });
 
-  it("filters eligible pilot IDs before bounding demand and intersects an exact search", async () => {
+  it("keeps saved-deadline demand exact and permits eligible pilot fallback only for legacy jobs", async () => {
     mocks.pilotIds.mockResolvedValue(["search1", "search2"]);
     await claimed();
     await heartbeatDiscoveryJob("job1", String(job!.leaseToken));
     expect(mocks.pilotIds).toHaveBeenCalledWith(process.env, mocks.db);
-    expect(mocks.db.coursePreference.findMany.mock.calls[0][0].where.teeSearchId).toEqual({ in: ["search1"] });
+    expect(mocks.db.coursePreference.findMany.mock.calls.map(([call]) => call.where.teeSearchId))
+      .toEqual(Array.from({ length: mocks.db.coursePreference.findMany.mock.calls.length }, () => ({ in: ["search1"] })));
+    expect(mocks.db.coursePreference.findMany.mock.calls[0][0].where.OR).toEqual([
+      { offeringId: null }, { offeringId: "outdoor-course1", offering: { is: { kind: "OUTDOOR", courseId: "course1" } } },
+    ]);
+    job!.setupDeadlineAt = null;
+    await heartbeatDiscoveryJob("job1", String(job!.leaseToken));
     expect(mocks.db.coursePreference.findMany.mock.calls.at(-1)![0].where.teeSearchId).toEqual({ in: ["search1", "search2"] });
     mocks.pilotIds.mockResolvedValue(["search2"]);
     mocks.db.coursePreference.findMany.mockClear();

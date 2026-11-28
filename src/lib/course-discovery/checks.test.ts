@@ -76,6 +76,27 @@ describe("failed established public-method learning", () => {
     expect(await getLearnedAvailability(search, search.preferences[0])).toBeNull();
     expect(mocked.ensure).not.toHaveBeenCalled();
   });
+  it("uses the course-scoped typed and learned paths for a previously authorized migrated outdoor preference", async () => {
+    const offering = { id: "outdoor-course-1", courseId: "course-1", kind: "OUTDOOR" } as typeof simulator.preferences[number]["offering"];
+    const preference = { ...search.preferences[0], offeringId: offering!.id, offering };
+    const target = { courseId: "course-1", kind: "OUTDOOR" };
+    expect(await getLearnedAvailability(search, preference)).toBeNull();
+    expect(mocked.activeRecipe).toHaveBeenCalledExactlyOnceWith(target);
+    expect(mocked.ensure).not.toHaveBeenCalled();
+    mocked.activeRecipe.mockResolvedValue({ record: { id: "recipe-1" } });
+    mocked.execution.mockResolvedValue({ state: "pending" });
+    expect(await getLearnedAvailability(search, preference)).toEqual({ state: "pending", target });
+    expect(mocked.execution).toHaveBeenCalledWith(expect.objectContaining({ searchId: search.id, target }));
+    mocked.activeRecipe.mockClear();
+    mocked.pilot.mockResolvedValue(false);
+    expect(await getLearnedAvailability(search, preference)).toBeNull();
+    expect(mocked.activeRecipe).not.toHaveBeenCalled();
+  });
+  it("does not use a mismatched offering as an outdoor learner target", async () => {
+    const offering = { ...simulator.preferences[0].offering!, id: "outdoor-course-1", courseId: "course-1" };
+    expect(await getLearnedAvailability(search, { ...search.preferences[0], offeringId: offering.id, offering })).toBeNull();
+    expect(mocked.activeRecipe).not.toHaveBeenCalled();
+  });
   it("admits the concrete failed method then joins its bounded pending job", async () => {
     expect(await queueFailedOutdoorDiscovery(search, search.preferences[0], "FETCH_FAILED")).toBe(true);
     expect(mocked.ensure).toHaveBeenCalledWith({ courseId: "course-1", searchId: "search-1" });

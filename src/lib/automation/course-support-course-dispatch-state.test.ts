@@ -125,6 +125,7 @@ vi.mock("@/lib/prisma", () => ({ prisma: { ...store.tx, $transaction: store.tran
 vi.mock("./course-support-batches", async importOriginal => ({
   courseSupportAssignedCandidateConflicts: (await importOriginal<typeof import("./course-support-batches")>()).courseSupportAssignedCandidateConflicts,
   isRetryableCourseSupportWriteConflict: (await importOriginal<typeof import("./course-support-batches")>()).isRetryableCourseSupportWriteConflict,
+  readCourseSupportRemediationDirective: (await importOriginal<typeof import("./course-support-batches")>()).readCourseSupportRemediationDirective,
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES: 15,
   runWithCourseSupportWriterTransitionLease: store.lease,
   withCourseSupportWriteConflictRetry: (operation: () => Promise<unknown>) => operation(),

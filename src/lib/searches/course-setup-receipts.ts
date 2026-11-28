@@ -5,6 +5,7 @@ import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test
 import { getBookingWindowForTargetDate, shouldRefreshBookingWindow } from "@/lib/courses/booking-window";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { prisma } from "@/lib/prisma";
+import { courseMonitoringPreferenceTarget, legacyOutdoorOfferingId } from "@/lib/searches/course-monitoring-target";
 import { getCourseSetupDeadline, readCourseSetupStartedAt } from "@/lib/searches/course-setup-deadline";
 import { classifyCourseSetupProbe } from "@/lib/searches/course-setup-proof";
 import { simulatorDurationsForSearch } from "@/lib/searches/simulator-duration";
@@ -35,9 +36,11 @@ type SetupProbe = Pick<CourseProbe, "id" | "teeSearchId" | "courseId" | "offerin
 export async function readSavedCourseSetupDeadline(transaction: Prisma.TransactionClient, input: {
   searchId: string; courseId: string; offeringId: string | null; startedAt: Date;
 }) {
+  const preference = { teeSearchId: input.searchId, ...courseMonitoringPreferenceTarget(input) };
+  const offeringIds = input.offeringId === null ? [null, legacyOutdoorOfferingId(input.courseId)] : [input.offeringId];
   const receipt = await transaction.courseSetupReceipt.findFirst({
-    where: { preference: { teeSearchId: input.searchId }, courseId: input.courseId,
-      offeringId: input.offeringId, startedAt: input.startedAt },
+    where: { courseId: input.courseId, startedAt: input.startedAt,
+      OR: offeringIds.map(offeringId => ({ offeringId, preference: { ...preference, offeringId } })) },
     select: { deadlineAt: true },
   });
   return receipt?.deadlineAt;
@@ -132,10 +135,15 @@ export async function recordCourseSetupProbe(transaction: Prisma.TransactionClie
     FROM "CoursePreference" AS preference
     JOIN "TeeSearch" AS search ON search.id = preference."teeSearchId"
     JOIN "CourseSetupReceipt" AS receipt ON receipt."preferenceId" = preference.id
+    LEFT JOIN "CourseOffering" AS offering ON offering.id = preference."offeringId" AND offering."courseId" = preference."courseId"
     WHERE search.id = ${probe.teeSearchId} AND search.status = 'ACTIVE'::"SearchStatus"
       AND preference."courseId" = ${probe.courseId} AND receipt."courseId" = preference."courseId"
-      AND preference."offeringId" IS NOT DISTINCT FROM ${probe.offeringId}::text
       AND receipt."offeringId" IS NOT DISTINCT FROM preference."offeringId"
+      AND (preference."offeringId" IS NULL OR offering.kind = search.mode)
+      AND (preference."offeringId" = ${probe.offeringId}::text OR (
+        search.mode = 'OUTDOOR'::"SearchMode" AND ${probe.offeringId}::text IS NULL
+        AND (preference."offeringId" IS NULL OR preference."offeringId" = ${legacyOutdoorOfferingId(probe.courseId)})
+      ))
       AND receipt."startedAt" = COALESCE(search."setupStartedAt", search."createdAt")
       AND receipt.outcome IS NULL AND receipt."deadlineAt" >= statement_timestamp() AT TIME ZONE 'UTC'
   `;

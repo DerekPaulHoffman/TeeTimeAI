@@ -111,6 +111,70 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
     }
   }, 15_000);
 
+  it("settles a materially edited migrated outdoor alert with a course-scoped probe", async () => {
+    const key = randomUUID();
+    const user = await database.user.create({ data: { email: `${key}@example.test`, clerkUserId: key } });
+    const courses = await Promise.all(["Migrated outdoor", "Invalid outdoor alias"].map(name => database.course.create({ data: {
+      name: `${name} ${key}`, latitude: 41, longitude: -73, timeZone: "UTC",
+      website: "https://course.example.test/", isPublic: true,
+    } })));
+    try {
+      const { updateTeeSearchForUser } = await import("@/lib/searches/service");
+      const { recordCourseProbe } = await import("@/lib/automation/db-service");
+      const { withSearchCheckWriteContext } = await import("@/lib/automation/search-check-write-context");
+      const { readSavedCourseSetupDeadline } = await import("@/lib/searches/course-setup-receipts");
+      const { ensureDiscoveryJob } = await import("./service");
+      const offerings = await Promise.all(courses.map((course, index) => database.courseOffering.create({ data: {
+        id: `outdoor-${course.id}`, courseId: course.id, kind: index === 0 ? "OUTDOOR" : "SIMULATOR",
+      } })));
+      const day = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
+      const saved = await database.teeSearch.create({ data: {
+        userId: user.id, mode: "OUTDOOR", date: new Date(day), startTime: "10:00", endTime: "15:00", players: 2,
+        userTimeZone: "UTC", trafficClass: "TEST", syntheticMultiCycle: true, createdAt: new Date(Date.now() - 30 * 60_000),
+        preferences: { create: courses.map((course, index) => ({
+          courseId: course.id, offeringId: offerings[index].id, rank: index + 1,
+        })) },
+      } });
+      const edited = await updateTeeSearchForUser(user.id, saved.id, { startTime: "11:00" });
+      const lease = { searchId: saved.id, scheduleVersion: edited.scheduleVersion, leaseToken: key };
+      await database.teeSearch.update({ where: { id: saved.id }, data: {
+        checkStatus: "CHECKING", checkLeaseToken: key, checkLeaseExpiresAt: new Date(Date.now() + 120_000),
+      } });
+      for (const course of courses) {
+        const observedAt = new Date().toISOString();
+        const probe = await withSearchCheckWriteContext(lease, () => recordCourseProbe({
+          searchId: saved.id, courseId: course.id, outcome: "NO_MATCH", rawSummary: {
+            providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: observedAt,
+            publicAvailability: { date: day, confirmedAt: observedAt, times: [] },
+          },
+        }));
+        expect(probe.offeringId).toBeNull();
+      }
+      const receipts = await database.courseSetupReceipt.findMany({ where: { preference: { teeSearchId: saved.id } } });
+      const outdoor = receipts.find(receipt => receipt.courseId === courses[0].id)!;
+      expect(outdoor).toMatchObject({ outcome: "NO_OPENINGS", offeringId: offerings[0].id, legacy: false,
+        evidenceProbeId: expect.any(String) });
+      expect(receipts.find(receipt => receipt.courseId === courses[1].id)).toMatchObject({ outcome: null, evidenceProbeId: null });
+      const deadlineFor = (courseId: string) => database.$transaction(transaction => readSavedCourseSetupDeadline(transaction, {
+        searchId: saved.id, courseId, offeringId: null, startedAt: edited.setupStartedAt!,
+      }));
+      expect(await deadlineFor(courses[0].id)).toEqual(outdoor.deadlineAt);
+      expect(await deadlineFor(courses[1].id)).toBeUndefined();
+      vi.stubEnv("COURSE_DISCOVERY_ENABLED", "true");
+      vi.stubEnv("COURSE_DISCOVERY_ROLLOUT_MODE", "PILOT");
+      vi.stubEnv("COURSE_DISCOVERY_PILOT_SEARCH_IDS", saved.id);
+      const admitted = await ensureDiscoveryJob({ courseId: courses[0].id, searchId: saved.id });
+      expect(admitted).toMatchObject({ targetKey: `course:${courses[0].id}`, offeringId: null, status: "QUEUED",
+        setupDeadlineAt: outdoor.deadlineAt });
+      expect(await ensureDiscoveryJob({ courseId: courses[1].id, searchId: saved.id })).toBeNull();
+      expect(await database.searchEmailDelivery.count({ where: { teeSearchId: saved.id } })).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      await database.user.delete({ where: { id: user.id } });
+      await database.course.deleteMany({ where: { id: { in: courses.map(course => course.id) } } });
+    }
+  }, 15_000);
+
   it("parks repeated outdoor infrastructure misses through the dispatcher without reopening on the hosted watchdog", async () => {
     const now = new Date();
     const key = randomUUID();

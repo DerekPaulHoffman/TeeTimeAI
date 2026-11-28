@@ -8,6 +8,7 @@ import { isSearchWindowActive } from "@/lib/automation/date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
 import { getCourseSetupDeadline, readCourseSetupStartedAt } from "@/lib/searches/course-setup-deadline";
 import { readSavedCourseSetupDeadline } from "@/lib/searches/course-setup-receipts";
+import { courseMonitoringPreferenceTarget } from "@/lib/searches/course-monitoring-target";
 import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 import { activeDiscoveryPilotSearchIds, isDiscoveryPilotSearch } from "./config";
 import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
@@ -197,7 +198,7 @@ async function currentDemand(tx: Tx, source: Source, now: Date, searchId?: strin
   const eligibleIds = searchId ? pilotIds.filter(id => id === searchId) : pilotIds;
   if (!eligibleIds.length) return null;
   const preferences = await tx.coursePreference.findMany({ where: {
-    courseId: source.course.id, offeringId: source.offering?.id ?? null,
+    ...courseMonitoringPreferenceTarget(source.target),
     teeSearchId: { in: eligibleIds }, teeSearch: { status: "ACTIVE" },
   }, select: { teeSearch: { select: searchSelect } }, orderBy: { teeSearch: { createdAt: "asc" } }, take: 100 });
   for (const { teeSearch } of preferences) {
@@ -676,7 +677,7 @@ export async function currentDiscoveryEngineeringFailure(tx: Pick<Tx, "courseDis
   if (!search || !activeSearch(search, source, now) || search.alertGeneration !== request.demand.alertGeneration ||
       canonical(requestFor(source, search)) !== canonical(request)) return null;
   const preferences = await tx.coursePreference.findMany({ where: { teeSearchId: search.id,
-    courseId: job.courseId, offeringId: job.offeringId }, select: { courseId: true }, take: 2 });
+    ...courseMonitoringPreferenceTarget(job) }, select: { courseId: true }, take: 2 });
   if (preferences.length !== 1) return null;
   if (await tx.courseProbe.findFirst({ where: { teeSearchId: search.id, courseId: job.courseId, offeringId: job.offeringId,
     outcome: { in: ["MATCH_FOUND", "NO_MATCH"] }, observedAt: { gte: job.completedAt } }, select: { id: true } })) return null;

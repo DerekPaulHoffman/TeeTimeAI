@@ -145,19 +145,21 @@ afterEach(() => {
 });
 
 describe("listTeeSearchesForUser", () => {
-  it("projects only the newest exact owned-request terminal investigation without changing demand or scheduler", async () => {
+  it.each([false, true])("projects the exact owned-request terminal investigation with migrated outdoor offering %s", async (migrated) => {
     vi.setSystemTime(new Date("2026-10-22T00:40:00Z"));
+    mockedPrisma.courseDiscoveryJob.findFirst.mockClear();
     const course = {
       id: "course-1", name: "Public Golf Club", address: "1 Fairway Rd",
       website: "https://golf.example/", detectedBookingUrl: null, timeZone: "America/New_York",
       providerFamilyKey: null, bookingMetadata: {}, isPublic: true, activeAccessRecipeId: null,
       bookingMethod: "UNKNOWN", bookingAccessMode: "UNKNOWN", automationEligibility: "UNKNOWN", automationReason: "NONE",
     } as Parameters<typeof getDiscoverySourceFingerprint>[0];
+    const offering = migrated ? { id: `outdoor-${course.id}`, courseId: course.id, kind: "OUTDOOR" } : null;
     const stored = { id: "search-1", userId: "owner-1", status: "ACTIVE", mode: "OUTDOOR", alertGeneration: 0,
       createdAt: new Date("2026-10-22T00:35:40Z"), date: new Date("2026-10-23T00:00:00Z"),
       startTime: "08:00", endTime: "18:00", players: 2, durationMinutes: null, statusEmailSnapshot: null,
       checkStatus: "WAITING", nextCheckAt: new Date("2026-10-22T00:42:47Z"), matches: [],
-      preferences: [{ id: "pref-1", courseId: course.id, offeringId: null, course, offering: null }] };
+      preferences: [{ id: "pref-1", courseId: course.id, offeringId: offering?.id ?? null, course, offering }] };
     const completedAt = new Date("2026-10-22T00:37:34Z");
     const job = { targetKey: "course:course-1", courseId: course.id, offeringId: null, baseRecipeId: null,
       sourceFingerprint: getDiscoverySourceFingerprint(course), status: "FAILED", createdAt: stored.createdAt, completedAt,

@@ -60,7 +60,7 @@ import { DEFAULT_SIMULATOR_DURATION_MINUTES } from "@/lib/searches/search-mode";
 import { getSimulatorVenueForDemand } from "@/lib/places/simulator-google";
 import type { CourseCandidate } from "@/lib/places/google";
 import { enrollDiscoveryPilotInTransaction } from "@/lib/course-discovery/enrollment";
-import { dashboardDiscoveryJobSelect, getDashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
+import { dashboardDiscoveryJobSelect, getDashboardDiscoveryOffering, getDashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
 import { readSharedFacilityScope } from "@/lib/courses/shared-facility-scope";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
@@ -774,10 +774,12 @@ export async function listTeeSearchesForUser(userId: string) {
     const discoveryJobs = new Map<string,
       Prisma.CourseDiscoveryJobGetPayload<{ select: typeof dashboardDiscoveryJobSelect }> | null>();
     await Promise.all(discoveryTargets.map(async ({ search, preference }) => {
+      const offering = getDashboardDiscoveryOffering(search.mode, preference.courseId, preference.offering ?? null);
+      if (offering === undefined || (preference.offering?.id ?? null) !== (preference.offeringId ?? null)) return;
       const job = await transaction.courseDiscoveryJob.findFirst({
         where: {
-          targetKey: preference.offeringId ? `offering:${preference.offeringId}` : `course:${preference.courseId}`,
-          courseId: preference.courseId, offeringId: preference.offeringId,
+          targetKey: offering ? `offering:${offering.id}` : `course:${preference.courseId}`,
+          courseId: preference.courseId, offeringId: offering?.id ?? null,
           AND: [
             { request: { path: ["demand", "searchId"], equals: search.id } },
             { request: { path: ["demand", "alertGeneration"], equals: search.alertGeneration } },

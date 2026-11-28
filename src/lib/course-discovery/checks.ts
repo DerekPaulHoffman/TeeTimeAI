@@ -6,6 +6,7 @@ import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
 import { LOCAL_READER_COURSE_KEYS } from "@/lib/local-reader/course-key";
 import { getCourseSetupDeadline } from "@/lib/searches/course-setup-deadline";
+import { isCanonicalLegacyOutdoorOffering } from "@/lib/searches/course-monitoring-target";
 import { RUNNABLE_SIMULATOR_PROVIDER_FAMILIES } from "@/lib/simulators/providers";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 import type { SearchCheckCourseResult } from "@/lib/automation/search-check";
@@ -35,9 +36,13 @@ export async function getLearnedAvailability(search: ActiveAutomationSearch, pre
   if (!await isDiscoveryPilotSearch(search.id)) return null;
   if (search.mode === "OUTDOOR" && preference.course.isPublic === false) return null;
   if (search.mode === "OUTDOOR" && preference.course.monitoringMode === "LOCAL_READER_ONLY") return null;
+  const legacyOutdoorOffering = search.mode === "OUTDOOR" &&
+    isCanonicalLegacyOutdoorOffering(preference.courseId, preference.offeringId, preference.offering);
+  if (search.mode === "OUTDOOR" && preference.offeringId && !legacyOutdoorOffering) return null;
   if (search.mode === "SIMULATOR" && (!preference.offering || !preference.offering.active || preference.offering.publicAccessStatus === "NOT_PUBLIC" ||
       preference.offering.monitoringState === "FINAL_IDENTITY" || preference.offering.monitoringState === "FINAL_TECHNICAL" || preference.offering.automationEligibility === "BLOCKED")) return null;
-  const target: DiscoveryTarget = { courseId: preference.courseId, ...(preference.offeringId ? { offeringId: preference.offeringId } : {}), kind: search.mode };
+  const target: DiscoveryTarget = { courseId: preference.courseId,
+    ...(search.mode === "SIMULATOR" && preference.offeringId ? { offeringId: preference.offeringId } : {}), kind: search.mode };
   const recipe = await getActiveAccessRecipe(target);
   if (!recipe) {
     // A dynamic reader key only recognizes a URL shape. It does not prove that
