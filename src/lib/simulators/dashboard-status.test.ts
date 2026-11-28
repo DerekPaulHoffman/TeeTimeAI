@@ -82,6 +82,16 @@ describe("simulator dashboard status", () => {
     expect(getSimulatorDashboardStatus({ ...waiting, setupDeadlineAt, windowEnded: true }).kind).toBe("ENDED");
   });
 
+  it("holds verified saved opening guidance through the setup cutoff and lets current evidence supersede it", () => {
+    const input = { ...fixture(), setupDeadlineAt: now, setupBookingOpensAt: new Date(now.getTime() + 60_000) };
+    expect(getSimulatorDashboardStatus(input).kind).toBe("BOOKING_NOT_OPEN");
+    expect(getSimulatorDashboardStatus({ ...input, now: input.setupBookingOpensAt }).kind).toBe("UNCONFIRMED");
+    expect(getSimulatorDashboardStatus({ ...input, probe: fixture("NO_MATCH").probe }).kind).toBe("NO_MATCH");
+    expect(getSimulatorDashboardStatus({ ...input, probe: fixture("MATCH_FOUND").probe, currentMatchCount: 1 }).kind).toBe("AVAILABLE");
+    expect(getSimulatorDashboardStatus({ ...input, alertStatus: "PAUSED" }).kind).toBe("PAUSED");
+    expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, monitoringState: "FINAL_TECHNICAL" } }).kind).toBe("UNAVAILABLE");
+  });
+
   it("uses the venue's official site while rental details are unknown", () => {
     const input = fixture("NEEDS_ADAPTER");
     const pending = { ...input, offering: { ...input.offering, publicAccessStatus: "UNVERIFIED", bookingUrl: null,
@@ -96,7 +106,8 @@ describe("simulator dashboard status", () => {
   it("labels only verified rental URLs as official booking pages", () => {
     expect(getSimulatorDashboardStatus(fixture()).officialLinkLabel).toBe("Official booking page");
     const input = fixture();
-    expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, verifiedAt: null } }).officialLinkLabel).toBe("Official site");
+    expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, verifiedAt: null } }))
+      .toMatchObject({ officialLinkLabel: "Official site", officialUrl: input.website });
     expect(getSimulatorDashboardStatus({ ...input, offering: { ...input.offering, verifiedAt: new Date("2026-10-07T18:00:00Z") } }).officialLinkLabel).toBe("Official site");
   });
 

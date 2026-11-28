@@ -34,6 +34,89 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
 
   afterAll(async () => { if (database) await database.$disconnect(); });
 
+  it("shows a verified simulator opening from the saved receipt while its reader is offline", async () => {
+    const key = randomUUID();
+    const now = new Date();
+    const dayAhead = (days: number) => new Date(now.getTime() + days * 86_400_000).toISOString().slice(0, 10);
+    const date = dayAhead(3);
+    const opensAt = new Date(`${dayAhead(2)}T08:00:00.000Z`);
+    const website = "https://simulator.example.test/";
+    const bookingUrl = "https://simulator.example.test/booking";
+    const user = await database.user.create({ data: { email: `${key}@example.test`, clerkUserId: key } });
+    const course = await database.course.create({ data: { name: "Simulator booking window fixture", latitude: 41, longitude: -73,
+      timeZone: "UTC", website } });
+    const offering = await database.courseOffering.create({ data: { courseId: course.id, kind: "SIMULATOR", active: true,
+      publicAccessStatus: "PUBLIC", automationEligibility: "ALLOWED", bookingUrl, evidenceUrl: website,
+      verifiedAt: new Date(now.getTime() - 60_000), supportedDurationsMinutes: [60],
+      bookingWindowDaysAhead: 1, bookingReleaseTimeLocal: "08:00",
+    } });
+    const network = vi.fn(async () => { throw new Error("NO_EXTERNAL_REQUESTS"); });
+    emailSend.mockClear();
+    vi.stubGlobal("fetch", network);
+    vi.stubEnv("SIMULATOR_MODE_ENABLED", "true");
+    vi.stubEnv("COURSE_DISCOVERY_ENABLED", "false");
+    try {
+      const { createTeeSearchForUser, listTeeSearchesForUser } = await import("@/lib/searches/service");
+      const { getSimulatorDashboardStatus } = await import("@/lib/simulators/dashboard-status");
+      const { getSimulatorOfferingSourceFingerprint } = await import("@/lib/simulators/source-fingerprint");
+      // Keep real database I/O and timers. Skew only the application clock at save.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(now.getTime() + 20 * 60_000));
+      const saved = await createTeeSearchForUser(user.id, { mode: "SIMULATOR", date, startTime: "10:00", endTime: "14:00",
+        players: 2, durationMinutes: 60, userTimeZone: "UTC", cadenceMinutes: 5, additionalEmails: [],
+        courses: [{ mode: "SIMULATOR", courseId: course.id, offeringId: offering.id, name: course.name,
+          rank: 1, latitude: course.latitude, longitude: course.longitude }],
+      }, "PUBLIC").finally(() => vi.useRealTimers());
+      const savedReceipt = () => database.courseSetupReceipt.findFirstOrThrow({ where: { preference: { teeSearchId: saved.id } } });
+      const receipt = await savedReceipt();
+      const [databaseClock] = await database.$queryRaw<Array<{ observedAt: Date }>>`SELECT statement_timestamp() AS "observedAt"`;
+      expect(receipt.startedAt).toEqual(saved.createdAt);
+      expect(databaseClock.observedAt.getTime() - receipt.startedAt.getTime()).toBeGreaterThanOrEqual(0);
+      expect(databaseClock.observedAt.getTime() - receipt.startedAt.getTime()).toBeLessThan(15_000);
+      expect(receipt.deadlineAt.getTime() - receipt.startedAt.getTime()).toBe(15 * 60_000);
+      expect(receipt).toMatchObject({ outcome: "BOOKING_NOT_OPEN", offeringId: offering.id, evidenceProbeId: null,
+        evidenceObservedAt: offering.verifiedAt, closedAt: saved.setupStartedAt,
+        request: { mode: "SIMULATOR", targetDate: date, durationMinutes: 60,
+          factsAtSave: { kind: "VERIFIED_SIMULATOR_BOOKING_WINDOW", opensAt: opensAt.toISOString(), evidenceUrl: website,
+            sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering) },
+        },
+      });
+      const dashboardStatusAt = async (observedAt: Date) => {
+        const [search] = await listTeeSearchesForUser(user.id);
+        const [preference] = search.preferences;
+        expect(search.probes).toHaveLength(0);
+        expect(search.matches).toHaveLength(0);
+        return { opensAt: preference.setupBookingOpensAt, status: getSimulatorDashboardStatus({
+          offering: preference.offering, setupProbe: preference.setupProbe, currentMatchCount: 0,
+          alertStatus: search.status, windowEnded: false, website: preference.course.website, now: observedAt,
+          discoveryStatus: preference.discoveryStatus, setupDeadlineAt: preference.setupDeadlineAt,
+          setupBookingOpensAt: preference.setupBookingOpensAt,
+        }) };
+      };
+      const beforeCutoff = new Date(receipt.startedAt.getTime() + 60_000);
+      const afterCutoff = new Date(receipt.deadlineAt.getTime() + 1);
+      for (const observedAt of [beforeCutoff, afterCutoff]) {
+        expect(await dashboardStatusAt(observedAt)).toMatchObject({ opensAt,
+          status: { kind: "BOOKING_NOT_OPEN", label: "The public booking window has not opened yet.", officialUrl: bookingUrl } });
+      }
+      expect((await dashboardStatusAt(opensAt)).status.kind).toBe("UNCONFIRMED");
+
+      const movedBookingUrl = "https://simulator.example.test/new-booking";
+      await database.courseOffering.update({ where: { id: offering.id }, data: { bookingUrl: movedBookingUrl } });
+      expect(await dashboardStatusAt(afterCutoff)).toMatchObject({ opensAt: undefined,
+        status: { kind: "UNCONFIRMED", officialUrl: movedBookingUrl } });
+      expect(await savedReceipt()).toEqual(receipt);
+      expect(await database.searchEmailDelivery.count({ where: { teeSearchId: saved.id } })).toBe(0);
+      expect(network).not.toHaveBeenCalled();
+      expect(emailSend).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      await database.user.delete({ where: { id: user.id } });
+      await database.course.delete({ where: { id: course.id } });
+    }
+  }, 15_000);
+
   it("persists a known course's normal saved-check receipt while a sibling's official lookup remains open", async () => {
     const key = randomUUID();
     const day = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
@@ -375,6 +458,45 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
         status: "CANCELLED", workflowRunId: null, nextCheckAt: null,
       });
       expect(await database.courseDiscoveryJob.count({ where: { courseId: course.id } })).toBe(0);
+    } finally {
+      await database.user.delete({ where: { id: user.id } });
+      await database.course.delete({ where: { id: course.id } });
+    }
+  });
+
+  it("settles saved overdue receipts while legacy registration is blocked and reports its failure", async () => {
+    const key = randomUUID();
+    const old = new Date(Date.now() - 86_400_000);
+    const user = await database.user.create({ data: { email: `${key}@example.test`, clerkUserId: key } });
+    const course = await database.course.create({ data: {
+      name: `Saved fixture ${key}`, latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true,
+    } });
+    try {
+      const search = await database.teeSearch.create({ data: {
+        userId: user.id, createdAt: old, setupStartedAt: old, date: old, startTime: "09:00", endTime: "10:00", players: 2,
+        trafficClass: "TEST", preferences: { create: { courseId: course.id, rank: 1 } },
+      }, include: { preferences: true } });
+      const receipt = await database.courseSetupReceipt.create({ data: {
+        preferenceId: search.preferences[0]!.id, courseId: course.id, request: {},
+        startedAt: old, deadlineAt: new Date(old.getTime() + 900_000),
+      } });
+      const { recoverDueCourseSetupReceipts } = await import("@/lib/searches/course-setup-receipts");
+      const legacyFailure = new Error("Fixture legacy registration transaction failed");
+      let failRegistration = () => {};
+      const registration = new Promise<never>((_, reject) => { failRegistration = () => reject(legacyFailure); });
+      const transaction = vi.spyOn(database, "$transaction").mockReturnValueOnce(registration);
+      const recoveryFailure = expect(recoverDueCourseSetupReceipts()).rejects.toBe(legacyFailure);
+      try {
+        await vi.waitFor(async () => {
+          const settled = await database.courseSetupReceipt.findUniqueOrThrow({ where: { id: receipt.id } });
+          expect(settled).toMatchObject({ outcome: "UNCONFIRMED", closedAt: expect.any(Date), evidenceProbeId: null });
+        }, { timeout: 2_000 });
+      } finally {
+        failRegistration();
+        transaction.mockRestore();
+        await recoveryFailure;
+      }
+      expect(await recoverDueCourseSetupReceipts()).toMatchObject({ registeredLegacy: 0, unconfirmed: 0, legacyUnverified: 0 });
     } finally {
       await database.user.delete({ where: { id: user.id } });
       await database.course.delete({ where: { id: course.id } });

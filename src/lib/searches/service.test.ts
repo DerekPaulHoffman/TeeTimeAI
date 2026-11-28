@@ -72,6 +72,7 @@ vi.mock(
 );
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
+let databaseSaveTime: Date | undefined;
 
 const currentSlotSettings = {
   startsAt: new Date("2026-08-31T14:00:00.000Z"),
@@ -118,6 +119,12 @@ function confirmedDateEditMatch(startsAt = "2026-10-01T14:00:00.000Z") {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-07-01T12:00:00.000Z"));
+  databaseSaveTime = undefined;
+  mockedPrisma.$queryRaw.mockImplementation(async query =>
+    "text" in query && query.text === 'SELECT statement_timestamp() AS "savedAt"'
+      ? [{ savedAt: databaseSaveTime ?? new Date() }]
+      : [],
+  );
   mockedPrisma.$transaction.mockImplementation(async (callback) =>
     (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
   );
@@ -752,6 +759,7 @@ describe("listTeeSearchesForUser", () => {
 
 describe("createTeeSearchForUser", () => {
   it("persists Glen's canonical id even when the shared place belongs to Knolls", async () => {
+    databaseSaveTime = new Date("2026-07-01T11:55:00.000Z");
     const group = { rootCourseId: "knolls", courseIds: ["knolls", "glen"] };
     const root = { id: "knolls", googlePlaceId: "tashua-place", name: "Tashua Knolls", isPublic: true, automationEligibility: "BLOCKED", timeZone: "America/New_York", layoutHoleCounts: [18], layoutHolesVerifiedAt: new Date("2026-07-01"), bookingMetadata: { sharedFacility: group } };
     const glen = { ...root, id: "glen", googlePlaceId: null, name: "Tashua Glen", automationEligibility: "ALLOWED", layoutHoleCounts: [9] };
@@ -763,7 +771,8 @@ describe("createTeeSearchForUser", () => {
       courses: [{ courseId: "glen", googlePlaceId: "tashua-place", name: "Tashua Glen", rank: 1, latitude: 41.24, longitude: -73.2 }],
     });
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
-      userId: "owner", additionalEmails: ["friend@example.com"], preferences: { create: [{ rank: 1, course: { connect: { id: "glen" } } }] },
+      userId: "owner", createdAt: databaseSaveTime, setupStartedAt: databaseSaveTime,
+      additionalEmails: ["friend@example.com"], preferences: { create: [{ rank: 1, course: { connect: { id: "glen" } } }] },
     }) }));
   });
 
@@ -791,6 +800,7 @@ describe("createTeeSearchForUser", () => {
   });
 
   it("persists simulator demand from canonical verified offering duration without party-capacity filtering", async () => {
+    databaseSaveTime = new Date("2026-07-01T12:05:00.000Z");
     const offering = {
       id: "sim-1", courseId: "venue-1", kind: "SIMULATOR", active: true,
       publicAccessStatus: "PUBLIC", bookingUrl: "https://venue.example/book",
@@ -810,7 +820,7 @@ describe("createTeeSearchForUser", () => {
     await createTeeSearchForUser("user-1", input);
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        mode: "SIMULATOR", durationMinutes: 120,
+        mode: "SIMULATOR", durationMinutes: 120, createdAt: databaseSaveTime, setupStartedAt: databaseSaveTime,
         preferences: { create: [expect.objectContaining({
           course: { connect: { id: "venue-1" } },
           offering: { connect: { id: "sim-1" } },
@@ -2403,6 +2413,7 @@ describe("updateTeeSearchForUser", () => {
   });
 
   it("keeps the setup anchor for a full-form rank, recipient and cadence edit, even though delivery is fenced", async () => {
+    databaseSaveTime = new Date("2026-07-01T12:05:00.000Z");
     const createdAt = new Date("2026-07-01T11:49:00Z");
     const criteria = { ...currentSearchSettings(), mode: "OUTDOOR", date: new Date("2026-08-31T11:32:00Z"), durationMinutes: null,
       preferences: [], createdAt, setupStartedAt: createdAt };
@@ -2417,7 +2428,7 @@ describe("updateTeeSearchForUser", () => {
     expect(data).not.toHaveProperty("setupStartedAt");
     expect(data).toMatchObject({
       alertGeneration: { increment: 1 }, scheduleVersion: { increment: 1 }, workflowRunId: null, checkLeaseToken: null,
-      statusEmailSnapshot: { alertGeneration: 3, generationStartedAt: new Date().toISOString() },
+      statusEmailSnapshot: { alertGeneration: 3, generationStartedAt: databaseSaveTime.toISOString() },
     });
     expect(deliveryOutboxMocks.lockSearchForAlertMutation.mock.invocationCallOrder[0]).toBeLessThan(
       mockedPrisma.teeSearch.findUniqueOrThrow.mock.invocationCallOrder.at(-1)!,
@@ -2425,16 +2436,29 @@ describe("updateTeeSearchForUser", () => {
   });
 
   it("starts a new clock on changed locked criteria and preserves it across pause and resume", async () => {
+    databaseSaveTime = new Date("2026-07-01T11:55:00.000Z");
     const criteria = { ...currentSearchSettings(), mode: "OUTDOOR", durationMinutes: null, preferences: [] };
     mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValueOnce({ ...criteria, players: 4 } as never)
       .mockResolvedValue(criteria as never);
     await updateTeeSearchForUser("user-1", "search-1", { players: 4 });
-    expect(mockedPrisma.teeSearch.update.mock.calls[0][0].data).toMatchObject({ setupStartedAt: new Date() });
+    expect(mockedPrisma.teeSearch.update.mock.calls[0][0].data).toMatchObject({ setupStartedAt: databaseSaveTime });
     await updateTeeSearchForUser("user-1", "search-1", { status: "PAUSED" });
     vi.setSystemTime(new Date("2026-07-01T13:00:00Z"));
     await updateTeeSearchForUser("user-1", "search-1", { status: "ACTIVE" });
     expect(mockedPrisma.teeSearch.update.mock.calls[1][0].data).not.toHaveProperty("setupStartedAt");
     expect(mockedPrisma.teeSearch.update.mock.calls[2][0].data).not.toHaveProperty("setupStartedAt");
+  });
+
+  it("keeps distinct setup receipts for criteria edits in the same database millisecond", async () => {
+    databaseSaveTime = new Date("2026-07-01T11:55:00.000Z");
+    const criteria = { ...currentSearchSettings(), mode: "OUTDOOR", durationMinutes: null,
+      preferences: [], setupStartedAt: databaseSaveTime };
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValue(criteria as never);
+    await updateTeeSearchForUser("user-1", "search-1", { players: 4 });
+    expect(mockedPrisma.teeSearch.update.mock.calls[0][0].data).toMatchObject({
+      setupStartedAt: new Date(databaseSaveTime.getTime() + 1),
+      statusEmailSnapshot: { alertGeneration: 3, generationStartedAt: databaseSaveTime.toISOString() },
+    });
   });
 
   it("keeps the first legacy generation's known setup anchor when it is first edited", async () => {

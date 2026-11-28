@@ -48,7 +48,7 @@ export function SearchStatusActions({
   initialScheduleVersion,
   initialLastCheckedAt,
   initialNextCheckAt,
-  setupDeadlineAt,
+  availabilityRefreshAt,
   initialCoursePreferences
 }: {
   mode?: SearchMode;
@@ -66,7 +66,7 @@ export function SearchStatusActions({
   initialScheduleVersion?: number;
   initialLastCheckedAt: string | null;
   initialNextCheckAt: string | null;
-  setupDeadlineAt?: string | null;
+  availabilityRefreshAt?: string | null;
   initialCoursePreferences: CoursePreferenceFormValue[];
 }) {
   const router = useRouter();
@@ -124,11 +124,18 @@ export function SearchStatusActions({
   }, [removalRequested]);
 
   useEffect(() => {
-    if (localStatus !== "ACTIVE" || !setupDeadlineAt) return;
-    const delay = Math.max(0, Date.parse(setupDeadlineAt) - Date.now());
-    const timeout = window.setTimeout(() => router.refresh(), delay);
+    if (localStatus !== "ACTIVE" || !availabilityRefreshAt) return;
+    const refreshAt = Date.parse(availabilityRefreshAt);
+    if (!Number.isFinite(refreshAt)) return;
+    const maxDelay = 2 ** 31 - 1;
+    let timeout: number;
+    function scheduleRefresh() {
+      const delay = Math.max(0, refreshAt - Date.now());
+      timeout = window.setTimeout(delay > maxDelay ? scheduleRefresh : () => router.refresh(), Math.min(delay, maxDelay));
+    }
+    scheduleRefresh();
     return () => window.clearTimeout(timeout);
-  }, [localStatus, router, setupDeadlineAt]);
+  }, [localStatus, router, availabilityRefreshAt]);
 
   useEffect(() => {
     if (localStatus !== "ACTIVE" ||

@@ -434,7 +434,7 @@ function DashboardSearchCard({
               initialScheduleVersion={search.scheduleVersion}
               initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null}
               initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
-              setupDeadlineAt={pendingSetupDeadline}
+              availabilityRefreshAt={pendingSetupDeadline}
               initialCoursePreferences={search.preferences.map((preference) => ({
                 id: preference.id,
                 courseName: preference.course.name,
@@ -818,9 +818,15 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
     const status = getSimulatorDashboardStatus({ offering, probe, setupProbe: preference.setupProbe, currentMatchCount: venueMatches.length,
       alertStatus: search.status, windowEnded: notificationWindowEnded(date, search.endTime, [preference.course.timeZone], now),
       website: preference.course.website, now, discoveryStatus: preference.discoveryStatus,
-      setupDeadlineAt: preference.setupDeadlineAt });
+      setupDeadlineAt: preference.setupDeadlineAt, setupBookingOpensAt: preference.setupBookingOpensAt });
     return { preference, venueMatches, status };
   });
+  const availabilityRefreshAt = [
+    ...(pendingSetupDeadline ? [pendingSetupDeadline] : []),
+    ...venues.flatMap(({ preference, status }) =>
+      status.kind === "BOOKING_NOT_OPEN" && preference.setupBookingOpensAt && preference.setupBookingOpensAt > now
+        ? [preference.setupBookingOpensAt.toISOString()] : []),
+  ].sort()[0] ?? null;
   return <article className="dashboard-row" data-single-course={search.preferences.length === 1} id={`alert-${search.id}`}>
     <details className="dashboard-alert-accordion">
       <summary className="dashboard-alert-summary">
@@ -853,7 +859,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
             initialPlayers={search.players} initialRequestedLayoutHoles={null}
             initialAdditionalEmails={search.additionalEmails} initialCheckStatus={search.checkStatus} initialScheduleVersion={search.scheduleVersion}
             initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null} initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
-            setupDeadlineAt={pendingSetupDeadline}
+            availabilityRefreshAt={availabilityRefreshAt}
             initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : <span className="meta">Sign in to pause, edit, or cancel this alert.</span>}
         </div>
         <div className="watch-course-list">

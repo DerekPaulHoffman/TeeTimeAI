@@ -54,6 +54,7 @@ import { getCourseSetupProbe, projectCurrentCheckEvidence } from "@/lib/searches
 import { getCourseSetupDeadline, readCourseSetupStartedAt } from "@/lib/searches/course-setup-deadline";
 import { registerCourseSetupReceipts } from "@/lib/searches/course-setup-receipts";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
+import { readSavedSimulatorBookingOpening } from "@/lib/simulators/booking-window";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
 import { assertSimulatorSessionFitsWindow } from "@/lib/searches/simulator-window";
 import { DEFAULT_SIMULATOR_DURATION_MINUTES } from "@/lib/searches/search-mode";
@@ -73,6 +74,16 @@ function runCustomerProjectionTransaction<T>(
   return prisma.$transaction(worker, {
     isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
   });
+}
+
+async function readSearchSaveTime(transaction: Prisma.TransactionClient) {
+  const [clock] = await transaction.$queryRaw<Array<{ savedAt: Date }>>(
+    Prisma.sql`SELECT statement_timestamp() AS "savedAt"`,
+  );
+  if (!(clock?.savedAt instanceof Date) || !Number.isFinite(clock.savedAt.getTime())) {
+    throw new Error("The search save database clock is unavailable.");
+  }
+  return clock.savedAt;
 }
 
 export type CoursePreferenceRankUpdateInput = {
@@ -141,10 +152,12 @@ export async function createTeeSearchForUser(
       }
     }
 
+    const savedAt = await readSearchSaveTime(transaction);
     const created = await transaction.teeSearch.create({
       data: {
         userId,
-        setupStartedAt: new Date(),
+        createdAt: savedAt,
+        setupStartedAt: savedAt,
         date: parseLocalDate(input.date),
         startTime: input.startTime,
         endTime: input.endTime,
@@ -313,10 +326,12 @@ async function createSimulatorTeeSearchForUser(
     assertSimulatorSessionFitsWindow({ date: input.date, startTime: input.startTime,
       endTime: input.endTime, durationMinutes,
       timeZones: currentOfferings.map((offering) => offering.course.timeZone) });
+    const savedAt = await readSearchSaveTime(transaction);
     const created = await transaction.teeSearch.create({
       data: {
         userId,
-        setupStartedAt: new Date(),
+        createdAt: savedAt,
+        setupStartedAt: savedAt,
         mode: "SIMULATOR",
         durationMinutes,
         date: parseLocalDate(input.date),
@@ -811,6 +826,10 @@ export async function listTeeSearchesForUser(userId: string) {
         return {
           ...visiblePreference,
           setupDeadlineAt: setupReceipt?.deadlineAt ?? getCourseSetupDeadline(search, preference.course.timeZone),
+          setupBookingOpensAt: current.mode === "SIMULATOR" && setupReceipt && preference.offering
+            ? readSavedSimulatorBookingOpening({ receipt: setupReceipt, offering: preference.offering,
+                targetDate: search.date.toISOString().slice(0, 10), timeZone: preference.course.timeZone })
+            : undefined,
           setupProbe,
           discoveryStatus: getDashboardDiscoveryStatus(current, preference,
             discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null, currentProbe),
@@ -1008,9 +1027,10 @@ export async function updateTeeSearchForUser(
         data: { rank: preference.rank },
       });
     }
-    const updatedAt = new Date();
+    const savedAt = await readSearchSaveTime(transaction);
     const setupStartedAt = availabilityChanged && currentCriteria
-      ? new Date(Math.max(updatedAt.getTime(), readCourseSetupStartedAt(currentCriteria).getTime() + 1))
+      // Receipt identity is unique per preference and millisecond. Keep history ordered.
+      ? new Date(Math.max(savedAt.getTime(), readCourseSetupStartedAt(currentCriteria).getTime() + 1))
       : lockedSearch.alertGeneration === 0 && !currentCriteria?.setupStartedAt ? currentCriteria?.createdAt : undefined;
     const updatedSearch = await transaction.teeSearch.update({
       where: {
@@ -1031,7 +1051,7 @@ export async function updateTeeSearchForUser(
               statusEmailSentAt: null,
               statusEmailSnapshot: buildAlertGenerationStartMarker({
                 alertGeneration: lockedSearch.alertGeneration + 1,
-                generationStartedAt: updatedAt,
+                generationStartedAt: savedAt,
               }),
             }
           : {}),
@@ -1387,7 +1407,8 @@ const searchListInclude = {
     include: {
       setupReceipts: {
         orderBy: { startedAt: "desc" }, take: 1,
-        select: { courseId: true, offeringId: true, startedAt: true, deadlineAt: true },
+        select: { courseId: true, offeringId: true, startedAt: true, deadlineAt: true, outcome: true,
+          legacy: true, closedAt: true, evidenceProbeId: true, evidenceObservedAt: true, request: true },
       },
       offering: true,
       course: {

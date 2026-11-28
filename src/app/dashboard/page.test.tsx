@@ -136,6 +136,23 @@ describe("dashboard course and simulator presentation", () => {
     expect(html).not.toContain('aria-label="Matching simulator sessions"');
   });
 
+  it("shows a saved verified simulator opening without an availability check", async () => {
+    const search = fixture("SIMULATOR", "Verified Booking Window");
+    const opensAt = new Date("2026-10-10T11:00:00Z");
+    const projected = { ...search, probes: [], matches: [], lastCheckedAt: null,
+      preferences: search.preferences.map(preference => ({ ...preference, setupDeadlineAt: now, setupBookingOpensAt: opensAt })) };
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue([projected] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    const dom = document.createElement("div");
+    dom.innerHTML = renderToStaticMarkup(await DashboardPage());
+    expect(dom.querySelector(".dashboard-alert-summary-copy")?.textContent).toContain("The public booking window has not opened yet.");
+    expect(dom.querySelector(".watch-course-availability")?.textContent).toContain("The public booking window has not opened yet.");
+    expect(dom.querySelector('a[href="https://official.example/booking"]')).not.toBeNull();
+
+    vi.setSystemTime(opensAt);
+    dom.innerHTML = renderToStaticMarkup(await DashboardPage());
+    expect(dom.querySelector(".dashboard-alert-summary-copy")?.textContent).toContain("Automatic availability not confirmed");
+  });
+
   it("shows golf matches outside the management accordion with search-style labels", async () => {
     const search = { ...fixture("GOLF", "Golf Matches"), matches: fixture("SIMULATOR", "Golf Matches").matches.map(match => ({ ...match, offeringId: null, offering: null })) };
     vi.mocked(listTeeSearchesForUser).mockResolvedValue([search] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);

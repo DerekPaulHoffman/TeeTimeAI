@@ -44,6 +44,7 @@ export function getSimulatorDashboardStatus(input: {
   website: string | null;
   now?: Date;
   setupDeadlineAt?: Date;
+  setupBookingOpensAt?: Date;
   discoveryStatus?: DashboardDiscoveryStatus | null;
 }) {
   const { offering, probe, currentMatchCount, alertStatus, windowEnded, website } = input;
@@ -52,7 +53,7 @@ export function getSimulatorDashboardStatus(input: {
   const summary = providerCheck?.rawSummary && typeof providerCheck.rawSummary === "object" && !Array.isArray(providerCheck.rawSummary)
     ? providerCheck.rawSummary as Record<string, unknown> : null;
   const verifiedRental = Boolean(offering?.kind === "SIMULATOR" && offering.active && offering.publicAccessStatus === "PUBLIC" &&
-    offering.verifiedAt && offering.verifiedAt <= now && offering.evidenceUrl);
+    offering.verifiedAt && offering.verifiedAt <= now && getSafeCustomerBookingUrl(offering.evidenceUrl));
   const healthy = verifiedRental && offering && offering.monitoringState === "HEALTHY" &&
     offering.automationEligibility === "ALLOWED" && offering.monitoringVerifiedAt && !offering.observationToken &&
     offering.monitoringVerifiedAt <= now && now.getTime() - offering.monitoringVerifiedAt.getTime() <= 30 * 60_000 &&
@@ -72,12 +73,14 @@ export function getSimulatorDashboardStatus(input: {
     offering.automationEligibility === "BLOCKED") || currentProbe && probe?.outcome === "MANUAL_DIRECT";
   const opensAt = typeof summary?.opensAt === "string" ? new Date(summary.opensAt) : null;
   const bookingNotOpen = hasExactSource && verifiedRental && summary?.bookingNotOpen === true && opensAt && opensAt > now;
+  const savedBookingNotOpen = verifiedRental && !current && input.setupBookingOpensAt && input.setupBookingOpensAt > now;
   const terminalDiscovery = input.discoveryStatus?.state === "TERMINAL_FAILURE" &&
     !(current && probe && probe.observedAt >= input.discoveryStatus.completedAt);
   const kind: SimulatorDashboardStatusKind = windowEnded ? "ENDED"
     : alertStatus === "PAUSED" ? "PAUSED"
     : alertStatus !== "ACTIVE" ? "STOPPED"
     : identityFinal || officialSiteOnly ? "UNAVAILABLE"
+    : savedBookingNotOpen ? "BOOKING_NOT_OPEN"
     : terminalDiscovery ? "UNCONFIRMED"
     : bookingNotOpen ? "BOOKING_NOT_OPEN"
     : current && currentMatchCount > 0 ? "AVAILABLE"
@@ -100,7 +103,7 @@ export function getSimulatorDashboardStatus(input: {
     : kind === "ADDING_SUPPORT" ? "Adding alert support"
     : kind === "RETRYING" ? "Availability check will retry"
     : "Simulator check pending";
-  const safeBookingUrl = getSafeCustomerBookingUrl(offering?.bookingUrl);
+  const safeBookingUrl = verifiedRental ? getSafeCustomerBookingUrl(offering?.bookingUrl) : undefined;
   return {
     kind,
     label,

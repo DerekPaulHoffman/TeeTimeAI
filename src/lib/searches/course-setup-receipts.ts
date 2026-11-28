@@ -10,6 +10,7 @@ import { getCourseSetupDeadline, readCourseSetupStartedAt } from "@/lib/searches
 import { classifyCourseSetupProbe } from "@/lib/searches/course-setup-proof";
 import { simulatorDurationsForSearch } from "@/lib/searches/simulator-duration";
 import { getSimulatorBookingOpening } from "@/lib/simulators/booking-window";
+import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 
 const LEGACY_SEARCH_LIMIT = 20;
 const DEADLINE_SWEEP_LIMIT = 100;
@@ -27,6 +28,7 @@ export const courseSetupSearchSelect = {
     kind: true, active: true, publicAccessStatus: true, monitoringState: true, automationEligibility: true,
     supportedDurationsMinutes: true, bookingUrl: true, verifiedAt: true, evidenceUrl: true,
     bookingWindowDaysAhead: true, bookingReleaseTimeLocal: true,
+    providerFamilyKey: true, providerMetadata: true, maxPartySize: true, monitoringMode: true,
   } } } },
 } satisfies Prisma.TeeSearchSelect;
 
@@ -57,7 +59,8 @@ function readVerifiedFactsAtSave(search: SetupSearch, preference: SetupSearch["p
     const opensAt = getSimulatorBookingOpening(search.date.toISOString().slice(0, 10), offering, course.timeZone);
     return evidenceUrl && opensAt && opensAt > startedAt ? {
       outcome: "BOOKING_NOT_OPEN" as const, evidenceAt: offering.verifiedAt,
-      facts: { kind: "VERIFIED_SIMULATOR_BOOKING_WINDOW", opensAt: opensAt.toISOString(), evidenceUrl },
+      facts: { kind: "VERIFIED_SIMULATOR_BOOKING_WINDOW", opensAt: opensAt.toISOString(), evidenceUrl,
+        sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering) },
     } : undefined;
   }
   if (course.isPublic !== true) return undefined;
@@ -165,7 +168,8 @@ export async function recordCourseSetupProbe(transaction: Prisma.TransactionClie
 }
 
 export async function recoverDueCourseSetupReceipts() {
-  const registeredLegacy = await prisma.$transaction(async transaction => {
+  const initialSweep = settleDueCourseSetupReceipts(DEADLINE_SWEEP_LIMIT);
+  const registration = prisma.$transaction(async transaction => {
     // Lock only surviving saved demand. This registers evidence boundaries
     // without changing a search status or scheduling any provider work.
     const missing = await transaction.$queryRaw<Array<{ id: string }>>`
@@ -190,11 +194,27 @@ export async function recoverDueCourseSetupReceipts() {
     for (const search of searches) count += await registerCourseSetupReceipts(transaction, search, { legacy: true });
     return count;
   });
-  const closed = await prisma.$queryRaw<Array<{ outcome: CourseSetupOutcome }>>`
+  // Existing saved deadlines stay independent of optional legacy registration.
+  const [sweepResult, registrationResult] = await Promise.allSettled([initialSweep, registration]);
+  if (sweepResult.status === "rejected") throw sweepResult.reason;
+  if (registrationResult.status === "rejected") throw registrationResult.reason;
+
+  const closed = sweepResult.value;
+  const registeredLegacy = registrationResult.value;
+  const remaining = DEADLINE_SWEEP_LIMIT - closed.length;
+  if (registeredLegacy > 0 && remaining > 0) {
+    closed.push(...await settleDueCourseSetupReceipts(remaining));
+  }
+  const legacyUnverified = closed.filter(receipt => receipt.outcome === "LEGACY_UNVERIFIED").length;
+  return { registeredLegacy, unconfirmed: closed.length - legacyUnverified, legacyUnverified };
+}
+
+async function settleDueCourseSetupReceipts(limit: number) {
+  return prisma.$queryRaw<Array<{ outcome: CourseSetupOutcome }>>`
     WITH due AS (
       SELECT id FROM "CourseSetupReceipt"
       WHERE outcome IS NULL AND "deadlineAt" <= statement_timestamp() AT TIME ZONE 'UTC'
-      ORDER BY "deadlineAt", id LIMIT ${DEADLINE_SWEEP_LIMIT} FOR UPDATE SKIP LOCKED
+      ORDER BY "deadlineAt", id LIMIT ${limit} FOR UPDATE SKIP LOCKED
     )
     UPDATE "CourseSetupReceipt" AS receipt
     SET outcome = CASE WHEN receipt.legacy THEN 'LEGACY_UNVERIFIED'::"CourseSetupOutcome"
@@ -203,6 +223,4 @@ export async function recoverDueCourseSetupReceipts() {
     FROM due WHERE receipt.id = due.id AND receipt.outcome IS NULL
     RETURNING receipt.outcome
   `;
-  const legacyUnverified = closed.filter(receipt => receipt.outcome === "LEGACY_UNVERIFIED").length;
-  return { registeredLegacy, unconfirmed: closed.length - legacyUnverified, legacyUnverified };
 }
