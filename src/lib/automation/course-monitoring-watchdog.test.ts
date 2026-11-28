@@ -5531,12 +5531,12 @@ describe("course monitoring watchdog", () => {
     );
   });
 
-  it("retains a cycle-scoped material-change parking decision without reopening or queueing searches", async () => {
+  it.each(["existing park", "exhausted infrastructure budget"] as const)("retains %s without reopening or queueing searches", async (reason) => {
     const parkedAt = new Date("2026-07-27T15:45:00.000Z");
     const parkedIncident = incident({
       cycle: 3,
       status: "NEEDS_HUMAN",
-      attemptLedger: null,
+      attemptLedger: reason === "exhausted infrastructure budget" ? renderedBrowserPendingLedger(3) : null,
       escalationDeadlineAt: new Date("2026-07-27T18:00:00.000Z"),
       humanReviewReason: "AUTOMATION_STALLED",
       escalatedAt: new Date("2026-07-27T15:30:00.000Z"),
@@ -5572,6 +5572,7 @@ describe("course monitoring watchdog", () => {
         customerState: "NEEDS_HUMAN_REVIEW",
         automationStalled: true,
         parkedUntilMaterialChange: true,
+        ...(reason === "exhausted infrastructure budget" ? { reason: "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED" } : {}),
       },
     });
     prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);

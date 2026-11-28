@@ -500,7 +500,10 @@ export async function planCourseSupportCourseDispatch(input: {
     // launch budget. The legacy background fallback must not interpret a zero
     // launch list as evidence that no active-alert course is waiting.
     if (availableStarts > 0 || live.length === 0) {
-      const outdoorCandidates = retryOf ? [] : (await listCourseSupportDispatchCandidates(now, tx))
+      const outdoorCandidates = retryOf ? [] : (await listCourseSupportDispatchCandidates(now, tx, {
+        parkExhaustedOrchestration: true,
+        occupiedCourseIds: occupiedCourses,
+      }))
         .filter(candidate => !activeBatches.some(batch => courseSupportAssignedCandidateConflicts(candidate, batch)));
       const dueSimulatorCandidates = retryOf && !retryTarget ? [] : await listSimulatorSupportDispatchCandidates(now, tx, retryTarget ?? undefined);
       const awakened = !retryOf && await reconcileSimulatorCapabilityWakeups(now, tx);

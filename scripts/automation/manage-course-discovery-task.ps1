@@ -17,6 +17,24 @@ $env:PSModulePath = (Join-Path $PSHOME 'Modules') + [IO.Path]::PathSeparator + $
 $taskPath = '\TeeTimeSpot\'
 $marker = 'Tee Time Spot course discovery supervisor; managed lifecycle v1'
 
+function Get-CourseDiscoveryRestartPrerequisites($Task) {
+  $pattern = '^-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "([^"]+)" -WorkspacePath "([^"]+)" -ConfigPath "([^"]+)" -NodePath "([^"]+)" -LogDirectory "([^"]+)"$'
+  $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  if (@($Task.Actions).Count -ne 1 -or $Task.Actions[0].Execute -ine $powershell -or $Task.Actions[0].Arguments -cnotmatch $pattern) { return 'TASK_ACTION_CHANGED' }
+  $launcher = $Matches[1]; $workspace = $Matches[2]; $config = $Matches[3]; $node = $Matches[4]
+  if ($Task.Actions[0].WorkingDirectory -ine $workspace -or
+      $launcher -ine (Join-Path $workspace 'scripts\automation\run-course-discovery-supervisor.ps1')) { return 'TASK_ACTION_CHANGED' }
+  if (-not (Test-Path -LiteralPath (Join-Path $workspace '.git')) -or
+      -not (Test-Path -LiteralPath $launcher -PathType Leaf) -or
+      -not (Test-Path -LiteralPath (Join-Path $workspace 'scripts\automation\course-discovery-supervisor.mjs') -PathType Leaf)) {
+    return 'MANAGED_RUNTIME_CHECKOUT_MISSING'
+  }
+  if (-not (Test-Path -LiteralPath $powershell -PathType Leaf) -or -not (Test-Path -LiteralPath $config -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $node -PathType Leaf) -or
+      -not (Test-Path -LiteralPath (Join-Path $workspace 'node_modules\@openai\codex\package.json') -PathType Leaf)) { return 'RUNTIME_FILES_MISSING' }
+  return 'PRESENT'
+}
+
 function ConvertTo-CourseDiscoveryHeartbeatInstant {
   param($Value)
   # Windows PowerShell keeps JSON timestamps as strings, while PowerShell 7
@@ -46,6 +64,7 @@ try {
     $summary.lastTaskResult = $info.LastTaskResult
     $summary.lastRunTime = $info.LastRunTime.ToString('o')
     $summary.existingExecutable = [string]$existing.Actions[0].Execute
+    $summary.restartPrerequisites = Get-CourseDiscoveryRestartPrerequisites $existing
     if (-not $LogDirectory -and $existing.Actions[0].Arguments -match '-LogDirectory "([^"]+)"') { $LogDirectory = $Matches[1] }
   }
   $plannedAction = $null
@@ -127,7 +146,10 @@ try {
   } else {
     if (-not $existing) { throw 'MANAGED_TASK_NOT_FOUND' }
     switch ($Action) {
-      'Start' { Start-ScheduledTask -InputObject $existing }
+      'Start' {
+        if ($summary.restartPrerequisites -ne 'PRESENT') { throw $summary.restartPrerequisites }
+        Start-ScheduledTask -InputObject $existing
+      }
       'Stop' { Stop-ScheduledTask -InputObject $existing }
       'Disable' { Stop-ScheduledTask -InputObject $existing; Disable-ScheduledTask -InputObject $existing | Out-Null }
       'Uninstall' { Stop-ScheduledTask -InputObject $existing; Unregister-ScheduledTask -InputObject $existing -Confirm:$false }

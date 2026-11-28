@@ -4637,6 +4637,10 @@ export async function reconcileCourseMonitoringDeadline(input: {
         status.state === "ENGINEERING_VERIFICATION_NEEDED" &&
         status.nextAutomaticAttemptAt === null &&
         status.revalidationRequestedAt === null;
+      if (parkedWithoutNewMaterial && durableMaterialChangeParking &&
+          asMonitoringJsonRecord(humanReviewEndpointEvent?.audit).reason === "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED") {
+        return { outcome: "RETAINED_PARKED" as const, incidentId: incident.id };
+      }
       if (
         parkedWithoutNewMaterial &&
         durableAutomationStalledEndpoint &&

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
@@ -23,6 +23,66 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
   });
 
   afterAll(async () => { if (database) await database.$disconnect(); });
+
+  it("parks repeated outdoor infrastructure misses through the dispatcher without reopening on the hosted watchdog", async () => {
+    const now = new Date();
+    const key = randomUUID();
+    const releases = ["e".repeat(40), "f".repeat(40)];
+    const course = await database.course.create({ data: {
+      name: `Orchestration fixture ${key}`, latitude: 41, longitude: -73, timeZone: "America/New_York",
+      website: "https://course.example.test/", detectedBookingUrl: "https://course.example.test/book",
+      isPublic: true, detectedPlatform: "UNKNOWN", providerFamilyKey: "GENERIC_PUBLIC_FIXTURE",
+    } });
+    const incident = await database.courseSupportIncident.create({ data: {
+      reference: key, courseId: course.id, courseNameSnapshot: course.name, platformSnapshot: course.detectedPlatform,
+      providerFamilyKey: course.providerFamilyKey!, failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
+      kind: "NEEDS_ADAPTER", failureClass: "UNSUPPORTED_FAMILY", engineeringOnly: true,
+      confirmedAt: new Date(now.getTime() - 120_000), firstSeenAt: new Date(now.getTime() - 120_000),
+      nextAttemptAt: now, attemptCount: 2,
+    } });
+    const batchIds: string[] = [];
+    try {
+      await database.courseMonitoringStatus.create({ data: {
+        courseId: course.id, reference: key, state: "AUTO_INVESTIGATING", nextAutomaticAttemptAt: now,
+      } });
+      const { buildCourseSupportProviderSnapshotFingerprint } = await import("@/lib/automation/course-support-verification");
+      const { planCourseSupportCourseDispatch } = await import("@/lib/automation/course-support-course-dispatch");
+      const { reconcileCourseMonitoringDeadline } = await import("@/lib/automation/course-monitoring");
+      for (const [index, baseSha] of releases.entries()) {
+        const completedAt = new Date(now.getTime() - (2 - index) * 1_000);
+        const batch = await database.courseSupportBatch.create({ data: {
+          reference: `${key}-${index}`, providerFamilyKey: incident.providerFamilyKey, failureFingerprint: incident.failureFingerprint,
+          status: "RETRYABLE_FAILED", ownerThreadId: `fixture-owner-${index}`, leaseToken: randomUUID(),
+          baseSha, leaseExpiresAt: completedAt, heartbeatAt: completedAt, completedAt,
+          incidents: { create: { incidentId: incident.id, courseId: course.id, cycle: 1, result: "RETRY_SCHEDULED", createdAt: completedAt } },
+          summary: { closeout: { orchestrationOnly: true, remediationAttempts: [{
+            courseRef: createHash("sha256").update(course.id).digest("hex").slice(0, 24),
+            providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(course), failureFingerprint: incident.failureFingerprint,
+            runtimeVersion: baseSha, activeRealSearchCount: 0, consumed: false, countsTowardOperationalNoProgress: false,
+            approach: { workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_HTTP", playbookStage: "OFFICIAL_IDENTITY" },
+            executionEvidence: { claimedImplementationPaths: false, newReleaseRecorded: false, deploymentRecorded: false,
+              postProbeRecorded: false, providerAttemptRecorded: false, providerExecutionAttemptRecorded: false,
+              playbookAttemptRecorded: false, terminalResultRecorded: false, providerExecutionStarted: false },
+          }] } },
+        } });
+        batchIds.push(batch.id);
+      }
+      const planner = () => planCourseSupportCourseDispatch({ ownerThreadId: "fixture-dispatcher", baseSha: "a".repeat(40), now });
+      expect(await planner()).toMatchObject({ acquired: true, value: { launchItems: [], reservedCount: 0 } });
+      expect(await reconcileCourseMonitoringDeadline({ courseId: course.id, source: "RECOVERY_CRON", now }))
+        .toMatchObject({ outcome: "RETAINED_PARKED", incidentId: incident.id });
+      expect(await planner()).toMatchObject({ acquired: true, value: { launchItems: [], reservedCount: 0 } });
+      const parked = await database.courseSupportIncident.findUniqueOrThrow({ where: { id: incident.id } });
+      expect(parked).toMatchObject({ status: "NEEDS_HUMAN", nextAttemptAt: null, activeBatchId: null, attemptCount: 2 });
+      const events = await database.courseMonitoringEvent.findMany({ where: { incidentId: incident.id } });
+      expect(events).toHaveLength(1);
+      expect(events[0]?.audit).toMatchObject({ reason: "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED", operationalRetryBudgetExhausted: false });
+      expect(await database.courseSupportBatch.count({ where: { id: { in: batchIds }, status: "RETRYABLE_FAILED" } })).toBe(2);
+    } finally {
+      await database.courseSupportBatch.deleteMany({ where: { id: { in: batchIds } } });
+      await database.course.delete({ where: { id: course.id } });
+    }
+  }, 20_000);
 
   it("settles five saved courses with the learner offline, fences late writes, and preserves a later verified result", async () => {
     const now = new Date();

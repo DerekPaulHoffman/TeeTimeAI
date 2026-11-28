@@ -147,6 +147,14 @@ Start -Apply` for the initial run. `-Action Inspect` is read-only. `Start`,
 script inspects the exact existing task name and refuses to overwrite a task
 without its managed marker.
 
+Inspect reports polling health and `restartPrerequisites` separately. A running
+supervisor can keep polling with loaded code after its checkout disappears. Use
+the inspector from a verified, available checkout. `MANAGED_RUNTIME_CHECKOUT_MISSING`
+requires restoring or replacing the managed checkout before stopping the current
+process. `PRESENT` confirms file presence. The wrapper still validates the
+checkout, protected configuration and runtime, and a release still requires a
+fresh heartbeat from the restarted supervisor.
+
 The default log directory is `logs` beside the protected configuration file;
 `-LogDirectory` can select another external directory. The wrapper writes only
 projected JSON events and model/runtime metrics to a UTC-dated `.jsonl` file,

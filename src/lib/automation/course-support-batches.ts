@@ -176,6 +176,7 @@ import {
   countCourseSupportCompletedOrchestrationOnlyAttempts,
   getCourseSupportOrchestrationRetrySchedule,
   isCourseSupportAssignedAdapterOrchestrationMiss,
+  isCourseSupportCompletedBatchOrchestrationOnly,
   isCourseSupportVerificationRequestUnstarted,
   readCourseSupportReleaseExecutionEvidence,
 } from "./course-support-zero-execution";
@@ -1501,6 +1502,7 @@ type PersistedCourseSupportRemediationAttempt = {
 };
 
 const COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET = 2;
+const COURSE_SUPPORT_ORCHESTRATION_ATTEMPT_LIMIT = 2;
 const COURSE_SUPPORT_OPERATIONAL_RETRY_DELAY_MS = 60 * 1000;
 
 
@@ -2090,6 +2092,47 @@ function applyCourseSupportOperationalRetryBudget(input: {
     requiresImplementationPath: false,
     reason: "OPERATIONAL_RETRY_BUDGET_EXHAUSTED" as const
   } satisfies CourseSupportRemediationRoute;
+}
+
+function applyCourseSupportOrchestrationRetryBudget(input: {
+  route: CourseSupportRemediationRoute;
+  batchIncidents: readonly { batchId?: string; batch: { summary: unknown }; verificationRequests?: readonly { status: string; evidence: unknown }[] }[];
+  courseId: string;
+  providerSnapshotFingerprint: string;
+  failureFingerprint: string;
+}): CourseSupportRemediationRoute {
+  const { route, batchIncidents, courseId, providerSnapshotFingerprint, failureFingerprint } = input;
+  if (route.workMode === "WAIT_FOR_MATERIAL_CHANGE" || !route.attemptSignature) return route;
+
+  const recent = batchIncidents.slice(0, COURSE_SUPPORT_ORCHESTRATION_ATTEMPT_LIMIT);
+  const batchIds = new Set(recent.map(entry => entry.batchId).filter(Boolean));
+  if (batchIds.size !== COURSE_SUPPORT_ORCHESTRATION_ATTEMPT_LIMIT || !recent.every(({ batch, verificationRequests }) => {
+    if (verificationRequests?.some(request => request.status === "QUEUED" || request.status === "CHECKING" ||
+        asJsonObject(request.evidence).providerExecution === true)) return false;
+    const attempt = readPersistedCourseSupportRemediationAttemptRecord({ courseId, summary: batch.summary });
+    if (!attempt || attempt.consumed || attempt.countsTowardOperationalNoProgress !== false ||
+        attempt.providerSnapshotFingerprint !== providerSnapshotFingerprint || attempt.failureFingerprint !== failureFingerprint ||
+        !isSameCourseSupportRemediationApproach(attempt.approach, route.attemptSignature)) return false;
+    const closeout = asJsonObject(asJsonObject(batch.summary).closeout);
+    const matching = Array.isArray(closeout.remediationAttempts) ? closeout.remediationAttempts.filter(
+      entry => asJsonObject(entry).courseRef === attempt.courseRef,
+    ) : [];
+    if (matching.length !== 1) return false;
+    const execution = readExactCourseSupportDecisionExecutionEvidenceShape(asJsonObject(matching[0]).executionEvidence);
+    return isCourseSupportCompletedBatchOrchestrationOnly({ courseId, summary: batch.summary }) && execution &&
+      (Object.values(execution).every(value => value === false) ||
+        isCourseSupportAssignedAdapterOrchestrationMiss({ approach: attempt.approach, executionEvidence: execution }));
+  })) return route;
+
+  return {
+    ...route,
+    workMode: "WAIT_FOR_MATERIAL_CHANGE",
+    resumeWorkMode: route.workMode,
+    allowUnchangedRuntime: false,
+    requiresImplementationPath: false,
+    retryBudget: null,
+    reason: "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED",
+  };
 }
 
 export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
@@ -10355,6 +10398,7 @@ const COURSE_SUPPORT_DECISION_ROUTING_REASONS = new Set<
   "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
   "STARTED_LOCAL_READER_CONTINUATION",
   "OPERATIONAL_RETRY_BUDGET_EXHAUSTED",
+  "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED",
   "MATERIAL_CHANGE_REOPENED",
 ]);
 
@@ -17743,19 +17787,25 @@ function getSafeEvidenceOrigin(value: string) {
 export async function parkCourseSupportCandidatesForMaterialChange(
   candidates: CourseSupportCandidate[],
   now: Date,
+  dispatchTransaction?: Prisma.TransactionClient,
 ) {
   if (candidates.length === 0) {
     return 0;
   }
+  const writeParking = dispatchTransaction ? async (
+    courseId: string,
+    worker: (transaction: Prisma.TransactionClient) => Promise<boolean>,
+  ) => {
+    await acquireCourseMonitoringWriteLockInTransaction(dispatchTransaction, courseId);
+    return worker(dispatchTransaction);
+  } : runSerializedCourseMonitoringWrite;
   let parkedCount = 0;
   for (const candidate of candidates) {
     const route = candidate.remediationRoute;
     if (!route || route.workMode !== "WAIT_FOR_MATERIAL_CHANGE") {
       continue;
     }
-    const parked = await runSerializedCourseMonitoringWrite(
-      candidate.courseId,
-      async (transaction) => {
+    const parked = await writeParking(candidate.courseId, async (transaction) => {
         if (!hasCourseMonitoringPersistence(transaction)) {
           return false;
         }
@@ -18006,13 +18056,16 @@ export async function parkCourseSupportCandidatesForMaterialChange(
                 route.reason === "TRANSIENT_RETRY_BUDGET_EXHAUSTED",
               operationalRetryBudgetExhausted:
                 route.reason === "OPERATIONAL_RETRY_BUDGET_EXHAUSTED",
+              ...(route.reason === "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED" ? {
+                orchestrationRetryBudgetExhausted: true,
+                orchestrationAttemptLimit: COURSE_SUPPORT_ORCHESTRATION_ATTEMPT_LIMIT,
+              } : {}),
               customerDataIncluded: false,
             },
           },
         });
         return true;
-      },
-    );
+    });
     if (parked) {
       parkedCount += 1;
     }
@@ -18133,8 +18186,17 @@ async function listCourseSupportClaimCandidates(
 export async function listCourseSupportDispatchCandidates(
   now: Date,
   client: Prisma.TransactionClient = prisma,
+  options?: { parkExhaustedOrchestration: true; occupiedCourseIds?: ReadonlySet<string> },
 ) {
   const read = await listCourseSupportClaimCandidates(now, client);
+  if (options?.parkExhaustedOrchestration) {
+    // Keep lock order consistent across dispatches and bound writes per tick.
+    const exhausted = read.candidates.filter((candidate) =>
+      candidate.remediationRoute?.reason === "ORCHESTRATION_RETRY_BUDGET_EXHAUSTED" &&
+      !options.occupiedCourseIds?.has(candidate.courseId),
+    ).sort((left, right) => left.courseId.localeCompare(right.courseId)).slice(0, 5);
+    await parkCourseSupportCandidatesForMaterialChange(exhausted, now, client);
+  }
   return read.candidates
     .filter((candidate) =>
       candidate.remediationRoute?.workMode !== "WAIT_FOR_MATERIAL_CHANGE" &&
@@ -20089,7 +20151,7 @@ function buildCourseSupportCandidates(
             ),
         })
       : 0;
-    const remediationRoute = sourceCompleteFinalizationRecovery
+    const nextRoute = sourceCompleteFinalizationRecovery
       ? buildSourceCompleteFinalizationRecoveryRoute(routedRemediation)
       : deferredFailureHandoff
       ? ({
@@ -20117,6 +20179,10 @@ function buildCourseSupportCandidates(
           route: routedRemediation,
           attemptsCompleted: operationalAttemptsCompleted,
         });
+    const remediationRoute = sourceCompleteFinalizationRecovery ? nextRoute : applyCourseSupportOrchestrationRetryBudget({
+      route: nextRoute, batchIncidents: currentCycleBatchIncidents, courseId: incident.courseId,
+      providerSnapshotFingerprint, failureFingerprint: incident.failureFingerprint,
+    });
     const actionPlan = buildCourseSupportClaimActionPlan({
       route: remediationRoute,
       incidentKind: incident.kind,
@@ -20137,10 +20203,10 @@ function buildCourseSupportCandidates(
         : undefined;
     if (
       deferredFailureHandoff &&
-      (remediationRoute.workMode !== "VERIFY_TRANSIENT" ||
-        remediationRoute.requiresImplementationPath ||
-        remediationRoute.reason !== "MATERIAL_CHANGE_REOPENED" ||
-        remediationRoute.attemptSignature?.playbookStage !== null)
+      (nextRoute.workMode !== "VERIFY_TRANSIENT" ||
+        nextRoute.requiresImplementationPath ||
+        nextRoute.reason !== "MATERIAL_CHANGE_REOPENED" ||
+        nextRoute.attemptSignature?.playbookStage !== null)
     ) {
       return [];
     }
