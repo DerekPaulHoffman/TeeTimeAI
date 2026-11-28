@@ -109,6 +109,16 @@ enum ProbeOutcome {
   IDENTITY_RECHECK
 }
 
+enum CourseSetupOutcome {
+  MATCHES_AVAILABLE
+  NO_OPENINGS
+  BOOKING_NOT_OPEN
+  DIRECT_ACTION
+  UNCONFIRMED
+  LEGACY_UNVERIFIED
+  SUPERSEDED
+}
+
 enum AutomationRunKind {
   SEARCH_CHECK
   COURSE_SUPPORT
@@ -884,11 +894,32 @@ model CoursePreference {
   teeSearch                 TeeSearch       @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
   course                    Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
   offering                  CourseOffering? @relation(fields: [offeringId], references: [id], onDelete: SetNull)
+  setupReceipts             CourseSetupReceipt[]
 
   @@unique([teeSearchId, courseId])
   @@unique([teeSearchId, rank])
   @@index([courseId])
   @@index([offeringId])
+}
+
+model CourseSetupReceipt {
+  id                 String              @id @default(cuid())
+  preferenceId       String
+  courseId           String
+  offeringId         String?
+  request            Json
+  startedAt          DateTime
+  deadlineAt         DateTime
+  registeredAt       DateTime            @default(now())
+  closedAt           DateTime?
+  outcome            CourseSetupOutcome?
+  evidenceProbeId    String?
+  evidenceObservedAt DateTime?
+  legacy             Boolean             @default(false)
+  preference         CoursePreference    @relation(fields: [preferenceId], references: [id], onDelete: Cascade)
+
+  @@unique([preferenceId, startedAt])
+  @@index([outcome, deadlineAt])
 }
 
 model CourseProbe {

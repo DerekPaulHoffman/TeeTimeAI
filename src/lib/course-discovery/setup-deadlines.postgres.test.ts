@@ -24,6 +24,93 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
 
   afterAll(async () => { if (database) await database.$disconnect(); });
 
+  it("settles saved course receipts once through checked writes and the hosted watchdog without any discovery job", async () => {
+    const key = randomUUID();
+    const user = await database.user.create({ data: { email: `${key}@example.test`, clerkUserId: key } });
+    const courses = await Promise.all(["empty", "ambiguous", "restricted"].map(name => database.course.create({ data: {
+      name: `${name} ${key}`, latitude: 41, longitude: -73, timeZone: "UTC",
+      website: "https://course.example.test/", isPublic: true,
+    } })));
+    const day = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
+    const { createTeeSearchForUser, listTeeSearchesForUser, updateTeeSearchForUser } = await import("@/lib/searches/service");
+    const { recordCourseProbe } = await import("@/lib/automation/db-service");
+    const { withSearchCheckWriteContext } = await import("@/lib/automation/search-check-write-context");
+    const { GET } = await import("@/app/api/cron/recover-course-support-verifications/route");
+    const network = vi.fn(async () => { throw new Error("NO_EXTERNAL_REQUESTS"); });
+    vi.stubGlobal("fetch", network);
+    vi.stubEnv("CRON_SECRET", key);
+    try {
+      const search = await createTeeSearchForUser(user.id, {
+        mode: "OUTDOOR", date: day, startTime: "10:00", endTime: "15:00", players: 2,
+        userTimeZone: "UTC", cadenceMinutes: 5, additionalEmails: [],
+        courses: courses.map((course, index) => ({ courseId: course.id, name: course.name, rank: index + 1,
+          latitude: course.latitude, longitude: course.longitude })),
+      }, "TEST", true);
+      const scope = { preference: { teeSearchId: search.id } };
+      const stored = () => database.courseSetupReceipt.findMany({ where: scope, orderBy: { startedAt: "asc" } });
+      const initial = await stored();
+      expect(initial).toHaveLength(3);
+      expect(initial.every(row => row.outcome === null && row.deadlineAt.getTime() - row.startedAt.getTime() === 900_000)).toBe(true);
+      const lease = { searchId: search.id, scheduleVersion: search.scheduleVersion, leaseToken: key };
+      await database.teeSearch.update({ where: { id: search.id }, data: {
+        checkStatus: "CHECKING", checkLeaseToken: key, checkLeaseExpiresAt: new Date(Date.now() + 120_000),
+      } });
+      const observedAt = new Date().toISOString();
+      const evidence = { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: observedAt,
+        publicAvailability: { date: day, confirmedAt: observedAt, times: [] } };
+      const empty = await withSearchCheckWriteContext(lease, () => recordCourseProbe({
+        searchId: search.id, courseId: courses[0].id, outcome: "NO_MATCH", rawSummary: evidence,
+      }));
+      const ambiguous = await withSearchCheckWriteContext(lease, () => recordCourseProbe({
+        searchId: search.id, courseId: courses[1].id, outcome: "NEEDS_ADAPTER",
+      }));
+      const access = await withSearchCheckWriteContext(lease, () => recordCourseProbe({
+        searchId: search.id, courseId: courses[2].id, outcome: "BLOCKED_AUTH",
+        rawSummary: { monitoringDisposition: "TECHNICAL_FINAL", verifiedAccessRestriction: true },
+      }));
+      const byCourse = (rows: Awaited<ReturnType<typeof stored>>, index: number) => rows.find(row => row.courseId === courses[index].id)!;
+      const onTime = await stored();
+      expect(byCourse(onTime, 0)).toMatchObject({ outcome: "NO_OPENINGS", evidenceProbeId: empty.id });
+      expect(byCourse(onTime, 0).closedAt!.getTime() - search.setupStartedAt!.getTime()).toBeLessThan(15_000);
+      expect(byCourse(onTime, 2)).toMatchObject({ outcome: "DIRECT_ACTION", evidenceProbeId: access.id });
+      expect(byCourse(onTime, 1).outcome).toBeNull();
+
+      // Advance the quiet course to its cutoff without sleeping fifteen minutes.
+      await database.courseSetupReceipt.update({ where: { id: byCourse(onTime, 1).id },
+        data: { deadlineAt: new Date(Date.now() - 1) } });
+      const tick = () => GET(new Request("http://localhost/api/cron/recover-course-support-verifications", {
+        headers: { authorization: `Bearer ${key}` },
+      }));
+      const ticks = await Promise.all([tick(), tick()]);
+      expect(ticks.map(result => result.status)).toEqual([200, 200]);
+      const reports = await Promise.all(ticks.map(result => result.json()));
+      expect(reports.reduce((total, report) => total + report.setupDeadlines.unconfirmed, 0)).toBe(1);
+      const timedOut = byCourse(await stored(), 1);
+      expect(timedOut).toMatchObject({ outcome: "UNCONFIRMED", evidenceProbeId: ambiguous.id });
+
+      await withSearchCheckWriteContext(lease, () => recordCourseProbe({
+        searchId: search.id, courseId: courses[1].id, outcome: "NO_MATCH", rawSummary: evidence,
+      }));
+      const [current] = await listTeeSearchesForUser(user.id);
+      expect(current.probes.find(probe => probe.courseId === courses[1].id)?.outcome).toBe("NO_MATCH");
+      expect(byCourse(await stored(), 1)).toEqual(timedOut);
+
+      await updateTeeSearchForUser(user.id, search.id, { startTime: "11:00" });
+      const all = await stored();
+      expect(all).toHaveLength(6);
+      expect(all.slice(3).every(row => row.outcome === null && row.startedAt > initial[0].startedAt)).toBe(true);
+      expect(all.find(row => row.id === timedOut.id)).toEqual(timedOut);
+      expect(await database.courseDiscoveryJob.count({ where: { courseId: { in: courses.map(course => course.id) } } })).toBe(0);
+      expect(await database.searchEmailDelivery.count({ where: { teeSearchId: search.id } })).toBe(0);
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      await database.user.delete({ where: { id: user.id } });
+      await database.course.deleteMany({ where: { id: { in: courses.map(course => course.id) } } });
+    }
+  }, 15_000);
+
   it("parks repeated outdoor infrastructure misses through the dispatcher without reopening on the hosted watchdog", async () => {
     const now = new Date();
     const key = randomUUID();
@@ -84,6 +171,74 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
     }
   }, 20_000);
 
+  it("reconciles a legacy search without reopening or scheduling ended demand", async () => {
+    const key = randomUUID();
+    const old = new Date(Date.now() - 86_400_000);
+    const user = await database.user.create({ data: { email: `${key}@example.test`, clerkUserId: key } });
+    const course = await database.course.create({ data: {
+      name: `Legacy fixture ${key}`, latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true,
+    } });
+    try {
+      const [pending, ended] = await Promise.all((["ACTIVE", "CANCELLED"] as const).map(status => database.teeSearch.create({ data: {
+        userId: user.id, createdAt: old, date: old, startTime: "09:00", endTime: "10:00", players: 2, status,
+        trafficClass: "TEST", preferences: { create: { courseId: course.id, rank: 1 } },
+      } })));
+      const { recoverDueCourseSetupReceipts } = await import("@/lib/searches/course-setup-receipts");
+      expect(await recoverDueCourseSetupReceipts()).toMatchObject({ registeredLegacy: 1, legacyUnverified: 1 });
+      const oldReceipt = await database.courseSetupReceipt.findFirstOrThrow({ where: { preference: { teeSearchId: pending.id } } });
+      expect(oldReceipt).toMatchObject({ legacy: true, startedAt: old, outcome: "LEGACY_UNVERIFIED", evidenceProbeId: null });
+      expect(await recoverDueCourseSetupReceipts()).toMatchObject({ registeredLegacy: 0, legacyUnverified: 0 });
+      expect(await database.courseSetupReceipt.count({ where: { preference: { teeSearchId: ended.id } } })).toBe(0);
+      expect(await database.teeSearch.findUniqueOrThrow({ where: { id: ended.id } })).toMatchObject({
+        status: "CANCELLED", workflowRunId: null, nextCheckAt: null,
+      });
+      expect(await database.courseDiscoveryJob.count({ where: { courseId: course.id } })).toBe(0);
+    } finally {
+      await database.user.delete({ where: { id: user.id } });
+      await database.course.delete({ where: { id: course.id } });
+    }
+  });
+
+  it("preserves already verified booking-window and direct-action facts even with no check", async () => {
+    const key = randomUUID();
+    const verifiedAt = new Date(Date.now() - 60_000);
+    const day = new Date(Date.now() + 172_800_000).toISOString().slice(0, 10);
+    const user = await database.user.create({ data: { email: `${key}@example.test`, clerkUserId: key } });
+    const identity = { latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true,
+      website: "https://course.example.test/" };
+    const courses = await Promise.all([
+      database.course.create({ data: { ...identity, name: `Published window ${key}`,
+        bookingWindowDaysAhead: 0, bookingReleaseTimeLocal: "08:00", bookingWindowSource: "PROVIDER_CONFIG",
+        bookingWindowConfidence: 1, bookingWindowObservedAt: verifiedAt,
+        bookingWindowEvidenceUrl: "https://course.example.test/window" } }),
+      database.course.create({ data: { ...identity, name: `Access restriction ${key}`,
+        automationEligibility: "BLOCKED", automationReason: "ACCOUNT_REQUIRED", bookingAccessMode: "ACCOUNT_REQUIRED",
+        intelligenceConfidence: 1, intelligenceVerifiedAt: verifiedAt, intelligenceReviewAt: new Date(Date.now() + 86_400_000) } }),
+    ]);
+    try {
+      const { createTeeSearchForUser } = await import("@/lib/searches/service");
+      const saved = await createTeeSearchForUser(user.id, {
+        mode: "OUTDOOR", date: day, startTime: "10:00", endTime: "15:00", players: 2,
+        userTimeZone: "UTC", cadenceMinutes: 5, additionalEmails: [],
+        courses: courses.map((course, index) => ({ courseId: course.id, name: course.name, rank: index + 1,
+          latitude: course.latitude, longitude: course.longitude })),
+      }, "TEST", true);
+      const rows = await database.courseSetupReceipt.findMany({ where: { preference: { teeSearchId: saved.id } } });
+      expect(rows.find(row => row.courseId === courses[0].id)).toMatchObject({
+        outcome: "BOOKING_NOT_OPEN", closedAt: saved.setupStartedAt, evidenceObservedAt: verifiedAt,
+        request: { factsAtSave: { source: "PROVIDER_CONFIG", opensAt: `${day}T08:00:00.000Z` } },
+      });
+      expect(rows.find(row => row.courseId === courses[1].id)).toMatchObject({
+        outcome: "DIRECT_ACTION", closedAt: saved.setupStartedAt, evidenceObservedAt: verifiedAt,
+        request: { factsAtSave: { disposition: "TECHNICAL_FINAL", reason: "ACCOUNT_REQUIRED" } },
+      });
+      expect(await database.courseProbe.count({ where: { teeSearchId: saved.id } })).toBe(0);
+    } finally {
+      await database.user.delete({ where: { id: user.id } });
+      await database.course.deleteMany({ where: { id: { in: courses.map(course => course.id) } } });
+    }
+  });
+
   it("settles five saved courses with the learner offline, fences late writes, and preserves a later verified result", async () => {
     const now = new Date();
     const savedAt = new Date(now.getTime() - 16 * 60_000);
@@ -115,6 +270,8 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
       expect(search.preferences).toHaveLength(5);
       // Use persisted times to simulate queue wait while keeping the actual save and read paths.
       await database.teeSearch.update({ where: { id: search.id }, data: { createdAt: savedAt, setupStartedAt: savedAt } });
+      await database.courseSetupReceipt.updateMany({ where: { preference: { teeSearchId: search.id } },
+        data: { startedAt: savedAt, deadlineAt: deadline, registeredAt: savedAt } });
       const jobs = await Promise.all([0, 1, 2].map(async index => {
         const course = courses[index];
         return database.courseDiscoveryJob.create({ data: {

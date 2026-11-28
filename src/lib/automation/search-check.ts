@@ -1239,6 +1239,8 @@ async function checkSearch(
             rawSummary: {
               monitoringDisposition: monitoringGate.disposition,
               automationReason: course.automationReason,
+              ...(outcome === "BLOCKED_AUTH" && ["ACCOUNT_REQUIRED", "ACCOUNT_SELF_SERVICE", "ACCOUNT_STAFF_PROVISIONED",
+                "CAPTCHA_OR_QUEUE"].includes(course.bookingAccessMode) ? { verifiedAccessRestriction: true } : {}),
             },
           });
           courseResults.push({
@@ -4483,6 +4485,7 @@ async function recordBookingWindowWaitingProbe(input: {
         ? `Based on recent releases, online tee times for ${input.targetDate} usually appear around ${input.bookingWindow.releaseDate}.`
         : `Booking for ${input.targetDate} is expected to open on ${input.bookingWindow.releaseDate}; the exact release time is not published.`,
     rawSummary: {
+      targetDate: input.targetDate,
       ...(input.providerExecution
         ? { providerExecution: input.providerExecution }
         : {}),
@@ -4490,6 +4493,7 @@ async function recordBookingWindowWaitingProbe(input: {
         ? { providerObservedAt: input.providerObservedAt.toISOString() }
         : {}),
       bookingWindow: {
+        opensAt: input.bookingWindow.opensAt.toISOString(),
         releaseDate: input.bookingWindow.releaseDate,
         releaseTimeLocal: input.bookingWindow.releaseTimeLocal,
         timeZone: input.bookingWindow.timeZone,

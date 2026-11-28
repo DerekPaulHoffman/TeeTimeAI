@@ -6,7 +6,8 @@ import { prisma } from "@/lib/prisma";
 import { providerBookingMetadata } from "@/lib/courses/provider-booking-metadata";
 import { isSearchWindowActive } from "@/lib/automation/date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
-import { getCourseSetupDeadline } from "@/lib/searches/course-setup-deadline";
+import { getCourseSetupDeadline, readCourseSetupStartedAt } from "@/lib/searches/course-setup-deadline";
+import { readSavedCourseSetupDeadline } from "@/lib/searches/course-setup-receipts";
 import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 import { activeDiscoveryPilotSearchIds, isDiscoveryPilotSearch } from "./config";
 import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
@@ -179,7 +180,10 @@ function requestFor(source: Source, search: Search): DiscoveryRequest {
     ...(search.mode === "SIMULATOR" ? { durationMinutes: search.durationMinutes ?? 60 } : {}),
   }) };
 }
-function demandSetupDeadline(search: Search, source: Source, now: Date) {
+async function demandSetupDeadline(tx: Tx, search: Search, source: Source, now: Date) {
+  const saved = await readSavedCourseSetupDeadline(tx, { searchId: search.id, courseId: source.course.id,
+    offeringId: source.offering?.id ?? null, startedAt: readCourseSetupStartedAt(search) });
+  if (saved) return saved;
   const bookingCutoff = getCourseSetupDeadline(search, source.identity.timeZone);
   const syntheticExpiry = getSyntheticMultiCycleExpiresAt(search, now);
   return syntheticExpiry && syntheticExpiry < bookingCutoff ? syntheticExpiry : bookingCutoff;
@@ -249,7 +253,7 @@ export async function ensureDiscoveryJobInTransaction(tx: Tx, input: DiscoveryAd
     }
   }
   const key = targetKey(input);
-  const setupDeadlineAt = demandSetupDeadline(demand, source, now);
+  const setupDeadlineAt = await demandSetupDeadline(tx, demand, source, now);
   const existing = await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: key } });
   const sameSource = existing && existing.sourceFingerprint === source.sourceFingerprint && existing.baseRecipeId === source.activeRecipeId;
   const existingRequest = existing?.request as DiscoveryRequest | undefined;
@@ -556,7 +560,7 @@ export async function claimNextDiscoveryJob(workerId: string, runtimeVersion?: s
       const demand = current.setupDeadlineAt ? originalDemand : originalDemand ?? await currentDemand(tx, source, now);
       if (!demand) { await finish("CANCELLED", "NO_ACTIVE_DEMAND"); continue; }
       const request = requestFor(source, demand);
-      if (current.setupDeadlineAt && (current.setupDeadlineAt.getTime() !== demandSetupDeadline(demand, source, now).getTime() ||
+      if (current.setupDeadlineAt && (current.setupDeadlineAt.getTime() !== (await demandSetupDeadline(tx, demand, source, now)).getTime() ||
           !sameSetupIntent(previousRequest, request))) { await finish("CANCELLED", "DEMAND_CHANGED"); continue; }
       const ownership = await discoveryJobOwnership(tx, current, now);
       if (ownership.repairAuthorityLost) { await finish("CANCELLED", "REPAIR_AUTHORITY_CHANGED"); continue; }
@@ -604,7 +608,7 @@ async function owned(tx: Tx, jobId: string, leaseToken: string) {
   if (job.setupDeadlineAt && !request.demand) conflict();
   const demand = await currentDemand(tx, source, now, job.setupDeadlineAt ? request.demand?.searchId : undefined);
   if (source.sourceFingerprint !== job.sourceFingerprint || source.activeRecipeId !== job.baseRecipeId || !demand ||
-      job.setupDeadlineAt && (job.setupDeadlineAt.getTime() !== demandSetupDeadline(demand, source, now).getTime() ||
+      job.setupDeadlineAt && (job.setupDeadlineAt.getTime() !== (await demandSetupDeadline(tx, demand, source, now)).getTime() ||
         !sameSetupIntent(request, requestFor(source, demand))) ||
       (await discoveryJobOwnership(tx, job, now)).blocked) conflict();
   return { job, now, source };

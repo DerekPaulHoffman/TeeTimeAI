@@ -51,7 +51,8 @@ import {
   type CurrentMatchSettings,
 } from "@/lib/searches/current-match-settings";
 import { getCourseSetupProbe, projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
-import { getCourseSetupDeadline } from "@/lib/searches/course-setup-deadline";
+import { getCourseSetupDeadline, readCourseSetupStartedAt } from "@/lib/searches/course-setup-deadline";
+import { registerCourseSetupReceipts } from "@/lib/searches/course-setup-receipts";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
 import { assertSimulatorSessionFitsWindow } from "@/lib/searches/simulator-window";
@@ -161,6 +162,7 @@ export async function createTeeSearchForUser(
       },
       include: searchInclude,
     });
+    await registerCourseSetupReceipts(transaction, created);
     await enrollDiscoveryPilotInTransaction(transaction, created);
     await enqueueOperatorNotification(transaction, created);
     return created;
@@ -341,6 +343,7 @@ async function createSimulatorTeeSearchForUser(
       },
       include: searchInclude,
     });
+    await registerCourseSetupReceipts(transaction, created);
     await enrollDiscoveryPilotInTransaction(transaction, created);
     await enqueueOperatorNotification(transaction, created);
     return created;
@@ -794,14 +797,18 @@ export async function listTeeSearchesForUser(userId: string) {
         providerObservationFences,
       );
       return { ...current, preferences: current.preferences.map(preference => {
+        const { setupReceipts, ...visiblePreference } = preference;
+        const setupReceipt = setupReceipts?.find(receipt =>
+          receipt.startedAt.getTime() === readCourseSetupStartedAt(search).getTime() &&
+          receipt.courseId === preference.courseId && receipt.offeringId === preference.offeringId);
         const matchesTarget = (probe: typeof probes[number]) => probe.courseId === preference.courseId &&
           (current.mode !== "SIMULATOR" || (probe.offeringId !== null && probe.offeringId === preference.offeringId));
         const currentProbe = current.probes.find(matchesTarget);
         const setupProbe = search.status === "ACTIVE" && !currentProbe
           ? getCourseSetupProbe(search, probes.find(matchesTarget)) : undefined;
         return {
-          ...preference,
-          setupDeadlineAt: getCourseSetupDeadline(search, preference.course.timeZone),
+          ...visiblePreference,
+          setupDeadlineAt: setupReceipt?.deadlineAt ?? getCourseSetupDeadline(search, preference.course.timeZone),
           setupProbe,
           discoveryStatus: getDashboardDiscoveryStatus(current, preference,
             discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null, currentProbe),
@@ -1000,7 +1007,8 @@ export async function updateTeeSearchForUser(
       });
     }
     const updatedAt = new Date();
-    const setupStartedAt = availabilityChanged ? updatedAt
+    const setupStartedAt = availabilityChanged && currentCriteria
+      ? new Date(Math.max(updatedAt.getTime(), readCourseSetupStartedAt(currentCriteria).getTime() + 1))
       : lockedSearch.alertGeneration === 0 && !currentCriteria?.setupStartedAt ? currentCriteria?.createdAt : undefined;
     const updatedSearch = await transaction.teeSearch.update({
       where: {
@@ -1033,6 +1041,9 @@ export async function updateTeeSearchForUser(
       },
       include: searchInclude,
     });
+    if (availabilityChanged) {
+      await registerCourseSetupReceipts(transaction, updatedSearch, { supersedes: true });
+    }
     return projectCurrentCustomerSearch(transaction, updatedSearch);
   });
 }
@@ -1372,6 +1383,10 @@ const searchListInclude = {
   preferences: {
     orderBy: { rank: "asc" },
     include: {
+      setupReceipts: {
+        orderBy: { startedAt: "desc" }, take: 1,
+        select: { courseId: true, offeringId: true, startedAt: true, deadlineAt: true },
+      },
       offering: true,
       course: {
         include: {

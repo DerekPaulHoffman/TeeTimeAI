@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   hasDatabaseConfig: vi.fn(),
   recoverDueCourseSupportVerificationRequests: vi.fn(),
   expireOverdueDiscoveryJobs: vi.fn(),
+  recoverDueCourseSetupReceipts: vi.fn(),
 }));
 
 vi.mock("@/lib/env", () => ({ hasDatabaseConfig: mocks.hasDatabaseConfig }));
@@ -14,6 +15,7 @@ vi.mock("@/lib/automation/course-support-verification-scheduler", () => ({
   recoverDueCourseSupportVerificationRequests: mocks.recoverDueCourseSupportVerificationRequests
 }));
 vi.mock("@/lib/course-discovery/service", () => ({ expireOverdueDiscoveryJobs: mocks.expireOverdueDiscoveryJobs }));
+vi.mock("@/lib/searches/course-setup-receipts", () => ({ recoverDueCourseSetupReceipts: mocks.recoverDueCourseSetupReceipts }));
 
 import { GET } from "./route";
 
@@ -25,6 +27,7 @@ describe("GET /api/cron/recover-course-support-verifications", () => {
     process.env.CRON_SECRET = "test-cron-secret";
     mocks.hasDatabaseConfig.mockReturnValue(true);
     mocks.expireOverdueDiscoveryJobs.mockResolvedValue({ queueTimedOut: 1, executionTimedOut: 2 });
+    mocks.recoverDueCourseSetupReceipts.mockResolvedValue({ registeredLegacy: 2, unconfirmed: 3, legacyUnverified: 1 });
     mocks.recoverDueCourseSupportVerificationRequests.mockResolvedValue({
       considered: 2,
       started: 1,
@@ -50,6 +53,7 @@ describe("GET /api/cron/recover-course-support-verifications", () => {
     expect(mocks.hasDatabaseConfig).not.toHaveBeenCalled();
     expect(mocks.recoverDueCourseSupportVerificationRequests).not.toHaveBeenCalled();
     expect(mocks.expireOverdueDiscoveryJobs).not.toHaveBeenCalled();
+    expect(mocks.recoverDueCourseSetupReceipts).not.toHaveBeenCalled();
   });
 
   it("fails closed when database configuration is unavailable", async () => {
@@ -71,6 +75,7 @@ describe("GET /api/cron/recover-course-support-verifications", () => {
       skipped: 1,
       failed: 0,
       discoveryDeadlines: { queueTimedOut: 1, executionTimedOut: 2 },
+      setupDeadlines: { registeredLegacy: 2, unconfirmed: 3, legacyUnverified: 1 },
     });
     expect(mocks.recoverDueCourseSupportVerificationRequests).toHaveBeenCalledTimes(1);
   });
@@ -92,6 +97,7 @@ describe("GET /api/cron/recover-course-support-verifications", () => {
       skipped: 0,
       failed: 1,
       discoveryDeadlines: { queueTimedOut: 1, executionTimedOut: 2 },
+      setupDeadlines: { registeredLegacy: 2, unconfirmed: 3, legacyUnverified: 1 },
     });
   });
 
@@ -101,6 +107,14 @@ describe("GET /api/cron/recover-course-support-verifications", () => {
     expect(response.status).toBe(503);
     expect(mocks.recoverDueCourseSupportVerificationRequests).toHaveBeenCalledTimes(1);
     await expect(response.json()).resolves.toMatchObject({ started: 1, discoveryDeadlines: { failed: true } });
+  });
+
+  it("reports a setup-receipt sweep failure without skipping the discovery-job sweep", async () => {
+    mocks.recoverDueCourseSetupReceipts.mockRejectedValueOnce(new Error("private error"));
+    const response = await authorizedRequest();
+    expect(response.status).toBe(503);
+    expect(mocks.expireOverdueDiscoveryJobs).toHaveBeenCalledOnce();
+    await expect(response.json()).resolves.toMatchObject({ discoveryDeadlines: { queueTimedOut: 1 }, setupDeadlines: { failed: true } });
   });
 
   it("returns a generic 503 when detached dispatch cannot inspect durable work", async () => {

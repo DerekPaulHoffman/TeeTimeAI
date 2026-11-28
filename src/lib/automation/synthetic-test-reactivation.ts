@@ -10,6 +10,7 @@ import { DEFAULT_SYNTHETIC_TEST_WINDOW_MINUTES, syntheticTestWindowSchema } from
 import { lockSearchForAlertMutation } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
 import { buildAlertGenerationStartMarker } from "@/lib/searches/generation-clock";
+import { courseSetupSearchSelect, registerCourseSetupReceipts } from "@/lib/searches/course-setup-receipts";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
 export const SYNTHETIC_REACTIVATION_PROMPT_VERSION = "operator-synthetic-reactivation-v1";
@@ -33,6 +34,7 @@ export const syntheticReactivationInputSchema = z.object({
 }).strict();
 
 const searchSelect = {
+  ...courseSetupSearchSelect,
   id: true, userId: true, status: true, trafficClass: true, syntheticMultiCycle: true,
   syntheticTestWindow: true, createdAt: true, updatedAt: true, date: true,
   startTime: true, endTime: true, userTimeZone: true, players: true,
@@ -40,8 +42,8 @@ const searchSelect = {
   workflowRunId: true, checkLeaseToken: true, checkLeaseExpiresAt: true,
   preferences: {
     take: 6, orderBy: { rank: "asc" },
-    select: { courseId: true, rank: true, course: {
-      select: { timeZone: true, supportIncident: { select: { activeBatchId: true } } },
+    select: { ...courseSetupSearchSelect.preferences.select, rank: true, course: {
+      select: { ...courseSetupSearchSelect.preferences.select.course.select, supportIncident: { select: { activeBatchId: true } } },
     } },
   },
 } as const satisfies Prisma.TeeSearchSelect;
@@ -207,6 +209,10 @@ export async function reactivateSyntheticTestSearch(rawInput: unknown, options: 
           alertGeneration: window.alertGeneration, generationStartedAt: now }), updatedAt: now },
     });
     if (updated.count !== 1) fail("compare-and-set lost ownership");
+    await registerCourseSetupReceipts(transaction, {
+      ...current, status: "ACTIVE", date: new Date(`${input.date}T00:00:00.000Z`),
+      alertGeneration: window.alertGeneration, syntheticTestWindow: window, setupStartedAt: now,
+    }, { supersedes: true });
     await transaction.automationRun.create({ data: {
       id: receiptId, promptVersion: SYNTHETIC_REACTIVATION_PROMPT_VERSION, kind: "OTHER",
       status: "COMPLETED", runtimeVersion: options.runtimeVersion, ownerThreadId: input.actorId,

@@ -148,6 +148,52 @@ describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry r
       rmSync(temporary, { recursive: true, force: true });
     }
   }, 30_000);
+  it.each(interpreters)("preserves a running task whose checkout cannot restart with %s", interpreter => {
+    const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
+    const workspace = join(temporary, "workspace"), config = join(temporary, "runtime.json"), logs = join(temporary, "logs");
+    const launcher = join(workspace, "scripts", "automation", "run-course-discovery-supervisor.ps1");
+    const taskName = `Tee Time Spot Course Discovery test-${randomUUID().slice(0, 20)}`;
+    const script = resolve("scripts/automation/manage-course-discovery-task.ps1");
+    const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+    const taskArguments = `-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "${launcher}" -WorkspacePath "${workspace}" -ConfigPath "${config}" -NodePath "${process.execPath}" -LogDirectory "${logs}"`;
+    // Shadow the scheduler commands in this child so no registered task is read or changed.
+    const run = (action: string, apply = true) => {
+      const result = spawnSync(interpreter, ["-NoProfile", "-NonInteractive", "-Command", String.raw`
+        function Import-Module { param($Name, $ErrorAction) }
+        function Get-ScheduledTask {
+          param($TaskName, $TaskPath, $ErrorAction)
+          if ($TaskName -cne ${quote(taskName)} -or $TaskPath -cne '\TeeTimeSpot\') { throw 'UNEXPECTED_FIXTURE_TASK' }
+          [pscustomobject]@{ Description='Tee Time Spot course discovery supervisor; managed lifecycle v1'; State='Running'; Actions=@([pscustomobject]@{
+            Execute=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'; WorkingDirectory=${quote(workspace)}; Arguments=${quote(taskArguments)} }) }
+        }
+        function Get-ScheduledTaskInfo { param($InputObject) [pscustomobject]@{ LastTaskResult=0; LastRunTime=Get-Date } }
+        function Start-ScheduledTask { param($InputObject) throw 'UNEXPECTED_FIXTURE_START' }
+        function Stop-ScheduledTask { param($InputObject) [Console]::WriteLine('FIXTURE_STOP') }
+        function Disable-ScheduledTask { param($InputObject) [Console]::WriteLine('FIXTURE_DISABLE') }
+        function Unregister-ScheduledTask { param($InputObject, $Confirm) [Console]::WriteLine('FIXTURE_UNINSTALL') }
+        & ${quote(script)} -TaskName ${quote(taskName)} -Action ${quote(action)} ${apply ? "-Apply" : ""}
+        exit $LASTEXITCODE
+      `], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+      const [summary, ...output] = result.stdout.trim().split(/\r?\n/u);
+      return { status: result.status, summary: JSON.parse(summary), output, error: result.stderr };
+    };
+    try {
+      const missing = { exists: true, state: "Running", restartPrerequisites: "MANAGED_RUNTIME_CHECKOUT_MISSING" };
+      expect(run("Stop", false)).toMatchObject({ status: 0, summary: missing, output: [] });
+      expect(run("Stop")).toMatchObject({ status: 1, summary: missing, output: [], error: expect.stringContaining("COURSE_DISCOVERY_TASK_ACTION_FAILED") });
+      expect(run("Disable")).toMatchObject({ status: 0, summary: missing, output: ["FIXTURE_STOP", "FIXTURE_DISABLE", expect.stringContaining('"completed":true')] });
+      expect(run("Uninstall")).toMatchObject({ status: 0, summary: missing, output: ["FIXTURE_STOP", "FIXTURE_UNINSTALL", expect.stringContaining('"completed":true')] });
+      mkdirSync(dirname(launcher), { recursive: true });
+      const packageFile = join(workspace, "node_modules", "@openai", "codex", "package.json");
+      mkdirSync(dirname(packageFile), { recursive: true });
+      for (const file of [join(workspace, ".git"), launcher, join(dirname(launcher), "course-discovery-supervisor.mjs"), config, packageFile]) writeFileSync(file, "");
+      expect(run("Stop")).toMatchObject({ status: 0, summary: { restartPrerequisites: "PRESENT" },
+        output: ["FIXTURE_STOP", expect.stringContaining('"completed":true')] });
+    } finally {
+      if (dirname(temporary) !== resolve(tmpdir()) || !temporary.startsWith(join(resolve(tmpdir()), "course-discovery-task-"))) throw new Error("Unsafe test cleanup path");
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }, 30_000);
   it.each(interpreters)("preserves heartbeat instants and rejects invalid/future health with %s", interpreter => {
     const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
     const logs = join(temporary, "logs"); mkdirSync(logs);

@@ -145,11 +145,9 @@ try {
     Register-ScheduledTask -TaskName $TaskName -TaskPath $taskPath -Action $plannedAction -Trigger $trigger -Principal $principal -Settings $settings -Description $marker -Force | Out-Null
   } else {
     if (-not $existing) { throw 'MANAGED_TASK_NOT_FOUND' }
+    if ($Action -in @('Start', 'Stop') -and $summary.restartPrerequisites -ne 'PRESENT') { throw $summary.restartPrerequisites }
     switch ($Action) {
-      'Start' {
-        if ($summary.restartPrerequisites -ne 'PRESENT') { throw $summary.restartPrerequisites }
-        Start-ScheduledTask -InputObject $existing
-      }
+      'Start' { Start-ScheduledTask -InputObject $existing }
       'Stop' { Stop-ScheduledTask -InputObject $existing }
       'Disable' { Stop-ScheduledTask -InputObject $existing; Disable-ScheduledTask -InputObject $existing | Out-Null }
       'Uninstall' { Stop-ScheduledTask -InputObject $existing; Unregister-ScheduledTask -InputObject $existing -Confirm:$false }

@@ -25,6 +25,7 @@ const providerObservationMocks = vi.hoisted(() => ({
   getCourseProviderObservationFencesInTransaction: vi.fn(),
 }));
 const simulatorDemandMocks = vi.hoisted(() => ({ getSimulatorVenueForDemand: vi.fn() }));
+vi.mock("@/lib/searches/course-setup-receipts", () => ({ registerCourseSetupReceipts: vi.fn() }));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -2508,7 +2509,7 @@ describe("updateTeeSearchForUser", () => {
   });
 
   it("lets an owner edit and resume pending simulator demand without rental proof", async () => {
-    const search = { mode: "SIMULATOR", date: new Date("2027-08-15T00:00:00.000Z"),
+    const search = { mode: "SIMULATOR", createdAt: new Date("2026-06-30T14:00:00Z"), date: new Date("2027-08-15T00:00:00.000Z"),
       startTime: "13:00", endTime: "17:00", players: 4, durationMinutes: 60,
       preferences: [{ offering: { kind: "SIMULATOR", active: true, publicAccessStatus: "UNVERIFIED",
         bookingUrl: null, evidenceUrl: null, verifiedAt: null, supportedDurationsMinutes: [],

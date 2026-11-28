@@ -23,6 +23,7 @@ import {
   suppressSearchEmailDeliveriesForMatches,
 } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
+import { recordCourseSetupProbe } from "@/lib/searches/course-setup-receipts";
 import { assertRecipeObservationCurrent, markRecipeObservationConsumed } from "@/lib/course-discovery/runtime";
 import { continueGenericRecipeMatchSources } from "@/lib/course-discovery/match-source-continuity";
 import {
@@ -1239,6 +1240,7 @@ export async function recordCourseProbe(input: CourseProbeInput) {
   return prisma.$transaction(async (transaction) => {
     await assertCurrentSearchCheckWrite(transaction);
     const probe = await create(transaction);
+    await recordCourseSetupProbe(transaction, probe);
     await assertCurrentSearchCheckWrite(transaction);
     return probe;
   });
@@ -4873,6 +4875,11 @@ function canReuseProviderExecutionEvidence(
 ) {
   const latest = asProviderExecutionSummary(latestValue);
   const next = asProviderExecutionSummary(nextValue);
+  const oldBookingWindow = asProviderExecutionSummary(latest.bookingWindow);
+  const newBookingWindow = asProviderExecutionSummary(next.bookingWindow);
+  if (latest.targetDate !== next.targetDate || latest.verifiedAccessRestriction !== next.verifiedAccessRestriction ||
+      oldBookingWindow.opensAt !== newBookingWindow.opensAt || oldBookingWindow.source !== newBookingWindow.source ||
+      oldBookingWindow.evidenceUrl !== newBookingWindow.evidenceUrl) return false;
 
   // Each server-adapter invocation is a new synchronous provider observation,
   // even when its normalized outcome is unchanged.

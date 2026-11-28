@@ -55,6 +55,8 @@ The dashboard uses a setup clock saved with the alert. A change to the requested
 
 Normal discovery admission saves the same deadline with the course or offering job. Queue wait uses that time. The hosted one-minute recovery route closes overdue jobs and releases the target reservation. A job that expires in the queue keeps its pickup clock empty. The worker lease and work budget end by the saved deadline even if the learner picked up late. Legacy jobs retain their recorded pickup clock and the queue-age fallback. Historical pilot reporting still measures pickup through observed delivery. A later verified repair can supply fresh evidence under its own authorization.
 
+Each saved course or offering also gets a setup receipt in the save transaction. It records the original request, the deadline and the first verified outcome. A checked result can settle it before the cutoff. The hosted recovery route settles overdue receipts even when no discovery job exists. An inconclusive probe can explain a timeout. It cannot establish availability. Late verified evidence can update current availability while the receipt remains unchanged. Older demand with incomplete historical proof is recorded as unverified history. The recovery route does not restart ended demand.
+
 Incomplete extraction, challenge pages and unavailable browser capabilities
 remain explicit failures. They cannot create a `NO_MATCH` result. Cancellation,
 edits, source changes and stale schedule versions are checked again before

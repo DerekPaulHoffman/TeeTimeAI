@@ -11,6 +11,7 @@ import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
 import { simulatorDurationMatches, simulatorDurationsForSearch } from "@/lib/searches/simulator-duration";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { isSearchCheckLeaseCurrent, type ActiveAutomationSearch, type SearchCheckLease } from "@/lib/automation/db-service";
 import type { SearchCheckResult } from "@/lib/automation/search-check";
@@ -31,9 +32,16 @@ import { assertRecipeObservationCurrent, markRecipeObservationConsumed, recipeFa
 import { continueGenericRecipeMatchSources } from "@/lib/course-discovery/match-source-continuity";
 import { reconcileSimulatorSupportIncidentFailure, resolveUnownedSimulatorSupportIncident } from "./simulator-support-incidents";
 import { getCourseLocalDate } from "@/lib/courses/inventory-horizon";
+import { recordCourseSetupProbe } from "@/lib/searches/course-setup-receipts";
 
 const OBSERVATION_LEASE_MS = 2 * 60_000;
+const OBSERVATION_COMMIT_RESERVE_MS = 15_000;
 class SimulatorObservationSupersededError extends Error {}
+class SimulatorSearchLeaseLostError extends Error {
+  constructor() {
+    super("Simulator search lease is no longer current");
+  }
+}
 
 function assertSimulatorSlotProof(slot: SimulatorAvailabilitySlot, offeringId: string, date: string, duration: number | null, timeZone: string) {
   if (slot.offeringId !== offeringId || !slot.productId || !slot.resourceId ||
@@ -61,7 +69,7 @@ async function recordPendingSimulatorCheck(input: {
         current.monitoringState === "FINAL_TECHNICAL" || current.monitoringState === "FINAL_IDENTITY" ||
         current.automationEligibility === "BLOCKED") return false;
     const now = new Date();
-    await transaction.courseProbe.create({ data: {
+    const probe = await transaction.courseProbe.create({ data: {
       teeSearchId: input.search.id, courseId: current.courseId, offeringId: current.id,
       automationRunId: input.runId, outcome: "NEEDS_ADAPTER", observedAt: now,
       runtimeVersion: getAutomationRuntimeVersion(), rawSummary: {
@@ -77,6 +85,7 @@ async function recordPendingSimulatorCheck(input: {
       offeringId: current.id, reason: "RENTAL_VERIFICATION_NEEDED", evidenceUrl: current.evidenceUrl ?? current.bookingUrl,
       now, eligible: isSimulatorSupportEligible(input.search),
     });
+    await recordCourseSetupProbe(transaction, probe);
     return true;
   });
 }
@@ -86,7 +95,7 @@ async function lockCurrentSearch(transaction: Prisma.TransactionClient, search: 
   const current = await transaction.teeSearch.findUnique({ where: { id: search.id } });
   if (!current || current.mode !== "SIMULATOR" || current.status !== "ACTIVE" ||
     current.scheduleVersion !== lease.scheduleVersion || current.alertGeneration !== search.alertGeneration ||
-    current.checkLeaseToken !== lease.token || !current.checkLeaseExpiresAt || current.checkLeaseExpiresAt <= new Date()) throw new Error("Simulator search lease is no longer current");
+    current.checkLeaseToken !== lease.token || !current.checkLeaseExpiresAt || current.checkLeaseExpiresAt <= new Date()) throw new SimulatorSearchLeaseLostError();
   return current;
 }
 
@@ -149,10 +158,10 @@ async function commitObservation(input: {
       });
       await transaction.teeTimeMatch.updateMany({ where: { teeSearchId: input.search.id, offeringId: offering.id, availabilityStatus: "GONE", alertStatus: "PENDING" }, data: { alertStatus: "SUPPRESSED" } });
     }
-    await transaction.courseProbe.create({ data: { teeSearchId: input.search.id, courseId: offering.courseId, offeringId: offering.id,
+    const probe = await transaction.courseProbe.create({ data: { teeSearchId: input.search.id, courseId: offering.courseId, offeringId: offering.id,
       automationRunId: input.runId, outcome: input.outcome, observedAt: input.observedAt,
       runtimeVersion: getAutomationRuntimeVersion(), rawSummary: { mode: "SIMULATOR", sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering), durationMinutes: input.search.durationMinutes, matchingSessions: retained.length,
-        providerObservedAt: input.observedAt.toISOString(), evidenceUrl: input.evidenceUrl } } });
+        targetDate: input.search.date.toISOString().slice(0, 10), providerObservedAt: input.observedAt.toISOString(), evidenceUrl: input.evidenceUrl } } });
     await transaction.courseOffering.update({ where: { id: offering.id }, data: {
       monitoringState: success ? "HEALTHY" : "DEGRADED_RETRYING", observationToken: null, observationExpiresAt: null,
       ...(success ? { automationEligibility: "ALLOWED", monitoringVerifiedAt: input.observedAt } : { lastFailureAt: input.observedAt }),
@@ -162,6 +171,7 @@ async function commitObservation(input: {
     if (success) await resolveUnownedSimulatorSupportIncident(transaction, { offeringId: offering.id, now: input.observedAt });
     else await reconcileSimulatorSupportIncidentFailure(transaction, { offeringId: offering.id, reason: input.outcome,
       evidenceUrl: input.evidenceUrl, now: input.observedAt, eligible: isSimulatorSupportEligible(input.search) });
+    await recordCourseSetupProbe(transaction, probe);
     return retained.length;
   });
 }
@@ -198,6 +208,13 @@ async function learnedSimulatorAvailability(search: ActiveAutomationSearch, pref
     courseId: preference.courseId, offeringId: preference.offering!.id, searchId: search.id })) };
 }
 
+function simulatorProviderLane(preference: ActiveAutomationSearch["preferences"][number]) {
+  const family = preference.offering?.providerFamilyKey;
+  if (family) return family;
+  const source = preference.course.website ?? preference.offering?.bookingUrl;
+  return (source && URL.canParse(source) ? new URL(source).hostname : null) ?? "SOURCE_MISSING";
+}
+
 export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, runId: string, lease: SearchCheckLease): Promise<SearchCheckResult> {
   if (!isSimulatorModeEnabled()) throw new Error("Simulator checks are temporarily disabled");
   if (search.mode !== "SIMULATOR" || (search.durationMinutes !== null &&
@@ -206,8 +223,8 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
   const courseResults: SearchCheckResult["courseResults"] = [];
   let availableMatches = 0;
   let retryNeeded = false;
-  for (const preference of search.preferences) {
-    if (!(await isSearchCheckLeaseCurrent(lease))) throw new Error("Simulator search lease was lost");
+  async function checkPreference(preference: ActiveAutomationSearch["preferences"][number]) {
+    if (!(await isSearchCheckLeaseCurrent(lease))) throw new SimulatorSearchLeaseLostError();
     const offering = preference.offering;
     let learnedRead: Awaited<ReturnType<typeof learnedSimulatorAvailability>>;
     try { learnedRead = offering ? await learnedSimulatorAvailability(search, preference) : null; }
@@ -215,7 +232,7 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
       retryNeeded = true;
       courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
         outcome: "FETCH_FAILED", availableMatches: 0, bookingUrl: offering?.bookingUrl ?? preference.course.website ?? undefined });
-      continue;
+      return;
     }
     const learned = learnedRead?.read;
     if (learned) {
@@ -223,19 +240,20 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
         if (recipeFailureIsRetryable(learned.outcome ?? undefined)) retryNeeded = true;
         await prisma.$transaction(async transaction => {
           await lockCurrentSearch(transaction, search, lease);
-          await transaction.courseProbe.create({ data: { teeSearchId: search.id, courseId: preference.courseId, offeringId: offering!.id,
+          const probe = await transaction.courseProbe.create({ data: { teeSearchId: search.id, courseId: preference.courseId, offeringId: offering!.id,
             automationRunId: runId, outcome: "FETCH_FAILED", runtimeVersion: getAutomationRuntimeVersion(),
             rawSummary: { mode: "SIMULATOR", discoveryTerminal: !recipeFailureIsRetryable(learned.outcome ?? undefined), outcome: learned.outcome } } });
+          await recordCourseSetupProbe(transaction, probe);
         });
         courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
           outcome: "FETCH_FAILED", availableMatches: 0, bookingUrl: offering!.bookingUrl ?? preference.course.website ?? undefined });
-        continue;
+        return;
       }
       if (learned.state !== "ready" || !recipeResultIsSuccessful(learned.result)) {
         retryNeeded = true;
         courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
           outcome: "CHECK_PENDING", availableMatches: 0, bookingUrl: offering!.bookingUrl ?? preference.course.website ?? undefined });
-        continue;
+        return;
       }
       let claimedRecipe: Awaited<ReturnType<typeof beginObservation>> = null;
       try {
@@ -244,7 +262,7 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
           retryNeeded = true;
           courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
             outcome: "CHECK_PENDING", availableMatches: 0, bookingUrl: learned.result.sourceUrl });
-          continue;
+          return;
         }
         const slots: SimulatorAvailabilitySlot[] = learned.result.slots.map(slot => ({
           sourceId: slot.sourceId, offeringId: offering!.id, resourceId: slot.resourceId ?? "ANY", productId: slot.productId ?? "rental",
@@ -258,14 +276,14 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
         courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
           outcome: count ? "MATCH_FOUND" : "NO_MATCH", availableMatches: count, bookingUrl: learned.result.sourceUrl });
       } catch {
-        if (!await isSearchCheckLeaseCurrent(lease)) throw new Error("Simulator search lease was lost");
+        if (!await isSearchCheckLeaseCurrent(lease)) throw new SimulatorSearchLeaseLostError();
         if (claimedRecipe) await prisma.courseOffering.updateMany({ where: { id: offering!.id, observationToken: claimedRecipe.token },
           data: { observationToken: null, observationExpiresAt: null } });
         retryNeeded = true;
         courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
           outcome: "FETCH_FAILED", availableMatches: 0, bookingUrl: learned.result.sourceUrl });
       }
-      continue;
+      return;
     }
     if (offering && (!offering.active || offering.publicAccessStatus === "NOT_PUBLIC" ||
         offering.monitoringState === "FINAL_TECHNICAL" || offering.monitoringState === "FINAL_IDENTITY" ||
@@ -277,13 +295,17 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
         if (getSimulatorOfferingSourceFingerprint(current) !== getSimulatorOfferingSourceFingerprint(offering)) {
           throw new SimulatorObservationSupersededError("Simulator offering changed before its status check");
         }
-        await transaction.courseProbe.create({ data: { teeSearchId: search.id, courseId: preference.courseId, offeringId: offering.id,
+        const factualDirect = current.verifiedAt && current.evidenceUrl &&
+          (current.monitoringState === "FINAL_IDENTITY" || ["NOT_PUBLIC", "MEMBERS_ONLY"].includes(current.publicAccessStatus));
+        const probe = await transaction.courseProbe.create({ data: { teeSearchId: search.id, courseId: preference.courseId, offeringId: offering.id,
           automationRunId: runId, outcome: "MANUAL_DIRECT", runtimeVersion: getAutomationRuntimeVersion(),
-          rawSummary: { mode: "SIMULATOR", sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering), officialSiteOnly: true } } });
+          rawSummary: { mode: "SIMULATOR", sourceFingerprint: getSimulatorOfferingSourceFingerprint(current),
+            officialSiteOnly: true, ...(factualDirect ? { monitoringDisposition: "MANUAL_FINAL" } : {}) } } });
+        await recordCourseSetupProbe(transaction, probe);
       });
       courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
         outcome: "MANUAL_DIRECT", availableMatches: 0, bookingUrl: offering.bookingUrl ?? preference.course.website ?? undefined });
-      continue;
+      return;
     }
     if (!offering || offering.kind !== "SIMULATOR" || !offering.active || offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl ||
       !offering.verifiedAt || !offering.evidenceUrl ||
@@ -298,50 +320,73 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
       retryNeeded = true;
       courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
         outcome: recorded ? "NEEDS_ADAPTER" : "CHECK_PENDING", availableMatches: 0, bookingUrl: offering?.bookingUrl ?? preference.course.website ?? undefined });
-      continue;
+      return;
     }
     const opening = getSimulatorBookingOpening(date, offering, preference.course.timeZone);
     if (opening && opening > new Date()) {
       await prisma.$transaction(async transaction => {
         await lockCurrentSearch(transaction, search, lease);
-        await transaction.courseProbe.create({ data: { teeSearchId: search.id, courseId: preference.courseId, offeringId: offering.id,
+        await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "CourseOffering" WHERE "id" = ${offering.id} FOR UPDATE`);
+        const current = await transaction.courseOffering.findUniqueOrThrow({ where: { id: offering.id } });
+        const currentFingerprint = getSimulatorOfferingSourceFingerprint(current);
+        if (currentFingerprint !== getSimulatorOfferingSourceFingerprint(offering) ||
+            !current.active || current.publicAccessStatus !== "PUBLIC" ||
+            current.monitoringState === "FINAL_IDENTITY" || current.monitoringState === "FINAL_TECHNICAL" ||
+            current.automationEligibility === "BLOCKED" || opening <= new Date()) {
+          throw new SimulatorObservationSupersededError("Simulator booking window was superseded");
+        }
+        const probe = await transaction.courseProbe.create({ data: { teeSearchId: search.id, courseId: preference.courseId, offeringId: offering.id,
           automationRunId: runId, outcome: "NO_MATCH", runtimeVersion: getAutomationRuntimeVersion(), rawSummary: {
-            mode: "SIMULATOR", sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering),
-            bookingNotOpen: true, opensAt: opening.toISOString(),
+            mode: "SIMULATOR", sourceFingerprint: currentFingerprint, bookingWindowVerified: true,
+            targetDate: date, bookingNotOpen: true, opensAt: opening.toISOString(),
           } } });
+        await recordCourseSetupProbe(transaction, probe);
       });
       courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank, outcome: "CHECK_PENDING", availableMatches: 0, bookingUrl: offering.bookingUrl });
-      continue;
+      return;
     }
     const claimed = await beginObservation(offering.id, search, lease);
     if (!claimed) {
       retryNeeded = true;
       courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
         outcome: "CHECK_PENDING", availableMatches: 0, bookingUrl: offering.bookingUrl });
-      continue;
+      return;
     }
     let providerFailure: unknown = null;
     try {
       if (!claimed.offering.bookingUrl || !claimed.offering.verifiedAt || !claimed.offering.evidenceUrl ||
         !simulatorDurationsForSearch(search.durationMinutes, claimed.offering.supportedDurationsMinutes).length) throw new Error("Simulator rental details changed");
+      const providerBudget = Math.min(claimed.offering.observationExpiresAt!.getTime(), lease.expiresAt.getTime()) -
+        Date.now() - OBSERVATION_COMMIT_RESERVE_MS;
+      if (providerBudget <= 0) throw new Error("Simulator provider check has no remaining time");
+      const signal = AbortSignal.timeout(providerBudget);
+      const boundedFetch: typeof fetch = (input, init) => fetch(input, { ...init,
+        signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal,
+      });
       // The shared lease normalizer accepts known families or real hostnames;
       // synthetic mode prefixes would collapse every simulator into UNKNOWN.
       const read = await runWithProviderRequestLease(new URL(claimed.offering.bookingUrl).hostname, async () => {
         try {
+          signal.throwIfAborted();
           const durations = simulatorDurationsForSearch(search.durationMinutes, claimed.offering.supportedDurationsMinutes, search.startTime, search.endTime);
           if (!durations.length) durations.push(...simulatorDurationsForSearch(search.durationMinutes,
             claimed.offering.supportedDurationsMinutes).slice(0, 1));
           const results = [];
           for (const durationMinutes of durations) {
+            signal.throwIfAborted();
             const result = await fetchSimulatorAvailability({ offering: { ...claimed.offering, bookingUrl: claimed.offering.bookingUrl! },
-              date, durationMinutes, partySize: 1, timeZone: preference.course.timeZone });
+              date, durationMinutes, partySize: 1, timeZone: preference.course.timeZone }, boundedFetch);
+            signal.throwIfAborted();
             for (const slot of result.slots) assertSimulatorSlotProof(slot, claimed.offering.id, date, durationMinutes, preference.course.timeZone);
             results.push(result);
           }
           return { complete: results.every(result => result.complete), slots: results.flatMap(result => result.slots),
             observedAt: results.length ? new Date(Math.min(...results.map(result => result.observedAt.getTime()))) : new Date(),
             evidenceUrl: results[0]?.evidenceUrl ?? claimed.offering.evidenceUrl! };
-        } catch (error) { providerFailure = error; throw error; }
+        } catch (error) {
+          if (!signal.aborted) providerFailure = error;
+          throw error;
+        }
       });
       if (!read.acquired) throw new Error("Simulator provider is busy");
       const result = read.value;
@@ -361,7 +406,7 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
         if (!(await isSearchCheckLeaseCurrent(lease))) throw error;
         courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
           outcome: "CHECK_PENDING", availableMatches: 0, bookingUrl: claimed.offering.bookingUrl ?? undefined });
-        continue;
+        return;
       }
       try {
         await commitObservation({ search, lease, offering: claimed.offering, token: claimed.token, runId,
@@ -371,7 +416,7 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
         if (!(failure instanceof SimulatorObservationSupersededError) || !(await isSearchCheckLeaseCurrent(lease))) throw failure;
         courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
           outcome: "CHECK_PENDING", availableMatches: 0, bookingUrl: claimed.offering.bookingUrl ?? undefined });
-        continue;
+        return;
       }
       const outcome = error instanceof SimulatorAvailabilityError && error.code === "UNSUPPORTED_PROVIDER" ? "NEEDS_ADAPTER" : "FETCH_FAILED";
       let learning = false;
@@ -382,6 +427,20 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
         availableMatches: 0, bookingUrl: offering.bookingUrl });
     }
   }
+  await runProviderFamilyTasks(search.preferences, simulatorProviderLane, async preference => {
+    try {
+      await checkPreference(preference);
+    } catch (error) {
+      // Await the already-running sibling, but stop new venues and delivery if
+      // the shared search lease changed. Offering-specific faults stay local.
+      if (error instanceof SimulatorSearchLeaseLostError || !await isSearchCheckLeaseCurrent(lease)) throw error;
+      retryNeeded = true;
+      courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
+        outcome: error instanceof SimulatorObservationSupersededError ? "CHECK_PENDING" : "FETCH_FAILED",
+        availableMatches: 0, bookingUrl: preference.offering?.bookingUrl ?? preference.course.website ?? undefined });
+    }
+  });
+  courseResults.sort((left, right) => (left.rank ?? 0) - (right.rank ?? 0));
   const matches = await getCurrentSimulatorMatches(search);
   const matchedOfferingIds = new Set(matches.map(match => match.offeringId));
   const pendingMatches = matches.filter(match => match.alertStatus === "PENDING");
