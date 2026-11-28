@@ -17,6 +17,7 @@ export type DashboardCourseStatus = Omit<DashboardAvailabilityView, "tone"> & {
 export function getDashboardCourseStatus(input: {
   availability: Parameters<typeof getDashboardAvailabilityView>[0];
   monitoring: DashboardMonitoringVerdictInput;
+  setupConfirmed?: boolean;
   windowEnded?: boolean;
 }): DashboardCourseStatus {
   if (input.windowEnded && input.availability.alertStatus === "ACTIVE") {
@@ -39,6 +40,15 @@ export function getDashboardCourseStatus(input: {
   const active =
     !input.availability.alertStatus || input.availability.alertStatus === "ACTIVE";
   const snapshot = readDashboardAvailabilitySnapshot(input.availability.rawSummary);
+  if (active && input.setupConfirmed && monitoring.icon === "watching" && availability.tone === "pending") {
+    return {
+      label: monitoring.label,
+      detail: "Automatic checks were confirmed for your request. We'll email you when matching tee times are found.",
+      emoji: monitoring.emoji,
+      tone: "available",
+      hasCurrentPublicInventory: false,
+    };
+  }
 
   return {
     ...(monitoringOverridesAvailability

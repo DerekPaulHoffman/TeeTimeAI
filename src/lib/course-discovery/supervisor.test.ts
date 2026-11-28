@@ -211,6 +211,16 @@ describe("bounded discovery supervisor", () => {
     ]) expect(() => validateClaimedDiscoveryJob(assigned, now)).toThrow("DISCOVERY_JOB_INVALID");
   });
 
+  it("uses the saved-demand cutoff without rewriting the original pickup receipt", () => {
+    const setupDeadlineAt = new Date(now + 65_000).toISOString();
+    const assigned = { ...job(), setupDeadlineAt };
+    expect(validateClaimedDiscoveryJob(assigned, now)).toBe(assigned);
+    expect(discoveryWorkDeadline(assigned)).toBe(Date.parse(setupDeadlineAt));
+    expect(Date.parse(assigned.deadlineAt) - Date.parse(assigned.firstPickedUpAt)).toBe(900_000);
+    expect(() => validateClaimedDiscoveryJob(assigned, Date.parse(setupDeadlineAt))).toThrow("DISCOVERY_JOB_INVALID");
+    expect(() => validateClaimedDiscoveryJob({ ...assigned, setupDeadlineAt: "invalid" }, now)).toThrow("DISCOVERY_JOB_INVALID");
+  });
+
   it("allows bounded clock offset for warm execution while rejecting expired or overlong work", () => {
     const warm = { id: "warm", leaseToken: "lease", recipe: {}, input: {}, deadlineAt: new Date(now + 182_100).toISOString() };
     expect(validateClaimedRecipeExecution(warm, now)).toBe(warm);

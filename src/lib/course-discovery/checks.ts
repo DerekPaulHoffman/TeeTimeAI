@@ -5,6 +5,7 @@ import { resolveProviderCapability } from "@/lib/automation/provider-capabilitie
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
 import { LOCAL_READER_COURSE_KEYS } from "@/lib/local-reader/course-key";
+import { getCourseSetupDeadline } from "@/lib/searches/course-setup-deadline";
 import { RUNNABLE_SIMULATOR_PROVIDER_FAMILIES } from "@/lib/simulators/providers";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 import type { SearchCheckCourseResult } from "@/lib/automation/search-check";
@@ -58,7 +59,9 @@ export async function getLearnedAvailability(search: ActiveAutomationSearch, pre
       const admitted = await prisma.courseDiscoveryJob.findUnique({ where: { activeTargetKey: `offering:${offering.id}` }, select: { id: true } });
       if (!admitted) return null;
     }
-    await refreshMissingDiscoverySource(preference.courseId).catch(() => undefined);
+    if (getCourseSetupDeadline(search, preference.course.timeZone) > new Date()) {
+      await refreshMissingDiscoverySource(preference.courseId).catch(() => undefined);
+    }
     const job = await ensureDiscoveryJob({ ...target, searchId: search.id });
     if (job && ["FAILED", "TIMED_OUT", "CANCELLED"].includes(job.status)) return { state: "failed" as const, target, outcome: job.outcome };
     return { state: "pending" as const, target };
@@ -134,7 +137,8 @@ export async function checkLearnedOutdoor(search: ActiveAutomationSearch, prefer
   if (!committed.sourceEvidenceAccepted) return { ...common, outcome: "CHECK_PENDING" };
   await recordCourseProbe({ searchId: search.id, courseId: preference.courseId, automationRunId: runId,
     runtimeVersion: getAutomationRuntimeVersion(), outcome, observedAtOrAfter: observedAt,
-    rawSummary: { recipeId, recipeHash: result.evidence.recipeHash, recipeExecutionId: jobId, observedAt: result.observedAt, complete: true } });
+    rawSummary: { recipeId, recipeHash: result.evidence.recipeHash, recipeExecutionId: jobId, observedAt: result.observedAt, complete: true,
+      providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: observedAt.toISOString() } });
   return { ...common, outcome, monitoringDisposition: "ACTIONABLE", bookingUrl: result.sourceUrl, availableMatches: result.slots.length,
     matchingTimes: result.slots.map((slot, index) => ({ matchId: committed.persistedMatchStates[index]?.matchId,
       startsAt: slot.startsAt, availableSpots: slot.availableSpots, holes: slot.holes, isNew: committed.persistedMatchStates[index]?.isPending ?? false })) };

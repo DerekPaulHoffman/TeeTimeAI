@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActiveAutomationSearch } from "@/lib/automation/db-service";
-import { getLearnedAvailability, queueFailedOutdoorDiscovery, queueFailedSimulatorDiscovery } from "./checks";
+import { checkLearnedOutdoor, getLearnedAvailability, queueFailedOutdoorDiscovery, queueFailedSimulatorDiscovery } from "./checks";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
+import { getProviderExecutionEvidenceObservedAt } from "@/lib/automation/provider-execution-evidence";
 
 const mocked = vi.hoisted(() => ({ pilot: vi.fn(), activeRecipe: vi.fn(), activeJob: vi.fn(), ensure: vi.fn(), refresh: vi.fn(),
-  runnable: vi.fn(), readerKey: vi.fn(), execution: vi.fn(), success: vi.fn(), needsRepair: vi.fn(), degrade: vi.fn() }));
+  runnable: vi.fn(), readerKey: vi.fn(), execution: vi.fn(), success: vi.fn(), needsRepair: vi.fn(), degrade: vi.fn(),
+  commitMatches: vi.fn(), recordProbe: vi.fn(), recordMonitoringSuccess: vi.fn() }));
 vi.mock("./config", () => ({ isDiscoveryPilotSearch: mocked.pilot }));
 vi.mock("./service", () => ({ getActiveAccessRecipe: mocked.activeRecipe, ensureDiscoveryJob: mocked.ensure, degradeRecipe: mocked.degrade }));
 vi.mock("./sources", () => ({ refreshMissingDiscoverySource: mocked.refresh }));
@@ -12,12 +14,13 @@ vi.mock("@/lib/prisma", () => ({ prisma: { courseDiscoveryJob: { findUnique: moc
 vi.mock("@/lib/automation/provider-capabilities", () => ({ resolveProviderCapability: mocked.runnable }));
 vi.mock("@/lib/local-reader/service", () => ({ getLocalReaderCourseKey: mocked.readerKey }));
 vi.mock("./runtime", () => ({ getOrQueueRecipeExecution: mocked.execution, recipeResultIsSuccessful: mocked.success, recipeExecutionNeedsRepair: mocked.needsRepair, assertRecipeObservationCurrent: vi.fn() }));
-vi.mock("@/lib/automation/db-service", () => ({ commitCurrentCourseTeeTimeMatches: vi.fn(), recordCourseProbe: vi.fn() }));
-vi.mock("@/lib/automation/course-monitoring", () => ({ recordCourseMonitoringSuccess: vi.fn() }));
+vi.mock("@/lib/automation/db-service", () => ({ commitCurrentCourseTeeTimeMatches: mocked.commitMatches, recordCourseProbe: mocked.recordProbe }));
+vi.mock("@/lib/automation/course-monitoring", () => ({ recordCourseMonitoringSuccess: mocked.recordMonitoringSuccess }));
 vi.mock("@/lib/automation/runtime-version", () => ({ getAutomationRuntimeVersion: () => "test" }));
 
-const search = { id: "search-1", mode: "OUTDOOR", preferences: [{ courseId: "course-1", offeringId: null,
-  course: { id: "course-1", isPublic: true, detectedBookingUrl: "https://example.org/times", website: "https://example.org" } }] } as unknown as ActiveAutomationSearch;
+const search = { id: "search-1", mode: "OUTDOOR", createdAt: new Date(), date: new Date(Date.now() + 86_400_000), endTime: "18:00",
+  preferences: [{ courseId: "course-1", offeringId: null, course: { id: "course-1", isPublic: true,
+    detectedBookingUrl: "https://example.org/times", website: "https://example.org", timeZone: "UTC" } }] } as unknown as ActiveAutomationSearch;
 const simulator = { ...search, mode: "SIMULATOR", durationMinutes: 60, preferences: [{ ...search.preferences[0], offeringId: "offering-1",
   offering: { id: "offering-1", kind: "SIMULATOR", active: true, publicAccessStatus: "PUBLIC", bookingUrl: "https://example.as.me/schedule/owner123",
     verifiedAt: new Date(), evidenceUrl: "https://example.org/", supportedDurationsMinutes: [60], providerFamilyKey: "ACUITY" } }] } as unknown as ActiveAutomationSearch;
@@ -97,6 +100,31 @@ describe("failed established public-method learning", () => {
     expect(await queueFailedOutdoorDiscovery(search, search.preferences[0], "FETCH_FAILED")).toBe(false);
     mocked.pilot.mockResolvedValue(false); mocked.ensure.mockClear();
     expect(await queueFailedOutdoorDiscovery(search, search.preferences[0], "FETCH_FAILED")).toBe(false);
+    expect(mocked.ensure).not.toHaveBeenCalled();
+  });
+  it("reads the terminal receipt without repeating source discovery after the saved cutoff", async () => {
+    const expired = { ...search, createdAt: new Date(Date.now() - 16 * 60_000) };
+    mocked.runnable.mockReturnValue({ isRunnable: false });
+    mocked.ensure.mockResolvedValue({ status: "TIMED_OUT", outcome: "QUEUE_DEADLINE" });
+    expect(await getLearnedAvailability(expired, search.preferences[0])).toMatchObject({ state: "failed", outcome: "QUEUE_DEADLINE" });
+    expect(mocked.refresh).not.toHaveBeenCalled();
+    expect(mocked.execution).not.toHaveBeenCalled();
+  });
+  it("records a verified saved method's empty tee sheet as typed provider proof", async () => {
+    const observedAt = new Date();
+    mocked.activeRecipe.mockResolvedValue({ record: { id: "recipe-1" } });
+    mocked.execution.mockResolvedValue({ state: "ready", jobId: "execution-1", recipeId: "recipe-1",
+      result: { status: "EMPTY", complete: true, slots: [], observedAt: observedAt.toISOString(),
+        sourceUrl: "https://example.org/times", evidence: { recipeHash: "hash-1" } } });
+    mocked.success.mockReturnValue(true);
+    mocked.recordMonitoringSuccess.mockResolvedValue({ sourceEvidenceAccepted: true });
+    mocked.commitMatches.mockResolvedValue({ sourceEvidenceAccepted: true, persistedMatchStates: [] });
+    const lease = { token: "lease-1", searchId: search.id, scheduleVersion: 0, expiresAt: new Date(Date.now() + 60_000) };
+
+    expect(await checkLearnedOutdoor(search, search.preferences[0], "run-1", lease)).toMatchObject({ outcome: "NO_MATCH" });
+    const [probe] = mocked.recordProbe.mock.calls.at(-1)!;
+    expect(probe.rawSummary).toMatchObject({ recipeExecutionId: "execution-1", complete: true });
+    expect(getProviderExecutionEvidenceObservedAt({ rawSummary: probe.rawSummary, probeObservedAt: observedAt })).toEqual(observedAt);
     expect(mocked.ensure).not.toHaveBeenCalled();
   });
   it.each(["NO_MATCH", "MATCH_FOUND", "CHECK_PENDING"] as const)("does not admit discovery for an established %s result", async outcome => {

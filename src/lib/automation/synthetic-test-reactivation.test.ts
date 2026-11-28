@@ -106,6 +106,7 @@ describe("explicit synthetic reactivation", () => {
     expect(result.outcome).toBe("queued_for_recovery");
     expect(search).toMatchObject({ status: "ACTIVE", checkStatus: "QUEUED",
       date: new Date("2026-09-09T00:00:00.000Z"), nextCheckAt: now,
+      setupStartedAt: now,
       scheduleVersion: 8, alertGeneration: 4, syntheticMultiCycle: true, trafficClass: "TEST",
       createdAt: original.createdAt, preferences: original.preferences });
     expect(mocks.deliveryLock).toHaveBeenCalledWith(tx, { searchId: input.searchId, userId: original.userId, now });

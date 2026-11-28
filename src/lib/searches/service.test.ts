@@ -83,6 +83,7 @@ const currentCourseSettings = {
 };
 function currentSearchSettings(courseIds = ["course-1"]) {
   return {
+    createdAt: new Date("2026-07-01T11:49:00Z"),
     date: new Date("2026-08-31T00:00:00.000Z"),
     startTime: "09:00",
     endTime: "18:00",
@@ -187,8 +188,9 @@ describe("listTeeSearchesForUser", () => {
   it("bounds discovery status reads to twenty-five active selected targets and skips inactive history", async () => {
     const searches = Array.from({ length: 6 }, (_, index) => ({
       id: `search-${index}`, status: "ACTIVE", alertGeneration: 0, mode: "OUTDOOR", durationMinutes: null,
-      createdAt: new Date("2026-06-30T00:00:00Z"), statusEmailSnapshot: null, matches: [],
+      statusEmailSnapshot: null, matches: [],
       ...currentSearchSettings(Array.from({ length: 5 }, (_, target) => `course-${index}-${target}`)),
+      createdAt: new Date("2026-06-30T00:00:00Z"),
     })).map(search => ({ ...search, preferences: search.preferences.map(preference => ({ ...preference,
       id: `pref-${preference.course.id}`, courseId: preference.course.id, offeringId: null, offering: null })) }));
     mockedPrisma.teeSearch.findMany.mockResolvedValue(searches as never);
@@ -211,10 +213,10 @@ describe("listTeeSearchesForUser", () => {
     };
     const storedSearch = {
       id: "search-1", status: "PAUSED", alertGeneration: 3,
+      ...currentSearchSettings(), matches: [],
       createdAt: new Date("2026-09-30T03:21:52.387Z"),
       statusEmailSnapshot: { schemaVersion: 1, kind: "ALERT_GENERATION_START", alertGeneration: 3, generationStartedAt: "2026-09-30T03:51:32.423Z" },
       lastCheckedAt: new Date("2026-09-30T03:31:59.691Z"), lastCheckOutcome: "MATCH_FOUND",
-      ...currentSearchSettings(), matches: [],
     };
     mockedPrisma.teeSearch.findMany.mockResolvedValue([storedSearch] as never);
     mockedPrisma.$queryRaw.mockResolvedValue([{ id: "old-probe" }] as never);
@@ -229,6 +231,28 @@ describe("listTeeSearchesForUser", () => {
     expect(storedSearch.lastCheckOutcome).toBe("MATCH_FOUND");
     expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
     expect(oldProbe.rawSummary.visibleSlotCount).toBe(17);
+  });
+
+  it("projects earlier same-intent setup proof without exposing prior-generation inventory", async () => {
+    const setupStartedAt = new Date("2026-07-01T11:49:00Z");
+    const observedAt = new Date("2026-07-01T11:50:00Z");
+    const stored = { ...currentSearchSettings(), id: "search-1", mode: "OUTDOOR", status: "ACTIVE", matches: [],
+      alertGeneration: 1, setupStartedAt, lastCheckedAt: observedAt,
+      statusEmailSnapshot: { schemaVersion: 1, kind: "ALERT_GENERATION_START", alertGeneration: 1, generationStartedAt: "2026-07-01T11:59:00Z" },
+      preferences: [{ courseId: "course-1", offeringId: null, course: { id: "course-1", ...currentCourseSettings } }],
+    };
+    const probe = { id: "confirmed-setup", teeSearchId: stored.id, courseId: "course-1", offeringId: null,
+      outcome: "MATCH_FOUND", observedAt, rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK",
+        providerObservedAt: observedAt.toISOString(), visibleSlotCount: 17 } };
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([stored] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([{ id: probe.id }] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([probe] as never);
+    const [projected] = await listTeeSearchesForUser("user-1");
+    expect(projected.preferences[0]).toMatchObject({ setupDeadlineAt: new Date("2026-07-01T12:04:00Z"),
+      setupProbe: { outcome: "MATCH_FOUND", observedAt, rawSummary: null } });
+    expect(projected).toMatchObject({ probes: [], matches: [], lastCheckedAt: null });
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([{ ...stored, setupStartedAt: null }] as never);
+    expect((await listTeeSearchesForUser("user-1"))[0].preferences[0].setupProbe).toBeUndefined();
   });
   it("hides the old date from a paused dashboard search while retaining its durable match", async () => {
     const storedMatch = confirmedDateEditMatch();
@@ -2334,9 +2358,9 @@ describe("updateTeeSearchForUser", () => {
     vi.clearAllMocks();
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
     mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
-    mockedPrisma.teeSearch.findUniqueOrThrow
-      .mockResolvedValueOnce({ id: "search-1" } as never)
-      .mockResolvedValueOnce({ id: "search-1", preferences: [] } as never);
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      ...currentSearchSettings(), mode: "OUTDOOR", durationMinutes: null, preferences: [],
+    } as never);
     mockedPrisma.coursePreference.updateMany.mockResolvedValue({
       count: 1,
     } as never);
@@ -2373,6 +2397,50 @@ describe("updateTeeSearchForUser", () => {
     })).rejects.toThrow("You can keep up to 5 active or paused searches in the queue.");
 
     expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps the setup anchor for a full-form rank, recipient and cadence edit, even though delivery is fenced", async () => {
+    const createdAt = new Date("2026-07-01T11:49:00Z");
+    const criteria = { ...currentSearchSettings(), mode: "OUTDOOR", date: new Date("2026-08-31T11:32:00Z"), durationMinutes: null,
+      preferences: [], createdAt, setupStartedAt: createdAt };
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValue(criteria as never);
+    await updateTeeSearchForUser("user-1", "search-1", {
+      date: "2026-08-31", startTime: "09:00", endTime: "18:00", players: 2,
+      durationMinutes: null, requestedLayoutHoles: null, userTimeZone: "America/Chicago",
+      additionalEmails: ["friend@example.com"], cadenceMinutes: 15,
+      coursePreferences: [{ id: "pref-1", rank: 1 }],
+    });
+    const data = mockedPrisma.teeSearch.update.mock.calls[0][0].data;
+    expect(data).not.toHaveProperty("setupStartedAt");
+    expect(data).toMatchObject({
+      alertGeneration: { increment: 1 }, scheduleVersion: { increment: 1 }, workflowRunId: null, checkLeaseToken: null,
+      statusEmailSnapshot: { alertGeneration: 3, generationStartedAt: new Date().toISOString() },
+    });
+    expect(deliveryOutboxMocks.lockSearchForAlertMutation.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedPrisma.teeSearch.findUniqueOrThrow.mock.invocationCallOrder.at(-1)!,
+    );
+  });
+
+  it("starts a new clock on changed locked criteria and preserves it across pause and resume", async () => {
+    const criteria = { ...currentSearchSettings(), mode: "OUTDOOR", durationMinutes: null, preferences: [] };
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValueOnce({ ...criteria, players: 4 } as never)
+      .mockResolvedValue(criteria as never);
+    await updateTeeSearchForUser("user-1", "search-1", { players: 4 });
+    expect(mockedPrisma.teeSearch.update.mock.calls[0][0].data).toMatchObject({ setupStartedAt: new Date() });
+    await updateTeeSearchForUser("user-1", "search-1", { status: "PAUSED" });
+    vi.setSystemTime(new Date("2026-07-01T13:00:00Z"));
+    await updateTeeSearchForUser("user-1", "search-1", { status: "ACTIVE" });
+    expect(mockedPrisma.teeSearch.update.mock.calls[1][0].data).not.toHaveProperty("setupStartedAt");
+    expect(mockedPrisma.teeSearch.update.mock.calls[2][0].data).not.toHaveProperty("setupStartedAt");
+  });
+
+  it("keeps the first legacy generation's known setup anchor when it is first edited", async () => {
+    const createdAt = new Date("2026-07-01T11:49:00Z");
+    deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({ status: "ACTIVE", alertGeneration: 0 });
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValue({ mode: "OUTDOOR", players: 2,
+      createdAt, setupStartedAt: null } as never);
+    await updateTeeSearchForUser("user-1", "search-1", { additionalEmails: ["friend@example.com"] });
+    expect(mockedPrisma.teeSearch.update.mock.calls[0][0].data).toMatchObject({ setupStartedAt: createdAt });
   });
 
   it("lets a same-day simulator alert save its existing viable window and cadence", async () => {
@@ -2486,6 +2554,7 @@ describe("updateTeeSearchForUser", () => {
       matches: [storedMatch],
     };
     mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      ...currentSearchSettings(),
       preferences: [{ course: { timeZone: "America/New_York" } }],
     } as never);
     deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({ status: "PAUSED", alertGeneration: 2 });
@@ -2508,6 +2577,7 @@ describe("updateTeeSearchForUser", () => {
   it("accepts a future course-local edit after UTC midnight", async () => {
     vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
     mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      ...currentSearchSettings(),
       preferences: [{ course: { timeZone: "America/New_York" } }],
     } as never);
 

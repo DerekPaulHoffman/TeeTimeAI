@@ -50,7 +50,7 @@ import {
   type CurrentMatchSearchSettings,
   type CurrentMatchSettings,
 } from "@/lib/searches/current-match-settings";
-import { projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
+import { getCourseSetupProbe, projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
 import { getCourseSetupDeadline } from "@/lib/searches/course-setup-deadline";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
@@ -143,6 +143,7 @@ export async function createTeeSearchForUser(
     const created = await transaction.teeSearch.create({
       data: {
         userId,
+        setupStartedAt: new Date(),
         date: parseLocalDate(input.date),
         startTime: input.startTime,
         endTime: input.endTime,
@@ -313,6 +314,7 @@ async function createSimulatorTeeSearchForUser(
     const created = await transaction.teeSearch.create({
       data: {
         userId,
+        setupStartedAt: new Date(),
         mode: "SIMULATOR",
         durationMinutes,
         date: parseLocalDate(input.date),
@@ -785,22 +787,26 @@ export async function listTeeSearchesForUser(userId: string) {
     }));
 
     return searches.map((search) => {
+      const probes = probesBySearch.get(search.id) ?? [];
       const current = projectCurrentCustomerMatches(
-        projectCurrentCheckEvidence({
-          ...search,
-          probes: probesBySearch.get(search.id) ?? [],
-        }),
+        projectCurrentCheckEvidence({ ...search, probes }),
         completedLocalReaderSources,
         providerObservationFences,
       );
-      return { ...current, preferences: current.preferences.map(preference => ({
-        ...preference,
-        setupDeadlineAt: getCourseSetupDeadline(search, preference.course.timeZone),
-        discoveryStatus: getDashboardDiscoveryStatus(current, preference,
-          discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null,
-          current.probes.find(probe => probe.courseId === preference.courseId &&
-            (current.mode !== "SIMULATOR" || probe.offeringId === preference.offeringId))),
-      })) };
+      return { ...current, preferences: current.preferences.map(preference => {
+        const matchesTarget = (probe: typeof probes[number]) => probe.courseId === preference.courseId &&
+          (current.mode !== "SIMULATOR" || (probe.offeringId !== null && probe.offeringId === preference.offeringId));
+        const currentProbe = current.probes.find(matchesTarget);
+        const setupProbe = search.status === "ACTIVE" && !currentProbe
+          ? getCourseSetupProbe(search, probes.find(matchesTarget)) : undefined;
+        return {
+          ...preference,
+          setupDeadlineAt: getCourseSetupDeadline(search, preference.course.timeZone),
+          setupProbe,
+          discoveryStatus: getDashboardDiscoveryStatus(current, preference,
+            discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null, currentProbe),
+        };
+      }) };
     });
   });
 }
@@ -908,49 +914,14 @@ export async function updateTeeSearchForUser(
     );
   }
 
-  const buildTeeSearchData = (lockedSearch: {
-    status: string;
-    alertGeneration: number;
-  }) => {
-    const nextStatus = input.status ?? lockedSearch.status;
-    const nextAlertGeneration = lockedSearch.alertGeneration + 1;
-    return {
-      scheduleVersion: { increment: 1 } as const,
-      alertGeneration: { increment: 1 } as const,
-      workflowRunId: null,
-      checkLeaseToken: null,
-      checkLeaseExpiresAt: null,
-      recheckRequestedAt: null,
-      ...(nextStatus === "ACTIVE"
-        ? {
-            statusEmailSentAt: null,
-            statusEmailSnapshot: buildAlertGenerationStartMarker({
-              alertGeneration: nextAlertGeneration,
-            }),
-          }
-        : {}),
-      ...(input.date ? { date: parseLocalDate(input.date) } : {}),
-      ...(input.startTime ? { startTime: input.startTime } : {}),
-      ...(input.endTime ? { endTime: input.endTime } : {}),
-      ...(input.userTimeZone
-        ? { userTimeZone: normalizeTimeZone(input.userTimeZone) }
-        : {}),
-      ...(input.players ? { players: input.players } : {}),
-      ...(input.durationMinutes !== undefined ? { durationMinutes: input.durationMinutes } : {}),
-      ...(input.requestedLayoutHoles !== undefined
-        ? { requestedLayoutHoles: input.requestedLayoutHoles }
-        : {}),
-      ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
-      ...(input.alertEmail
-        ? { alertEmail: normalizeAlertEmail(input.alertEmail) }
-        : {}),
-      ...(input.additionalEmails
-        ? {
-            additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
-          }
-        : {}),
-      ...(input.status ? { status: input.status } : {}),
-    };
+  const updatedDate = input.date ? parseLocalDate(input.date) : undefined;
+  const availabilityUpdates = {
+    ...(updatedDate ? { date: updatedDate } : {}),
+    ...(input.startTime ? { startTime: input.startTime } : {}),
+    ...(input.endTime ? { endTime: input.endTime } : {}),
+    ...(input.players ? { players: input.players } : {}),
+    ...(input.durationMinutes !== undefined ? { durationMinutes: input.durationMinutes } : {}),
+    ...(input.requestedLayoutHoles !== undefined ? { requestedLayoutHoles: input.requestedLayoutHoles } : {}),
   };
   const coursePreferences = normalizeCoursePreferenceRankUpdates(
     input.coursePreferences,
@@ -987,26 +958,6 @@ export async function updateTeeSearchForUser(
       durationMinutes, timeZones: current.preferences.flatMap(({ offering }) => offering ? [offering.course.timeZone] : []) });
   }
 
-  if (coursePreferences.length === 0) {
-    return runCustomerProjectionTransaction(async (transaction) => {
-      const lockedSearch = await lockSearchForAlertMutation(transaction, {
-        searchId,
-        userId,
-      });
-      await assertCurrentSimulatorIntent(transaction);
-      await assertUpdatedSearchDate(transaction, userId, searchId, input.date);
-      const updatedSearch = await transaction.teeSearch.update({
-        where: {
-          id: searchId,
-          userId,
-        },
-        data: buildTeeSearchData(lockedSearch),
-        include: searchInclude,
-      });
-      return projectCurrentCustomerSearch(transaction, updatedSearch);
-    });
-  }
-
   return runCustomerProjectionTransaction(async (transaction) => {
     const lockedSearch = await lockSearchForAlertMutation(transaction, {
       searchId,
@@ -1014,6 +965,22 @@ export async function updateTeeSearchForUser(
     });
     await assertCurrentSimulatorIntent(transaction);
     await assertUpdatedSearchDate(transaction, userId, searchId, input.date);
+    // The dashboard sends the full form even for an alert-only edit. Compare
+    // the persisted criteria under the same lock that fences email delivery.
+    const currentCriteria = Object.keys(availabilityUpdates).length === 0 && lockedSearch.alertGeneration !== 0 ? null
+      : await transaction.teeSearch.findUniqueOrThrow({
+        where: { id: searchId, userId },
+        select: { date: true, startTime: true, endTime: true, players: true, durationMinutes: true, requestedLayoutHoles: true,
+          setupStartedAt: true, createdAt: true },
+      });
+    const availabilityChanged = currentCriteria && (
+      (updatedDate !== undefined && input.date !== currentCriteria.date.toISOString().slice(0, 10)) ||
+      (availabilityUpdates.startTime !== undefined && availabilityUpdates.startTime !== currentCriteria.startTime) ||
+      (availabilityUpdates.endTime !== undefined && availabilityUpdates.endTime !== currentCriteria.endTime) ||
+      (availabilityUpdates.players !== undefined && availabilityUpdates.players !== currentCriteria.players) ||
+      (availabilityUpdates.durationMinutes !== undefined && availabilityUpdates.durationMinutes !== currentCriteria.durationMinutes) ||
+      (availabilityUpdates.requestedLayoutHoles !== undefined && availabilityUpdates.requestedLayoutHoles !== currentCriteria.requestedLayoutHoles)
+    );
     for (const [index, preference] of coursePreferences.entries()) {
       await transaction.coursePreference.updateMany({
         where: {
@@ -1032,12 +999,38 @@ export async function updateTeeSearchForUser(
         data: { rank: preference.rank },
       });
     }
+    const updatedAt = new Date();
+    const setupStartedAt = availabilityChanged ? updatedAt
+      : lockedSearch.alertGeneration === 0 && !currentCriteria?.setupStartedAt ? currentCriteria?.createdAt : undefined;
     const updatedSearch = await transaction.teeSearch.update({
       where: {
         id: searchId,
         userId,
       },
-      data: buildTeeSearchData(lockedSearch),
+      data: {
+        ...availabilityUpdates,
+        ...(setupStartedAt ? { setupStartedAt } : {}),
+        scheduleVersion: { increment: 1 },
+        alertGeneration: { increment: 1 },
+        workflowRunId: null,
+        checkLeaseToken: null,
+        checkLeaseExpiresAt: null,
+        recheckRequestedAt: null,
+        ...((input.status ?? lockedSearch.status) === "ACTIVE"
+          ? {
+              statusEmailSentAt: null,
+              statusEmailSnapshot: buildAlertGenerationStartMarker({
+                alertGeneration: lockedSearch.alertGeneration + 1,
+                generationStartedAt: updatedAt,
+              }),
+            }
+          : {}),
+        ...(input.userTimeZone ? { userTimeZone: normalizeTimeZone(input.userTimeZone) } : {}),
+        ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
+        ...(input.alertEmail ? { alertEmail: normalizeAlertEmail(input.alertEmail) } : {}),
+        ...(input.additionalEmails ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) } : {}),
+        ...(input.status ? { status: input.status } : {}),
+      },
       include: searchInclude,
     });
     return projectCurrentCustomerSearch(transaction, updatedSearch);

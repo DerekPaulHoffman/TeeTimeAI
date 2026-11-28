@@ -25,6 +25,15 @@ function fixture(outcome?: string) {
 }
 
 describe("simulator dashboard status", () => {
+  it("keeps setup proof for unchanged criteria and preserves exact-source and current-availability checks", () => {
+    const { probe: setupProbe, ...input } = fixture("MATCH_FOUND");
+    const clock = { ...input, setupDeadlineAt: observedAt };
+    expect(getSimulatorDashboardStatus({ ...clock, setupProbe })).toMatchObject({ kind: "MONITORING", label: "Simulator alerts available" });
+    expect(getSimulatorDashboardStatus({ ...clock, setupProbe,
+      offering: { ...clock.offering, providerMetadata: { location: "different" } } })).toMatchObject({ kind: "UNCONFIRMED" });
+    expect(getSimulatorDashboardStatus({ ...clock, setupProbe, probe: fixture("FETCH_FAILED").probe })).toMatchObject({ kind: "UNCONFIRMED" });
+  });
+
   it.each([undefined, "NEEDS_ADAPTER", "FETCH_FAILED"])("does not promise pending support or retries for terminal discovery over %s", outcome => {
     const input = fixture(outcome);
     const status = getSimulatorDashboardStatus({ ...input,

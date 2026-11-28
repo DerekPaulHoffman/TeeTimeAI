@@ -199,7 +199,7 @@ export async function reactivateSyntheticTestSearch(rawInput: unknown, options: 
         workflowRunId: null, checkLeaseToken: null,
         OR: [{ checkLeaseExpiresAt: null }, { checkLeaseExpiresAt: { lte: now } }] },
       data: { status: "ACTIVE", date: new Date(`${input.date}T00:00:00.000Z`),
-        scheduleVersion, alertGeneration: window.alertGeneration, syntheticTestWindow: window,
+        scheduleVersion, alertGeneration: window.alertGeneration, syntheticTestWindow: window, setupStartedAt: now,
         checkStatus: "QUEUED", nextCheckAt: now, lastCheckOutcome: null,
         workflowRunId: null, checkLeaseToken: null, checkLeaseExpiresAt: null,
         recheckRequestedAt: null, remediationDispatchKey: null, remediationDispatchVersion: null,

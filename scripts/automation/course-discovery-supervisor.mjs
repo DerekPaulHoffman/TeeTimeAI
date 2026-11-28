@@ -25,17 +25,20 @@ function transientModelFailure(error) {
 export function discoveryWorkDeadline(job) {
   const firstPickup = Date.parse(job.firstPickedUpAt);
   const absolute = Date.parse(job.deadlineAt);
-  return Math.min(absolute, (Number.isFinite(firstPickup) ? firstPickup : absolute - 15 * 60_000) + DISCOVERY_WORK_BUDGET_MS);
+  const setupCutoff = job.setupDeadlineAt == null ? Infinity : Date.parse(job.setupDeadlineAt);
+  return Math.min(absolute, setupCutoff, (Number.isFinite(firstPickup) ? firstPickup : absolute - 15 * 60_000) + DISCOVERY_WORK_BUDGET_MS);
 }
 
 export function validateClaimedDiscoveryJob(job, now = Date.now()) {
   const firstPickup = Date.parse(job?.firstPickedUpAt);
   const deadline = Date.parse(job?.deadlineAt);
+  const setupCutoff = job?.setupDeadlineAt == null ? deadline : Date.parse(job.setupDeadlineAt);
   if (!job || typeof job.id !== "string" || !/^[A-Za-z0-9_-]{1,200}$/u.test(job.id) ||
       typeof job.leaseToken !== "string" || job.leaseToken.length < 16 ||
       !Number.isInteger(job.attempts) || job.attempts < 1 || job.attempts > 2 ||
       !Number.isFinite(firstPickup) || !Number.isFinite(deadline) || deadline <= now ||
       deadline <= firstPickup || deadline - firstPickup > 15 * 60_000 || firstPickup > now + DISCOVERY_CLOCK_SKEW_MS ||
+      !Number.isFinite(setupCutoff) || setupCutoff <= Math.max(firstPickup, now) ||
       !job.request?.identity || !job.request?.target || !job.request?.input) {
     throw discoveryError("DISCOVERY_JOB_INVALID");
   }
@@ -97,7 +100,8 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
       if (execution) return;
       timers.clearTimeout(leaseTimer);
       const parsed = Date.parse(expiresAt);
-      entry.leaseExpiresAt = Math.min(Date.parse(job.deadlineAt), Number.isFinite(parsed) ? parsed : now() + 90_000);
+      const setupCutoff = job.setupDeadlineAt == null ? Infinity : Date.parse(job.setupDeadlineAt);
+      entry.leaseExpiresAt = Math.min(Date.parse(job.deadlineAt), setupCutoff, Number.isFinite(parsed) ? parsed : now() + 90_000);
       leaseTimer = timers.setTimeout(() => controller.abort(discoveryError("DISCOVERY_LEASE_EXPIRED")), Math.max(1, entry.leaseExpiresAt - now()));
     };
     renewLocalLease(job.leaseExpiresAt);

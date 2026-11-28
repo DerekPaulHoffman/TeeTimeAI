@@ -270,6 +270,7 @@ function DashboardSearchCard({
     const course = preference.course;
     const isPublicCourse = course.isPublic === true;
     const latestProbe = search.probes.find((probe) => probe.courseId === course.id);
+    const setupProbe = isPublicCourse && course.monitoringStatus?.state === "HEALTHY" ? preference.setupProbe : undefined;
     const bookingWindow = isPublicCourse
       ? getActionableBookingWindowForTargetDate(search.date, course)
       : null;
@@ -280,6 +281,7 @@ function DashboardSearchCard({
       ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(course.bookingMethod);
     const courseStatus = getDashboardCourseStatus({
       windowEnded: notificationWindowEnded(date, search.endTime, [course.timeZone], now),
+      setupConfirmed: Boolean(setupProbe),
       availability: {
         alertStatus: search.status,
         outcome: latestProbe?.outcome,
@@ -304,7 +306,7 @@ function DashboardSearchCard({
         bookingPhone: usesPhoneBooking ? course.bookingPhone ?? course.phone : null,
         automationEligibility: course.automationEligibility,
         automationReason: course.automationReason,
-        latestProbe,
+        latestProbe: latestProbe ?? setupProbe,
         discoveryStatus: preference.discoveryStatus,
         upcomingBookingWindow,
         monitoringState: course.monitoringStatus?.state ?? null,
@@ -813,7 +815,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
     const probe = search.probes.find(observation => observation.offeringId === offering?.id);
     const venueMatches = [...new Map(matches.filter(match => match.offeringId === offering?.id).map(match =>
       [[match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
-    const status = getSimulatorDashboardStatus({ offering, probe, currentMatchCount: venueMatches.length,
+    const status = getSimulatorDashboardStatus({ offering, probe, setupProbe: preference.setupProbe, currentMatchCount: venueMatches.length,
       alertStatus: search.status, windowEnded: notificationWindowEnded(date, search.endTime, [preference.course.timeZone], now),
       website: preference.course.website, now, discoveryStatus: preference.discoveryStatus,
       setupDeadlineAt: preference.setupDeadlineAt });

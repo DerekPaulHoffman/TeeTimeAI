@@ -51,7 +51,9 @@ expire after 90 seconds. Useful late checks are retained and reported as late,
 not suppressed to make the timing look successful. These budgets do not prove the delivery SLO; the pilot
 must measure discovery, replay, scheduling and delivery together.
 
-The dashboard's setup deadline starts with saved demand or its current accepted generation and ends after fifteen minutes or at the end of the course-local requested window, whichever comes first. A course without a verified result at that point shows that automatic availability could not be confirmed. The hosted one-minute recovery route closes discovery jobs that have waited fifteen minutes in the queue and jobs past their saved execution deadlines. Queue expiry clears the target reservation and leaves the pickup and execution clocks empty. The historical pilot still measures pickup through observed delivery.
+The dashboard uses a setup clock saved with the alert. A change to the requested availability starts a new setup clock. Changes to priority, cadence, or recipients retain it. The setup deadline is fifteen minutes from that clock or the end of the course-local requested window, whichever comes first. A course without verified setup at that point shows that automatic availability could not be confirmed.
+
+Normal discovery admission saves the same deadline with the course or offering job. Queue wait uses that time. The hosted one-minute recovery route closes overdue jobs and releases the target reservation. A job that expires in the queue keeps its pickup clock empty. The worker lease and work budget end by the saved deadline even if the learner picked up late. Legacy jobs retain their recorded pickup clock and the queue-age fallback. Historical pilot reporting still measures pickup through observed delivery. A later verified repair can supply fresh evidence under its own authorization.
 
 Incomplete extraction, challenge pages and unavailable browser capabilities
 remain explicit failures. They cannot create a `NO_MATCH` result. Cancellation,

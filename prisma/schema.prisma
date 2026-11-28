@@ -515,6 +515,7 @@ model CourseDiscoveryJob {
   workerId          String?
   firstPickedUpAt   DateTime?
   deadlineAt        DateTime?
+  setupDeadlineAt   DateTime?
   leaseToken        String?
   leaseExpiresAt    DateTime?
   checkpoint        Json?
@@ -532,6 +533,7 @@ model CourseDiscoveryJob {
   offering          CourseOffering?          @relation(fields: [offeringId], references: [id], onDelete: Cascade)
 
   @@index([status, leaseExpiresAt, createdAt])
+  @@index([status, setupDeadlineAt])
   @@index([targetKey, createdAt])
 }
 
@@ -705,6 +707,7 @@ model TeeSearch {
   checkStatus                    SearchCheckStatus              @default(IDLE)
   scheduleVersion                Int                            @default(0)
   alertGeneration                Int                            @default(0)
+  setupStartedAt                 DateTime?
   workflowRunId                  String?
   checkLeaseToken                String?
   checkLeaseExpiresAt            DateTime?

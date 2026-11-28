@@ -13,9 +13,11 @@ type Outcome = NonNullable<DashboardMonitoringVerdictInput["latestProbe"]>["outc
 function courseStatus(
   outcome?: Outcome,
   availability: Partial<Parameters<typeof getDashboardCourseStatus>[0]["availability"]> = {},
-  monitoring: Partial<DashboardMonitoringVerdictInput> = {}
+  monitoring: Partial<DashboardMonitoringVerdictInput> = {},
+  setupConfirmed = false,
 ) {
   return getDashboardCourseStatus({
+    setupConfirmed,
     availability: {
       alertStatus: "ACTIVE",
       outcome,
@@ -47,6 +49,15 @@ function summary(
 }
 
 describe("dashboard alert summary", () => {
+  it("keeps confirmed setup visible through an alert-only edit without counting current inventory", () => {
+    const setup = courseStatus(undefined, {}, {
+      latestProbe: { outcome: "MATCH_FOUND", observedAt: checkedAt }, monitoringState: "HEALTHY",
+      setupDeadlineAt: checkedAt, now: new Date(checkedAt.getTime() + 60_000),
+    }, true);
+    expect(setup).toMatchObject({ label: "Tee-time alerts available", tone: "available", hasCurrentPublicInventory: false });
+    expect(setup.detail).not.toMatch(/latest check|waiting for the first check|match(es|ing) now/i);
+  });
+
   it("describes an observed public time before the saved window without implying a match", () => {
     const status = courseStatus("NO_MATCH", {
       rawSummary: {

@@ -1,17 +1,20 @@
-import { readAlertGenerationStartedAt } from "@/lib/searches/generation-clock";
 import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 
 export const COURSE_SETUP_TARGET_MS = 15 * 60 * 1000;
 
+type CourseSetupClock = { setupStartedAt?: Date | null; createdAt: Date };
+
+export function readCourseSetupStartedAt(search: CourseSetupClock) {
+  // Older rows cannot distinguish a change to availability criteria from an
+  // alert-only edit. Creation is their earliest durable setup clock.
+  return search.setupStartedAt ?? search.createdAt;
+}
+
 export function getCourseSetupDeadline(
-  search: Parameters<typeof readAlertGenerationStartedAt>[0] & {
-    date: Date;
-    endTime: string;
-  },
+  search: CourseSetupClock & { date: Date; endTime: string },
   timeZone: string,
 ) {
-  // Legacy rows without a generation marker cannot prove a newer start.
-  const startedAt = readAlertGenerationStartedAt(search) ?? search.createdAt;
+  const startedAt = readCourseSetupStartedAt(search);
   const setupDeadline = startedAt.getTime() + COURSE_SETUP_TARGET_MS;
   try {
     const windowEnd = parseCourseLocalWindowEnd(

@@ -97,25 +97,33 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
       name: `Isolated setup fixture ${suffix} ${index}`, latitude: 41, longitude: -73,
       timeZone: "America/New_York", website: "https://course.example.test/", isPublic: true,
     } })));
-    const search = await database.teeSearch.create({ data: {
-      userId: user.id, createdAt: savedAt, date: playDate, startTime: "10:00", endTime: "15:00", players: 2,
-      trafficClass: "TEST", preferences: { create: courses.map((course, index) => ({ courseId: course.id, rank: index + 1 })) },
-    } });
     const { GET } = await import("@/app/api/cron/recover-course-support-verifications/route");
     const { getDiscoverySourceFingerprint, heartbeatDiscoveryJob } = await import("./service");
-    const { listTeeSearchesForUser } = await import("@/lib/searches/service");
+    const { createTeeSearchForUser, listTeeSearchesForUser } = await import("@/lib/searches/service");
     const { getDashboardCourseStatus } = await import("@/lib/searches/dashboard-alert-summary");
 
     vi.stubEnv("CRON_SECRET", `fixture-${suffix}`);
+    const network = vi.fn(async () => { throw new Error("NO_EXTERNAL_REQUESTS"); });
+    vi.stubGlobal("fetch", network);
     try {
+      const search = await createTeeSearchForUser(user.id, {
+        mode: "OUTDOOR", date: playDate.toISOString().slice(0, 10), startTime: "10:00", endTime: "15:00", players: 2,
+        userTimeZone: "America/New_York", cadenceMinutes: 5, additionalEmails: [],
+        courses: courses.map((course, index) => ({ courseId: course.id, name: course.name, latitude: course.latitude,
+          longitude: course.longitude, rank: index + 1 })),
+      }, "TEST", true);
+      expect(search.preferences).toHaveLength(5);
+      // Use persisted times to simulate queue wait while keeping the actual save and read paths.
+      await database.teeSearch.update({ where: { id: search.id }, data: { createdAt: savedAt, setupStartedAt: savedAt } });
       const jobs = await Promise.all([0, 1, 2].map(async index => {
         const course = courses[index];
         return database.courseDiscoveryJob.create({ data: {
           courseId: course.id, targetKey: `course:${course.id}`, activeTargetKey: `course:${course.id}`,
           sourceFingerprint: getDiscoverySourceFingerprint(course),
-          createdAt: index === 2 ? now : savedAt,
-          ...(index === 1 ? { status: "RUNNING", attempts: 1, firstPickedUpAt: savedAt,
-            deadlineAt: deadline, leaseToken: suffix, leaseExpiresAt: deadline } : {}),
+          createdAt: now,
+          ...(index === 2 ? {} : { setupDeadlineAt: deadline }),
+          ...(index === 1 ? { status: "RUNNING", attempts: 1, firstPickedUpAt: new Date(now.getTime() - 14 * 60_000),
+            deadlineAt: new Date(now.getTime() + 60_000), leaseToken: suffix, leaseExpiresAt: new Date(now.getTime() + 60_000) } : {}),
           request: {},
         } });
       }));
@@ -163,14 +171,17 @@ describe.skipIf(!url)("hosted course setup deadlines with isolated Postgres", ()
         ["TIMED_OUT", "QUEUE_DEADLINE"], ["TIMED_OUT", "DEADLINE"], ["QUEUED", null],
       ]);
       expect(activeJobs[0]).toMatchObject({ firstPickedUpAt: null, deadlineAt: null, activeTargetKey: null });
-      expect(activeJobs[1]).toMatchObject({ firstPickedUpAt: savedAt, deadlineAt: deadline, leaseToken: null, activeTargetKey: null });
+      expect(activeJobs[1]).toMatchObject({ firstPickedUpAt: jobs[1].firstPickedUpAt, deadlineAt: jobs[1].deadlineAt,
+        setupDeadlineAt: deadline, leaseToken: null, activeTargetKey: null });
       await expect(heartbeatDiscoveryJob(jobs[1].id, suffix)).rejects.toThrow("Course discovery state changed");
 
       await database.courseProbe.create({ data: { teeSearchId: search.id, courseId: courses[0].id, ...emptyProbe(now) } });
       expect((await rowLabels(now))[0]).toBe("No public times listed");
       expect(await database.searchEmailDelivery.count({ where: { teeSearchId: search.id } })).toBe(0);
+      expect(network).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
       await database.user.delete({ where: { id: user.id } });
       await database.course.deleteMany({ where: { id: { in: courses.map(course => course.id) } } });
     }
